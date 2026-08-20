@@ -1,6 +1,6 @@
 # 二次开发指南
 
-> SaberLab 的技术架构、开发约定与常见坑。更新日志见 [CHANGELOG.md](CHANGELOG.md)。
+> SaberLab 的技术架构、开发约定与常见坑。更新日志见 [CHANGELOG.md](CHANGELOG.md)。本文大部分使用 AI 总结。
 
 ## 1. 项目概览
 
@@ -37,7 +37,7 @@ cd frontend\chro && pnpm build
 | `backend\host.py --acrylic-mode backdrop\|acrylic` | 实验：DWM 背景板（已知客户端灰底限制） |
 
 - 端口 8787，被占自动顺延（8788..8806）；单实例：已有实例则提示退出
-- 关窗 → 优雅退出（uvicorn should_exit，无残留进程）
+- 关窗 → 主动退出（uvicorn should_exit，无残留进程）
 
 ## 4. 目录结构
 
@@ -86,7 +86,7 @@ backend/desktop.py  壁纸路径三级兜底 + 窗口/显示器几何（ctypes�
 host.py 服务线程    初始推送 + 1s 轮询（壁纸 mtime/size、显示器几何变化 → 推送）
 前端 app.js         rAF 每帧读 screenX/Y 自裁切（零 IPC）+ 壁纸预加载换图
 移动遮盖            moved/resized → __saberlabBackdropMoving(true)；1s 无事件 → false
-                    （后端 watchdog + 前端 1.5s 兜底双保险）
+                    （后端 watchdog + 前端 1.5s 兜底）
 ```
 前端契约：`window.__saberlabBackdrop(payload)`（mode=wallpaper/backdrop、monitor、wallpaper_url?v=）、
 `window.__saberlabBackdropMoving(bool)`。浏览器模式（无 `?shell=webview`）完全不启用。
@@ -113,23 +113,11 @@ schema 迁移收敛在 `db/models.py`（新库即建全表，`_migrate` 幂等�
 ```bat
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
-- 黄金夹具 Fixture #001：SECRET BOSS Expert（`tests/test_bsor_parser.py`，2069 notes 全断言）
+- Golden Fixture #001：SECRET BOSS Expert（`tests/test_bsor_parser.py`，2069 notes 全断言）
 - `_tmp/` 探针（可复用）：`probe_transparent.py`/`probe_dwm.py`（毛玻璃能力）、
   `probe_kpi*.py`（KPI/任务卡片样式）、`probe_layout.py`（详情图表高度）、`probe_height.py`
 - `_tmp/shot.ps1` 按窗口标题截图、`_tmp/pngstats.py` numpy 像素统计（无视觉模型时验证 UI 用）
 - 调试注意：窗口模式日志在 run.bat 控制台；`print` 到管道/重定向需 `flush=True`
-
-## 8. 文档索引（others/）
-
-| 文档 | 内容 |
-|---|---|
-| `毛玻璃方案探索.md` | 三方案设计 + 四轮实测结论（pywebview 无真透明、自裁切、移动遮盖） |
-| `毛玻璃ABC实验报告与路线建议.md` | ABC 方案对比 + 新线路 PoC 路线（P0-P5） |
-| `原生毛玻璃可行性研究.md` | 原生路线【放弃】结论 + 若翻案的最小 PoC 步骤 |
-| `bug.md` | ChroViewer 加载卡死（React selectionchange 死循环 + 慢速流式）结案记录 |
-| `bugfix.md` | v1.2 交接报告（bug 修复 + 架构清理 + 独立化） |
-| `ARCHITECTURE_REVIEW.md` | 架构审查报告（P0-P3 全部已实施） |
-| `developrules.md` | 早期配置系统开发规则（已归档） |
 
 ## 9. 常见坑速查
 
