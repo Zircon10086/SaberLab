@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SaberLab · Beat Saber Replay 分析实验室</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app-shell">
+
+  <!-- ============ Header ============ -->
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="header-wordmark"><span class="wm-red">SAB<span class="neon-e">E</span>R</span> <span class="wm-blue">LAB</span></span>
+    </div>
+    <div class="header-right">
+      <div class="header-stat">
+        <span class="v" id="hdr-replays">–</span>
+        <span class="k">已入库 Replay</span>
+      </div>
+      <div class="header-stat">
+        <span class="v" id="hdr-maps">–</span>
+        <span class="k">本地谱面</span>
+      </div>
+      <div class="header-stat">
+        <span class="v" id="hdr-ai">–</span>
+        <span class="k">AI 引擎</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ Sidebar ============ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-section-label">导航</div>
+    <nav id="tabs">
+      <button class="nav-item active" data-tab="overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg>
+        总览
+      </button>
+      <button class="nav-item" data-tab="detail">
+        <svg viewBox="0 0 32 32" fill="none"><g transform="rotate(30, 16, 16)">
+    <!-- 剑刃：单线勾勒，顶部椭圆，底部平直断开，外边缘严格宽 6.5px -->
+    <path d="
+      M 13.5,17 
+      L 13.5,4 
+      A 2.5,3.2 0 0,1 18.5,4 
+      L 18.5,17" 
+      fill="none" 
+      stroke="currentColor" 
+      stroke-width="1.5" 
+      stroke-linecap="square"
+    />
+
+    <!-- 手柄：纯黑实心，顶部平直切角，底边两侧带微圆角，与剑刃外边缘共线 -->
+    <path d="
+      M 12.75,19 
+      L 19.25,19 
+      L 19.25,29.9 
+      A 0.6,0.6 0 0,1 18.65,30.5 
+      L 13.35,30.5 
+      A 0.6,0.6 0 0,1 12.75,29.9 
+      Z" 
+      fill="currentColor" 
+    />
+  </g></svg>
+        Replay 详情
+      </button>
+      <button class="nav-item" data-tab="history">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+        历史
+      </button>
+      <button class="nav-item" data-tab="compare">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M10 19V9"/><path d="M16 19V13"/><path d="M20 19V3"/></svg>
+        对比
+      </button>
+      <button class="nav-item" data-tab="scoresaber">
+        <svg viewBox="0 0 500 500" fill="none">
+  <!-- 1. 外层圆角正方形轮廓 -->
+  <rect 
+    x="25" 
+    y="25" 
+    width="450" 
+    height="450" 
+    rx="95" 
+    ry="95" 
+    fill="none" 
+    stroke="currentColor" 
+    stroke-width="30" 
+    stroke-linejoin="round" 
+  />
+
+  <!-- 2. 核心图形轮廓（透明填充，黑色描边） -->
+  <!-- 顶点：左上(118, 125) -> 右上(382, 125) -> 右侧(382, 150) -> 底部中心(250, 215) -> 左侧(118, 150) -->
+  <polygon 
+    points="118,125 382,125 382,150 250,215 118,150" 
+    fill="none" 
+    stroke="currentColor" 
+    stroke-width="30" 
+    stroke-linejoin="round" 
+    stroke-linecap="round" 
+  />
+</svg>
+
+        ScoreSaber
+      </button>
+      <button class="nav-item" data-tab="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        设置
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="sidebar-footer-status">
+        <span class="status-dot" id="srv-dot"></span>
+        <span id="srv-text">连接中…</span>
+      </div>
+      <div class="sidebar-footer-tagline">本地 Replay · 确定性计算 · AI 解释</div>
+    </div>
+  </aside>
+
+  <!-- ============ Main ============ -->
+  <main class="main-content">
+
+    <!-- ====== 总览 ====== -->
+    <section id="tab-overview" class="tabpane active">
+      <h1 class="page-title">总览</h1>
+      <p class="page-desc">本地 Replay 分析实验室 · 数据全部本地计算</p>
+
+      <div class="kpi-row" id="kpi-row">
+        <div class="kpi" style="--kpi-accent: var(--red)"><div class="kpi-k">REPLAY 总数</div><div class="kpi-v" id="kpi-replays">–</div><div class="kpi-sub" id="kpi-replays-sub">–</div></div>
+        <div class="kpi" style="--kpi-accent: var(--blue)"><div class="kpi-k">本地谱面</div><div class="kpi-v" id="kpi-maps">–</div><div class="kpi-sub" id="kpi-maps-sub">–</div></div>
+        <div class="kpi" id="kpi-task-card" style="--kpi-accent: var(--green)"><div class="kpi-k">任务状态 <span id="kpi-task-spinner" class="spinner kpi-spinner" style="display:none"></span></div><div class="kpi-v" id="kpi-task">空闲</div><div class="kpi-sub" id="kpi-task-sub">无后台任务</div></div>
+        <div class="kpi" style="--kpi-accent: var(--purple)"><div class="kpi-k">AI 引擎</div><div class="kpi-v" id="kpi-ai">–</div><div class="kpi-sub" id="kpi-ai-sub">–</div></div>
+      </div>
+
+      <div class="actions">
+        <button id="btn-refresh-all" class="primary">⚡ 一键刷新</button>
+        <button id="btn-refresh-online" title="仅强制刷新云端数据（星级/PP），本地已分析数据不动">联网重新更新数据</button>
+        <label class="chk"><input type="checkbox" id="chk-run-ai" checked> 生成 AI 报告</label>
+      </div>
+
+      <div class="surface">
+        <div class="surface-title">最近 Replay
+          <button id="btn-goto-search" class="mini icon-btn" style="margin-left:10px">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            搜索
+          </button>
+        </div>
+        <div id="recent-replays" class="day-groups">加载中…</div>
+        <div id="pagination" class="pagination"></div>
+      </div>
+    </section>
+
+    <!-- ====== 详情 ====== -->
+    <section id="tab-detail" class="tabpane">
+      <div id="detail-empty" class="empty">在总览或历史中点击一个 Replay 查看详情。</div>
+      <div class="detail-topbar" id="detail-topbar" style="display:none">
+        <button class="back-btn" id="btn-detail-back">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+          返回
+        </button>
+      </div>
+      <div id="detail-content" class="hidden">
+        <!-- 详情骨架由 app.js 渲染 -->
+      </div>
+    </section>
+
+    <!-- ====== 历史 ====== -->
+    <section id="tab-history" class="tabpane">
+      <h1 class="page-title">历史</h1>
+      <p class="page-desc">全部 Replay 游玩记录</p>
+      <div class="filters">
+        <select id="hist-days">
+          <option value="">全部时间</option>
+          <option value="7">最近 7 天</option>
+          <option value="30">最近 30 天</option>
+        </select>
+        <input id="hist-filter" placeholder="按歌名筛选…" />
+        <button id="btn-hist-refresh" class="mini">刷新</button>
+      </div>
+      <div id="history-list" class="replay-list">加载中…</div>
+    </section>
+
+    <!-- ====== 对比 ====== -->
+    <section id="tab-compare" class="tabpane">
+      <h1 class="page-title">对比</h1>
+      <p class="page-desc">选择两次游玩进行指标对比（B − A）</p>
+      <div class="compare-pick">
+        <div class="surface"><div class="surface-title">Run A</div><select id="cmp-a" size="10"></select></div>
+        <div class="surface"><div class="surface-title">Run B</div><select id="cmp-b" size="10"></select></div>
+      </div>
+      <div class="actions"><button id="btn-compare" class="primary">对比 A vs B（B − A）</button></div>
+      <div id="compare-result"></div>
+    </section>
+
+    <!-- ====== ScoreSaber ====== -->
+    <section id="tab-scoresaber" class="tabpane">
+      <h1 class="page-title">ScoreSaber</h1>
+      <p class="page-desc">玩家档案与成绩交叉验证</p>
+      <div class="actions">
+        <button id="btn-ss-refresh" class="primary">拉取 ScoreSaber 数据</button>
+        <button id="btn-ss-validate">交叉验证本地 Replay</button>
+      </div>
+      <div id="ss-profile" class="surface"></div>
+      <div id="ss-validate" class="surface hidden"></div>
+      <div id="ss-scores" class="surface"></div>
+    </section>
+
+    <!-- ====== 设置 ====== -->
+    <section id="tab-settings" class="tabpane">
+      <h1 class="page-title">设置</h1>
+      <p class="page-desc">配置 SaberLab 运行环境</p>
+
+      <div class="surface">
+        <div class="surface-title">游戏路径
+          <span id="set-root-badge" class="path-badge"></span>
+        </div>
+        <p class="hint" style="margin-bottom:12px">选择 Beat Saber 游戏根目录即可，程序自动寻找谱面、Replay 与 SongCore 相对路径（标准游戏结构下无需手动指定）。选择后自动验证，成功即保存。</p>
+        <div class="path-row">
+          <input id="set-root-input" type="text" placeholder="未选择游戏根目录，点击右侧按钮或手动输入…" spellcheck="false">
+          <button id="btn-set-browse" class="mini primary">选择文件夹…</button>
+        </div>
+        <div id="set-result" class="settings-result"></div>
+      </div>
+
+      <div id="set-form"></div>
+
+      <div class="surface" id="set-storage">
+        <div class="surface-title">SABER LAB 存储管理</div>
+        <p class="hint" style="margin-bottom:12px">清空分析缓存后，重启需要重新计算全部分析数据与 AI 报告。原始 Replay 文件与谱面库不受影响。</p>
+        <div class="storage-actions">
+          <button id="btn-clear-cache" class="danger">删除缓存</button>
+        </div>
+        <div id="clear-result" class="settings-result"></div>
+      </div>
+
+      <div class="actions">
+        <button id="btn-set-save" class="primary">保存全部设置</button>
+        <button id="btn-set-restart" title="游戏路径已即时生效；端口/AI 等设置需重启生效">重启 SABER LAB</button>
+        <span id="set-save-msg" class="hint" style="margin-left:10px"></span>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div id="toast-root" aria-live="polite"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

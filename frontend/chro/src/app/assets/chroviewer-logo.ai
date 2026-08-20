@@ -1,0 +1,186 @@
+%PDF-1.5
+%âãÏÓ
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << /Order [5 0 R] /ON [5 0 R] >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 512 512] /Contents 4 0 R /Resources << /Properties << /MC0 5 0 R >> /Pattern << /PRed 6 0 R /POrange 7 0 R /PYellow 8 0 R /PGreen 9 0 R /PCyan 10 0 R /PBlue 11 0 R >> /ExtGState << /A90 12 0 R /A70 13 0 R /A78 14 0 R >> >> /Group << /S /Transparency /CS /DeviceRGB >> >>
+endobj
+4 0 obj
+<< /Length 1774 >>
+stream
+/OC /MC0 BDC
+q
+1 0 0 -1 0 512 cm
+q
+/A90 gs
+/Pattern cs
+/PRed scn
+88 159 m
+260 74 l
+262.6667 72.6667 264 74 264 78 c
+264 247 l
+264 249.6667 262.6667 251.6667 260 253 c
+116 361 l
+88 347 l
+85.3333 345.6667 84 343.6667 84 341 c
+84 165.44 l
+84 162.7 85.55 160.21 88 159 c
+h
+f
+Q
+q
+/A70 gs
+/Pattern cs
+/POrange scn
+112 176 m
+112 172 114 170 118 168 c
+294.4 90.6 l
+297.0667 89.2667 298.4 90.6 298.4 94.6 c
+298.4 266.4 l
+298.4 269.0667 297.0667 271.0667 294.4 272.4 c
+116 358 l
+h
+f
+Q
+q
+/A70 gs
+/Pattern cs
+/PYellow scn
+152 190 m
+328.8 107.2 l
+331.4667 105.8667 332.8 107.2 332.8 111.2 c
+332.8 285.8 l
+332.8 288.4667 331.4667 290.4667 328.8 291.8 c
+152 377 l
+h
+f
+Q
+q
+/A70 gs
+/Pattern cs
+/PGreen scn
+188 208 m
+363.2 123.8 l
+365.8667 122.4667 367.2 123.8 367.2 127.8 c
+367.2 305.2 l
+367.2 307.8667 365.8667 309.8667 363.2 311.2 c
+188 396 l
+h
+f
+Q
+q
+/A70 gs
+/Pattern cs
+/PCyan scn
+224 227 m
+397.6 140.4 l
+400.2667 139.0667 401.6 140.4 401.6 144.4 c
+401.6 324.6 l
+401.6 327.2667 400.2667 329.2667 397.6 330.6 c
+224 414 l
+h
+f
+Q
+q
+/A78 gs
+/Pattern cs
+/PBlue scn
+259 242.1 m
+261 242.1 263 240.5 266 239 c
+432 157 l
+434.6667 155.6667 436 157 436 161 c
+436 344 l
+436 346.6667 434.6667 348.6667 432 350 c
+266 433 l
+264 434 262 434 260 433 c
+h
+f
+Q
+.066667 .07451 .098039 rg
+155 240 m
+151.6667 238 150 238.6667 150 242 c
+150 320 l
+150 323.3333 151.3333 325.6667 154 327 c
+256 384 l
+258.6667 385.3333 260 387 260 391 c
+260 283 l
+h
+f
+1 1 1 rg
+116 171 m
+113.3333 169.6667 112 171.3333 112 176 c
+112 354 l
+112 357.3333 113.3333 359.6667 116 361 c
+260 433 l
+260 391 l
+260 388.3333 258.6667 386 256 384 c
+154 327 l
+151.3333 325.6667 150 323.3333 150 320 c
+150 242 l
+150 238.6667 151.6667 238 155 240 c
+254 287 l
+258 289 260 287.6667 260 283 c
+260 246 l
+260 242.6667 258.3333 240.3333 255 239 c
+h
+f
+Q
+EMC
+endstream
+endobj
+5 0 obj
+<< /Type /OCG /Name (Layer 1) >>
+endobj
+6 0 obj
+<< /Type /Pattern /PatternType 2 /Matrix [1 0 0 1 0 0] /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [106 370 256 134] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0.286275 0.239216] /C1 [1 0.176471 0.176471] /N 1 >> /Extend [true true] >> >>
+endobj
+7 0 obj
+<< /Type /Pattern /PatternType 2 /Matrix [1 0 0 1 0 0] /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [155 373 279 175] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0.607843 0.152941] /C1 [1 0.709804 0.176471] /N 1 >> /Extend [true true] >> >>
+endobj
+8 0 obj
+<< /Type /Pattern /PatternType 2 /Matrix [1 0 0 1 0 0] /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [179 361 310 165] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0.839216 0.239216] /C1 [0.827451 0.87451 0.270588] /N 1 >> /Extend [true true] >> >>
+endobj
+9 0 obj
+<< /Type /Pattern /PatternType 2 /Matrix [1 0 0 1 0 0] /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [202 348 340 156] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.333333 0.85098 0.647059] /C1 [0.137255 0.776471 0.705882] /N 1 >> /Extend [true true] >> >>
+endobj
+10 0 obj
+<< /Type /Pattern /PatternType 2 /Matrix [1 0 0 1 0 0] /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [225 336 371 145] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.156863 0.784314 0.85098] /C1 [0.086275 0.560784 0.913725] /N 1 >> /Extend [true true] >> >>
+endobj
+11 0 obj
+<< /Type /Pattern /PatternType 2 /Matrix [1 0 0 1 0 0] /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [249 324 402 135] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.12549 0.784314 0.741176] /C1 [0.207843 0.219608 0.909804] /N 1 >> /Extend [true true] >> >>
+endobj
+12 0 obj
+<< /Type /ExtGState /ca .9 >>
+endobj
+13 0 obj
+<< /Type /ExtGState /ca .7 >>
+endobj
+14 0 obj
+<< /Type /ExtGState /ca .78 >>
+endobj
+xref
+0 15
+0000000000 65535 f 
+0000000019 00000 n 
+0000000138 00000 n 
+0000000195 00000 n 
+0000000525 00000 n 
+0000002351 00000 n 
+0000002399 00000 n 
+0000002674 00000 n 
+0000002949 00000 n 
+0000003230 00000 n 
+0000003518 00000 n 
+0000003807 00000 n 
+0000004096 00000 n 
+0000004142 00000 n 
+0000004188 00000 n 
+trailer
+<< /Size 15 /Root 1 0 R >>
+startxref
+4235
+%%EOF

@@ -1,0 +1,22 @@
+[project]
+name = "saberlab"
+version = "1.4.0"
+description = "Beat Saber 本地 Replay 分析实验室（BSOR 解析 + 确定性指标 + AI 解释）"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "numpy>=2.0",
+    "pyyaml>=6.0",
+    "pywebview>=5.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.urls]
+BSOR-Format = "https://github.com/BeatLeader/BS-Open-Replay"
+SongCore = "https://github.com/Goobwabber/SongCore"
+
+[tool.saberlab]
+# 运行: run.bat 或 .venv\Scripts\python.exe backend\main.py

@@ -1,0 +1,28 @@
+# SaberLab 配置模板
+# 用法：复制为 config.yaml 后修改。游戏根目录建议在「设置 → 游戏路径」中
+# 用原生文件夹选择器配置——保存时会自动派生 replay/谱面/SongCore 三项路径。
+game:
+  instance_root: C:\Games\Beat Saber            # ← 改成你的游戏根目录
+  replay_dir: C:/Games/Beat Saber/UserData/BeatLeader/Replays
+  custom_levels_dir: C:/Games/Beat Saber/Beat Saber_Data/CustomLevels
+  songcore_cache: C:/Games/Beat Saber/UserData/SongCore/SongHashData.dat
+player:
+  scoresaber_id: ''                             # 可选：ScoreSaber 玩家 ID（用于星级/pp 同步）
+  player_name_fallback: ''
+analysis:
+  window_seconds: 30.0
+  window_step_seconds: 1.0
+  fatigue_edge_seconds: 30.0
+server:
+  host: 127.0.0.1
+  port: 8787
+ai:
+  provider: deepseek
+  base_url: https://api.deepseek.com/v1
+  model: deepseek-chat
+  api_key_env: DEEPSEEK_API_KEY                # API Key 放在项目根 .env（见 .env.example）
+  temperature: 0.3
+  max_tokens: 2500
+network:
+  proxy: ''
+  timeout_seconds: 30.0

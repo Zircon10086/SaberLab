@@ -1,0 +1,23 @@
+.venv/
+.env
+_tmp/
+_ref/
+_extern/
+# 内部开发文档（不上传公开仓库）
+others/
+data/saberlab.sqlite*
+data/parsed/
+data/raw_replays/
+data/logs/
+reports/
+__pycache__/
+*.pyc
+frontend/chro/node_modules/
+frontend/chro/dist/
+*.corrupt-*
+build/
+dist/
+GitHub_Build/
+config/config.yaml
+*.spec.bak
+_tools/

@@ -1,0 +1,364 @@
+import { ShaderMaterial, Vector2, Vector3, Vector4, type CubeTexture } from 'three';
+
+import type { Rgb } from '../../core/colors';
+import type { FogUniforms } from '../bloomfog/pipeline';
+import type { EnvironmentBakedReflectionProbe } from '../environment/environment-runtime';
+import { OBJECT_VERT } from '../shaders/chunks';
+import {
+  ENVIRONMENT_LIT_FRAG,
+  ENVIRONMENT_LIT_VERT,
+  ENVIRONMENT_UNLIT_FRAG,
+  WATER_LIT_FRAG,
+} from '../shaders/environment-surface-shaders';
+import {
+  linearColor,
+  materialFogUniforms,
+  textureUniforms,
+  type DirectionalLightUniforms,
+  type MaterialFogSettings,
+  type MaterialTexture,
+} from './shared';
+
+export interface EnvironmentLitSettings {
+  ambientMinimalValue: number;
+  nominalDiffuseLevel: Rgb;
+  ambientMultiplier: number;
+  diffuseEnabled: boolean;
+  bothSidesDiffuseMultiplier: number;
+  metallic: number;
+  specularEnabled: boolean;
+  smoothness: number;
+  specularIntensity: number;
+  lightFalloffEnabled: boolean;
+  privatePointLightEnabled: boolean;
+  privatePointLightColor: Rgb;
+  privatePointLightPosition: Rgb;
+  privatePointLightLocal: boolean;
+  privatePointLightIntensity: number;
+  groundFadeEnabled: boolean;
+  groundFadeScale: number;
+  groundFadeOffset: number;
+  distanceDarkeningEnabled: boolean;
+  darkeningScale: number;
+  darkeningIntensity: number;
+  darkeningCenter: Rgb;
+  darkeningDirection: Rgb;
+  vertexColorEnabled: boolean;
+  vertexEmissionEnabled: boolean;
+  vertexEmissionColor: Rgb;
+  vertexEmissionColorAlpha: number;
+  vertexEmissionThreshold: number;
+  vertexEmissionStrength: number;
+  vertexEmissionBloomIntensity: number;
+  vertexEmissionMainEffect: boolean;
+  displacementEnabled: boolean;
+  displacementSpatial: boolean;
+  displacementBidirectional: boolean;
+  displacementStrength: number;
+  displacementAxisMultiplier: Rgb;
+  meshPackingEnabled: boolean;
+  meshPackingId: number;
+  diffuse?: MaterialTexture;
+  albedoMultiplier: number;
+  metalSmoothness?: MaterialTexture;
+  metallicTextureEnabled: boolean;
+  smoothnessTextureSource: 'none' | 'green' | 'greenRoughness' | 'alpha';
+  occlusionEnabled: boolean;
+  occlusionBeforeEmission: boolean;
+  occlusionIntensity: number;
+  occlusionDetail?: MaterialTexture;
+  occlusionDetailEnabled: boolean;
+  occlusionDetailOffset: [number, number];
+  occlusionDetailIntensity: number;
+  normal?: MaterialTexture;
+  normalScale: number;
+  emission?: MaterialTexture;
+  emissionMask?: MaterialTexture;
+  secondaryEmissionMask?: MaterialTexture;
+  emissionMaskSecondaryUvs: boolean;
+  secondaryEmissionMaskSecondaryUvs: boolean;
+  emissionMaskSpeed: Rgb;
+  secondaryEmissionMaskSpeed: Rgb;
+  primaryEmissionGain: number;
+  secondaryEmissionGain: number;
+  reflectionProbe?: CubeTexture;
+  bakedReflectionProbe?: EnvironmentBakedReflectionProbe;
+  reflectionIntensity: number;
+  multiplyReflections: boolean;
+  emissionColor: Rgb;
+  emissionColorAlpha: number;
+  emissionBrightness: number;
+  emissionFogSuppression: number;
+  emissionAlphaSource: 'green' | 'textureAlpha';
+  emissionWhiteBoost: boolean;
+  emissionWhiteBoostMultiplier: number;
+  emissionMainEffect: boolean;
+  emissionBloomIntensity: number;
+  toneMapBeforeEmission: boolean;
+  customTime: 'continuous' | 'song' | 'freeze';
+  songTime?: { value: number };
+  timeOffset: number;
+  fog: MaterialFogSettings;
+}
+
+const EMPTY_PROBE_LIGHT_COLORS = Array.from({ length: 6 }, () => new Vector4());
+const EMPTY_PROBE_VECTOR = new Vector3();
+
+function reflectionProbeUniforms(
+  reflectionProbe: CubeTexture | undefined,
+  bakedReflectionProbe: EnvironmentBakedReflectionProbe | undefined,
+) {
+  return {
+    _ReflectionProbe: { value: bakedReflectionProbe?.textures[0] ?? reflectionProbe },
+    _ReflectionProbe2: { value: bakedReflectionProbe?.textures[1] ?? reflectionProbe },
+    _ReflectionProbePosition: { value: bakedReflectionProbe?.position ?? EMPTY_PROBE_VECTOR },
+    _ReflectionProbeBoxMin: { value: bakedReflectionProbe?.boxMin ?? EMPTY_PROBE_VECTOR },
+    _ReflectionProbeBoxMax: { value: bakedReflectionProbe?.boxMax ?? EMPTY_PROBE_VECTOR },
+    _LightProbeLightBakeId: { value: bakedReflectionProbe?.lightColors ?? EMPTY_PROBE_LIGHT_COLORS },
+  };
+}
+
+export function createWaterLitMaterial(
+  fog: FogUniforms,
+  color: Rgb,
+  colorAlpha: number,
+  normal: MaterialTexture,
+  settings: {
+    normalScale: number;
+    normalScaleVertical: number;
+    normalScrolling: [number, number];
+    metallic: number;
+    reflectionIntensity: number;
+    smoothness: number;
+    fallingFogStartOffset: number;
+    reflectionProbe?: CubeTexture;
+    bakedReflectionProbe?: EnvironmentBakedReflectionProbe;
+    zFade?: { position: number; scale: number };
+    fog: MaterialFogSettings;
+  },
+) {
+  const elapsed = { value: 0 };
+  const defines = { USE_TANGENT: 1 };
+  if (settings.zFade !== undefined) Object.assign(defines, { Z_FADE: 1 });
+  if (settings.bakedReflectionProbe !== undefined) Object.assign(defines, { BAKED_REFLECTION_PROBE: 1 });
+  const material = new ShaderMaterial({
+    defines,
+    vertexShader: ENVIRONMENT_LIT_VERT,
+    fragmentShader: WATER_LIT_FRAG,
+    uniforms: {
+      ...materialFogUniforms(fog, settings.fog),
+      ...textureUniforms('_NormalTexture', normal),
+      _NormalTexScrolling: { value: new Vector2(...settings.normalScrolling) },
+      _NormalScale: { value: settings.normalScale },
+      _NormalScaleVertical: { value: settings.normalScaleVertical },
+      _Metallic: { value: settings.metallic },
+      ...reflectionProbeUniforms(settings.reflectionProbe, settings.bakedReflectionProbe),
+      _ReflectionIntensity: { value: settings.reflectionIntensity },
+      _Smoothness: { value: settings.smoothness },
+      _FallingFogStartOffset: { value: settings.fallingFogStartOffset },
+      _ZFadePosition: { value: settings.zFade?.position ?? 0 },
+      _ZFadeScale: { value: settings.zFade?.scale ?? 1 },
+      _Color: { value: linearColor(color) },
+      _ColorAlpha: { value: colorAlpha },
+      _TimeSeconds: elapsed,
+    },
+  });
+  material.onBeforeRender = () => {
+    elapsed.value = performance.now() * 0.001;
+  };
+  return material;
+}
+
+export function createEnvironmentLitMaterial(
+  fog: FogUniforms,
+  color: Rgb,
+  lights: DirectionalLightUniforms,
+  settings: EnvironmentLitSettings,
+) {
+  const elapsed = { value: 0 };
+  const defines = {};
+  if (settings.vertexColorEnabled || settings.vertexEmissionEnabled) {
+    Object.assign(defines, { USE_VERTEX_COLOR: 1 });
+  }
+  if (settings.vertexEmissionEnabled) Object.assign(defines, { VERTEX_EMISSION: 1 });
+  if (settings.vertexEmissionEnabled && settings.vertexEmissionMainEffect) {
+    Object.assign(defines, { VERTEX_EMISSION_MAIN_EFFECT: 1 });
+  }
+  if (settings.displacementEnabled) Object.assign(defines, { VERTEX_DISPLACEMENT: 1 });
+  if (settings.displacementSpatial) Object.assign(defines, { DISPLACEMENT_SPATIAL: 1 });
+  if (settings.displacementBidirectional) Object.assign(defines, { DISPLACEMENT_BIDIRECTIONAL: 1 });
+  if (settings.meshPackingEnabled) Object.assign(defines, { MESH_PACKING: 1 });
+  if (settings.diffuse !== undefined) Object.assign(defines, { DIFFUSE_TEXTURE: 1 });
+  if (settings.metalSmoothness !== undefined) {
+    Object.assign(defines, { METAL_SMOOTHNESS_TEXTURE: 1 });
+    if (settings.metallicTextureEnabled) Object.assign(defines, { METALLIC_TEXTURE: 1 });
+    if (settings.smoothnessTextureSource !== 'none') Object.assign(defines, { SMOOTHNESS_TEXTURE: 1 });
+    if (settings.smoothnessTextureSource === 'greenRoughness') {
+      Object.assign(defines, { METAL_SMOOTHNESS_GREEN_ROUGHNESS: 1 });
+    }
+    if (settings.smoothnessTextureSource === 'alpha') {
+      Object.assign(defines, { METAL_SMOOTHNESS_ALPHA: 1 });
+    }
+    if (settings.occlusionEnabled) Object.assign(defines, { OCCLUSION: 1 });
+    if (settings.occlusionEnabled && settings.occlusionBeforeEmission) {
+      Object.assign(defines, { OCCLUSION_BEFORE_EMISSION: 1 });
+    }
+  }
+  if (settings.occlusionDetail !== undefined && settings.occlusionDetailEnabled) {
+    Object.assign(defines, { OCCLUSION_DETAIL: 1 });
+  }
+  if (settings.normal !== undefined) Object.assign(defines, { NORMAL_TEXTURE: 1 });
+  if (settings.emission !== undefined) {
+    Object.assign(defines, { EMISSION_TEXTURE: 1 });
+    if (settings.emissionAlphaSource === 'green') Object.assign(defines, { EMISSION_TEXTURE_SIMPLE: 1 });
+    if (settings.emissionWhiteBoost) Object.assign(defines, { EMISSION_WHITE_BOOST: 1 });
+    if (settings.emissionMainEffect) Object.assign(defines, { EMISSION_MAIN_EFFECT: 1 });
+  }
+  if ((settings.emission !== undefined || settings.vertexEmissionEnabled) && settings.toneMapBeforeEmission) {
+    Object.assign(defines, { TONE_MAP_BEFORE_EMISSION: 1 });
+  }
+  if (settings.emissionMask !== undefined) Object.assign(defines, { EMISSION_MASK: 1 });
+  if (settings.secondaryEmissionMask !== undefined) Object.assign(defines, { SECONDARY_EMISSION_MASK: 1 });
+  if (settings.emissionMask !== undefined && settings.emissionMaskSecondaryUvs) {
+    Object.assign(defines, { EMISSION_MASK_SECONDARY_UV: 1, USE_SECONDARY_UV: 1 });
+  }
+  if (settings.secondaryEmissionMask !== undefined && settings.secondaryEmissionMaskSecondaryUvs) {
+    Object.assign(defines, { SECONDARY_EMISSION_MASK_SECONDARY_UV: 1, USE_SECONDARY_UV: 1 });
+  }
+  if (settings.reflectionProbe !== undefined || settings.bakedReflectionProbe !== undefined) {
+    Object.assign(defines, { REFLECTION_PROBE: 1 });
+  }
+  if (settings.bakedReflectionProbe !== undefined) Object.assign(defines, { BAKED_REFLECTION_PROBE: 1 });
+  if (
+    (settings.reflectionProbe !== undefined || settings.bakedReflectionProbe !== undefined) &&
+    settings.multiplyReflections
+  ) {
+    Object.assign(defines, { MULTIPLY_REFLECTIONS: 1 });
+  }
+  if (settings.customTime === 'freeze') Object.assign(defines, { CUSTOM_TIME_FREEZE: 1 });
+  if (settings.customTime === 'song') Object.assign(defines, { CUSTOM_TIME_SONG: 1 });
+  const material = new ShaderMaterial({
+    defines,
+    vertexShader: ENVIRONMENT_LIT_VERT,
+    fragmentShader: ENVIRONMENT_LIT_FRAG,
+    uniforms: {
+      ...materialFogUniforms(fog, settings.fog),
+      _Color: { value: linearColor(color) },
+      _EmissionColor: { value: linearColor(settings.vertexEmissionColor) },
+      _EmissionColorAlpha: { value: settings.vertexEmissionColorAlpha },
+      _VertexEmissionThreshold: { value: settings.vertexEmissionThreshold },
+      _VertexEmissionStrength: { value: settings.vertexEmissionStrength },
+      _VertexEmissionBloomIntensity: {
+        value: settings.vertexEmissionBloomIntensity,
+      },
+      ...textureUniforms('_DiffuseTex', settings.diffuse),
+      _AlbedoMultiplier: { value: settings.albedoMultiplier },
+      ...textureUniforms('_MetalSmoothnessTex', settings.metalSmoothness),
+      _OcclusionIntensity: { value: settings.occlusionIntensity },
+      ...textureUniforms('_DirtDetailTex', settings.occlusionDetail),
+      _OcclusionDetailOffset: {
+        value: new Vector2(...settings.occlusionDetailOffset),
+      },
+      _OcclusionDetailIntensity: { value: settings.occlusionDetailIntensity },
+      ...textureUniforms('_NormalTexture', settings.normal),
+      _NormalScale: { value: settings.normalScale },
+      ...textureUniforms('_EmissionTex', settings.emission),
+      ...textureUniforms('_EmissionMask', settings.emissionMask),
+      ...textureUniforms('_SecondaryEmissionMask', settings.secondaryEmissionMask),
+      _EmissionMaskSpeed: {
+        value: new Vector2(settings.emissionMaskSpeed[0], settings.emissionMaskSpeed[1]),
+      },
+      _SecondaryEmissionMaskSpeed: {
+        value: new Vector2(settings.secondaryEmissionMaskSpeed[0], settings.secondaryEmissionMaskSpeed[1]),
+      },
+      _PrimaryEmissionGain: { value: settings.primaryEmissionGain },
+      _SecondaryEmissionGain: { value: settings.secondaryEmissionGain },
+      ...reflectionProbeUniforms(settings.reflectionProbe, settings.bakedReflectionProbe),
+      _ReflectionIntensity: { value: settings.reflectionIntensity },
+      _EmissionTexColor: { value: linearColor(settings.emissionColor) },
+      _EmissionTexColorAlpha: { value: settings.emissionColorAlpha },
+      _EmissionBrightness: { value: settings.emissionBrightness },
+      _EmissionFogSuppression: { value: settings.emissionFogSuppression },
+      _EmissionTexBloomIntensity: { value: settings.emissionBloomIntensity },
+      _EmissionTexWhiteBoostMultiplier: {
+        value: settings.emissionWhiteBoostMultiplier,
+      },
+      _TimeSeconds: elapsed,
+      _SongTime: settings.songTime ?? { value: 0 },
+      _TimeOffset: { value: settings.timeOffset },
+      _DirectionalLightDirections: lights.directions,
+      _DirectionalLightColors: lights.colors,
+      _DirectionalLightPositions: lights.positions,
+      _DirectionalLightRadii: lights.radii,
+      _AmbientMinimalValue: { value: settings.ambientMinimalValue },
+      _NominalDiffuseLevel: {
+        value: new Vector3(...settings.nominalDiffuseLevel),
+      },
+      _AmbientMultiplier: { value: settings.ambientMultiplier },
+      _DiffuseEnabled: { value: settings.diffuseEnabled ? 1 : 0 },
+      _BothSidesDiffuseMultiplier: {
+        value: settings.bothSidesDiffuseMultiplier,
+      },
+      _Metallic: { value: settings.metallic },
+      _SpecularEnabled: { value: settings.specularEnabled ? 1 : 0 },
+      _Smoothness: { value: settings.smoothness },
+      _SpecularIntensity: { value: settings.specularIntensity },
+      _LightFalloffEnabled: { value: settings.lightFalloffEnabled ? 1 : 0 },
+      _PrivatePointLightEnabled: {
+        value: settings.privatePointLightEnabled ? 1 : 0,
+      },
+      _PrivatePointLightColor: {
+        value: linearColor(settings.privatePointLightColor),
+      },
+      _PrivatePointLightPosition: {
+        value: new Vector3(...settings.privatePointLightPosition),
+      },
+      _PrivatePointLightLocal: {
+        value: settings.privatePointLightLocal ? 1 : 0,
+      },
+      _PrivatePointLightIntensity: {
+        value: settings.privatePointLightIntensity,
+      },
+      _GroundFadeEnabled: { value: settings.groundFadeEnabled ? 1 : 0 },
+      _GroundFadeScale: { value: settings.groundFadeScale },
+      _GroundFadeOffset: { value: settings.groundFadeOffset },
+      _DistanceDarkeningEnabled: {
+        value: settings.distanceDarkeningEnabled ? 1 : 0,
+      },
+      _DarkeningScale: { value: settings.darkeningScale },
+      _DarkeningIntensity: { value: settings.darkeningIntensity },
+      _DarkeningCenter: { value: new Vector3(...settings.darkeningCenter) },
+      _DarkeningDirection: {
+        value: new Vector3(...settings.darkeningDirection),
+      },
+      _DisplacementStrength: { value: settings.displacementStrength },
+      _DisplacementAxisMultiplier: {
+        value: new Vector3(...settings.displacementAxisMultiplier),
+      },
+      _MeshPackingId: { value: settings.meshPackingId },
+    },
+  });
+  if (settings.customTime === 'continuous') {
+    material.onBeforeRender = () => {
+      elapsed.value = performance.now() * 0.001;
+    };
+  }
+  return material;
+}
+
+export function createEnvironmentUnlitMaterial(
+  fog: FogUniforms,
+  color: Rgb,
+  alpha: number,
+  settings: MaterialFogSettings,
+) {
+  return new ShaderMaterial({
+    vertexShader: OBJECT_VERT,
+    fragmentShader: ENVIRONMENT_UNLIT_FRAG,
+    uniforms: {
+      ...materialFogUniforms(fog, settings),
+      _Color: { value: linearColor(color) },
+      _ColorAlpha: { value: alpha },
+    },
+  });
+}
