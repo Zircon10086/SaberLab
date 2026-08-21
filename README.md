@@ -2,7 +2,7 @@
 
 <p><a href="README.md">中文</a> · <a href="README.en.md">English</a></p>
 
-<h1>SaberLab</h1>
+<p><img src="docs/screenshots/saberlab-logo.png" alt="SABER LAB" width="560"></p>
 
 <p><strong>Beat Saber 本地 Replay 分析实验室</strong></p>
 
