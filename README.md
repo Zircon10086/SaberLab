@@ -22,10 +22,6 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 </p>
 
 <p>
-<em>此项目正在快速开发迭代，实际功能可能与图片略有出入。</em>
-</p>
-
-<p>
 <a href="https://github.com/Zircon10086/SaberLab">
 <img src="https://img.shields.io/github/stars/Zircon10086/SaberLab?style=flat&label=%E2%AD%90&color=08C" alt="GitHub stars">
 </a>
@@ -55,6 +51,10 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 <a href="docs/screenshots/chro.png">
 <img src="docs/screenshots/chro.png" alt="ChroViewer 3D 回放" width="720">
 </a>
+</p>
+
+<p>
+<em>此项目正在快速开发迭代，实际功能可能与图片略有出入。</em>
 </p>
 
 </div>
