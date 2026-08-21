@@ -15,7 +15,7 @@
 
 <p><b>Precision-computed</b> reconstruction of every swing —
 accuracy, saber speed, fatigue, and direction changes, plus 3D replay and AI coach reports — all done locally.</p>
-**This project is undergoing rapid development and iteration; the actual functions may differ slightly from the images.**
+This project is undergoing rapid development and iteration; the actual functions may differ slightly from the images
 
 <!-- Screenshots (v1.4.0) -->
 <p>
