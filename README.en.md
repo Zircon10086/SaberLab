@@ -1,29 +1,60 @@
 <div align="center">
 
-<p><a href="README.md">中文</a> · <a href="README.en.md">English</a></p>
-
-<p><img src="docs/screenshots/saberlab-logo-transparent.png" alt="SABER LAB" width="560"></p>
-
-<p><strong>Local Replay Analysis Lab for Beat Saber</strong></p>
-
 <p>
-<a href="https://github.com/Zircon10086/SaberLab"><img src="https://img.shields.io/github/stars/Zircon10086/SaberLab?style=flat&label=%E2%AD%90&color=08C" alt="GitHub stars"></a>
-<a href="https://github.com/Zircon10086/SaberLab/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-2EA44F?style=flat" alt="GPL-3.0-or-later"></a>
-<a href="https://github.com/Zircon10086/SaberLab/releases"><img src="https://img.shields.io/badge/Windows-10%2F11-4493F8?style=flat" alt="Windows"></a>
-<a href="https://github.com/Zircon10086/SaberLab"><img src="https://img.shields.io/badge/Desktop-App-47848F?style=flat" alt="Desktop App"></a>
+<a href="README.md">中文</a> · <a href="README.en.md">English</a>
 </p>
 
-<p><b>Precision-computed</b> reconstruction of every swing —
-accuracy, saber speed, fatigue, and direction changes, plus 3D replay and AI coach reports — all done locally.</p>
-This project is undergoing rapid development and iteration; the actual functions may differ slightly from the images
-
-<!-- Screenshots (v1.4.0) -->
 <p>
-<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="Overview dashboard" width="720"></a>
+<img src="docs/screenshots/saberlab-logo-transparent.png" alt="SABER LAB" width="560">
 </p>
+
+<h1>Why are you losing score?</h1>
+
 <p>
-<a href="docs/screenshots/replay.png"><img src="docs/screenshots/replay.png" alt="Replay detail analysis" width="720"></a>
-<a href="docs/screenshots/chro.png"><img src="docs/screenshots/chro.png" alt="ChroViewer 3D replay" width="720"></a>
+<strong>You only know your score. SaberLab tells you why.</strong>
+</p>
+
+<p>
+<b>Precisely reconstruct every swing.</b><br>
+From accuracy, saber speed, paths, direction changes, and fatigue<br>
+to 3D replay, training experiments, and AI coaching,<br>
+SaberLab shows you exactly where your score is lost — all processed locally.
+</p>
+
+<p>
+<em>SaberLab is under active development. Actual features may differ from the screenshots.</em>
+</p>
+
+<p>
+<a href="https://github.com/Zircon10086/SaberLab">
+<img src="https://img.shields.io/github/stars/Zircon10086/SaberLab?style=flat&label=%E2%AD%90&color=08C" alt="GitHub stars">
+</a>
+<a href="https://github.com/Zircon10086/SaberLab/blob/main/LICENSE">
+<img src="https://img.shields.io/badge/license-GPL--3.0--or--later-2EA44F?style=flat" alt="GPL-3.0-or-later">
+</a>
+<a href="https://github.com/Zircon10086/SaberLab/releases">
+<img src="https://img.shields.io/badge/Windows-10%2F11-4493F8?style=flat" alt="Windows">
+</a>
+<a href="https://github.com/Zircon10086/SaberLab">
+<img src="https://img.shields.io/badge/Desktop-App-47848F?style=flat" alt="Desktop App">
+</a>
+</p>
+
+<!-- Interface previews (real screenshots from v1.4.0) -->
+
+<p>
+<a href="docs/screenshots/overview.png">
+<img src="docs/screenshots/overview.png" alt="Overview Dashboard" width="720">
+</a>
+</p>
+
+<p>
+<a href="docs/screenshots/replay.png">
+<img src="docs/screenshots/replay.png" alt="Replay Analysis" width="720">
+</a>
+<a href="docs/screenshots/chro.png">
+<img src="docs/screenshots/chro.png" alt="ChroViewer 3D Replay" width="720">
+</a>
 </p>
 
 </div>
