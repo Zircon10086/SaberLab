@@ -1,29 +1,60 @@
 <div align="center">
 
-<p><a href="README.md">中文</a> · <a href="README.en.md">English</a></p>
-
-<p><img src="docs/screenshots/saberlab-logo-transparent.png" alt="SABER LAB" width="560"></p>
-
-<p><strong>Beat Saber 本地 Replay 分析实验室</strong></p>
-
 <p>
-<a href="https://github.com/Zircon10086/SaberLab"><img src="https://img.shields.io/github/stars/Zircon10086/SaberLab?style=flat&label=%E2%AD%90&color=08C" alt="GitHub stars"></a>
-<a href="https://github.com/Zircon10086/SaberLab/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-2EA44F?style=flat" alt="GPL-3.0-or-later"></a>
-<a href="https://github.com/Zircon10086/SaberLab/releases"><img src="https://img.shields.io/badge/Windows-10%2F11-4493F8?style=flat" alt="Windows"></a>
-<a href="https://github.com/Zircon10086/SaberLab"><img src="https://img.shields.io/badge/Desktop-App-47848F?style=flat" alt="Desktop App"></a>
+<a href="README.md">中文</a> · <a href="README.en.md">English</a>
 </p>
 
-<b>精准计算</b>还原你的每一次挥刀——
-精度、刀速、疲劳、换向，还有 3D 回放与 AI 教练报告，全部在本地完成。</p>
-**此项目正在快速开发迭代，实际功能可能和图片略有出入。**
+<p>
+<img src="docs/screenshots/saberlab-logo-transparent.png" alt="SABER LAB" width="560">
+</p>
+
+<h1>为什么你总是在丢分？</h1>
+
+<p>
+<strong>你只知道分数，SaberLab 告诉你原因。</strong>
+</p>
+
+<p>
+<b>精准还原你的每一次挥刀。</b><br>
+从精度、刀速、轨迹、换向到疲劳变化，
+再到 3D 回放、训练实验与 AI 教练，<br>
+SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
+</p>
+
+<p>
+<em>此项目正在快速开发迭代，实际功能可能与图片略有出入。</em>
+</p>
+
+<p>
+<a href="https://github.com/Zircon10086/SaberLab">
+<img src="https://img.shields.io/github/stars/Zircon10086/SaberLab?style=flat&label=%E2%AD%90&color=08C" alt="GitHub stars">
+</a>
+<a href="https://github.com/Zircon10086/SaberLab/blob/main/LICENSE">
+<img src="https://img.shields.io/badge/license-GPL--3.0--or--later-2EA44F?style=flat" alt="GPL-3.0-or-later">
+</a>
+<a href="https://github.com/Zircon10086/SaberLab/releases">
+<img src="https://img.shields.io/badge/Windows-10%2F11-4493F8?style=flat" alt="Windows">
+</a>
+<a href="https://github.com/Zircon10086/SaberLab">
+<img src="https://img.shields.io/badge/Desktop-App-47848F?style=flat" alt="Desktop App">
+</a>
+</p>
 
 <!-- 界面预览（v1.4.0 真实截图） -->
+
 <p>
-<a href="docs/screenshots/overview.png"><img src="docs/screenshots/overview.png" alt="总览仪表盘" width="720"></a>
+<a href="docs/screenshots/overview.png">
+<img src="docs/screenshots/overview.png" alt="总览仪表盘" width="720">
+</a>
 </p>
+
 <p>
-<a href="docs/screenshots/replay.png"><img src="docs/screenshots/replay.png" alt="Replay 详情分析" width="720"></a>
-<a href="docs/screenshots/chro.png"><img src="docs/screenshots/chro.png" alt="ChroViewer 3D 回放" width="720"></a>
+<a href="docs/screenshots/replay.png">
+<img src="docs/screenshots/replay.png" alt="Replay 详情分析" width="720">
+</a>
+<a href="docs/screenshots/chro.png">
+<img src="docs/screenshots/chro.png" alt="ChroViewer 3D 回放" width="720">
+</a>
 </p>
 
 </div>
