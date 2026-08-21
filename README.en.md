@@ -22,10 +22,6 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 </p>
 
 <p>
-<em>SaberLab is under active development. Actual features may differ from the screenshots.</em>
-</p>
-
-<p>
 <a href="https://github.com/Zircon10086/SaberLab">
 <img src="https://img.shields.io/github/stars/Zircon10086/SaberLab?style=flat&label=%E2%AD%90&color=08C" alt="GitHub stars">
 </a>
@@ -55,6 +51,10 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 <a href="docs/screenshots/chro.png">
 <img src="docs/screenshots/chro.png" alt="ChroViewer 3D Replay" width="720">
 </a>
+</p>
+
+<p>
+<em>SaberLab is under active development. Actual features may differ from the screenshots.</em>
 </p>
 
 </div>
