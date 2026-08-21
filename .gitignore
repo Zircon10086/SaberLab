@@ -21,3 +21,6 @@ GitHub_Build/
 config/config.yaml
 *.spec.bak
 _tools/
+config/
+packaging/
+tests/
