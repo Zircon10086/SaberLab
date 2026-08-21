@@ -123,14 +123,14 @@ Package with PyInstaller (see `packaging/README.md`):
 
 ## Documentation
 
-- [Changelog](CHANGELOG.md)
-- [Development Guide](DEVELOPMENT.md)
+- [Changelog](CHANGELOG.en.md)
+- [Development Guide](DEVELOPMENT.en.md)
 
 ## License
 
 SaberLab itself is released under **[GPL-3.0-or-later](LICENSE)**.
 
-`frontend/chro/` (the ChroViewer port) is a separate aggregated program that follows the upstream [GPL-2.0](frontend/chro/LICENSE); the modification list is in [MODIFICATIONS.md](frontend/chro/MODIFICATIONS.md).
+`frontend/chro/` (the ChroViewer port) is a separate aggregated program that follows the upstream [GPL-2.0](frontend/chro/LICENSE); the modification list is in [MODIFICATIONS.md](frontend/chro/MODIFICATIONS.en.md).
 
 ## Acknowledgments
 
