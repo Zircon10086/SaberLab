@@ -123,17 +123,11 @@ run-browser.bat         :: 开发模式（系统浏览器）
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-打包（PyInstaller，详见 `packaging/README.md`）：
-
-```bat
-.venv\Scripts\python.exe -m PyInstaller packaging\saberlab.spec
-```
-
 
 ## 文档
 
-- [更新日志](CHANGELOG.md)
-- [二次开发指南](DEVELOPMENT.md)
+- [更新日志](docs/CHANGELOG.md)
+- [二次开发指南](docs/DEVELOPMENT.md)
 
 ## License
 

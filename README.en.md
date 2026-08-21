@@ -115,16 +115,10 @@ Run tests:
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Package with PyInstaller (see `packaging/README.md`):
-
-```bat
-.venv\Scripts\python.exe -m PyInstaller packaging\saberlab.spec
-```
-
 ## Documentation
 
-- [Changelog](CHANGELOG.en.md)
-- [Development Guide](DEVELOPMENT.en.md)
+- [Changelog](docs/CHANGELOG.en.md)
+- [Development Guide](docs/DEVELOPMENT.en.md)
 
 ## License
 
