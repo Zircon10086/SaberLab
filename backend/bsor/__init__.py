@@ -1,8 +1,9 @@
-"""BSOR (Beat Saber Open Replay) 解析包。
+"""BSOR (Beat Saber Open Replay) parsing package.
 
-格式权威来源:
-- https://github.com/BeatLeader/BS-Open-Replay (README 结构说明)
-- 官方 C# 解码器 ReplayDecoder/Replay.cs（本包逐字段对照实现）
+Authoritative format sources:
+- https://github.com/BeatLeader/BS-Open-Replay (README structure description)
+- Official C# decoder ReplayDecoder/Replay.cs (this package is a
+  field-by-field port)
 """
 from .models import (
     Replay, ReplayInfo, NoteEvent, NoteCutInfo, WallEvent,

@@ -36,7 +36,7 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 </a>
 </p>
 
-<!-- Interface previews (real screenshots from v1.4.0) -->
+<!-- Interface previews (real screenshots) -->
 
 <p>
 <a href="docs/screenshots/overview.png">
@@ -66,10 +66,12 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 | Capability | Description |
 | --- | --- |
 | **Local-first** | Reads local BeatLeader `.bsor` replays and local maps; every metric is computed deterministically in Python, and raw replays are always read-only |
-| **Official algorithm** | Faithful port of the official BSOR decoder/scorer — recomputed totals match the recorded score **note for note** |
-| **Standalone window** | Built-in WebView2 window with an acrylic (frosted-glass) background; auto-relocates the port if occupied |
+| **Official algorithm** | Faithful port of the official BSOR decoder/scorer — recomputed totals match the recorded score **note for note** (accuracy curve uses the same formula) |
+| **Note-anchored analysis** | Timeline/fatigue/summaries are anchored to real note events (fixed time windows retired); mid-song density dips faithfully reflect the map layout |
+| **Multilingual** | 简体中文 / English / 日本語 UI switching (language files auto-discovered in Settings); AI reports follow the UI language |
+| **Standalone window** | Built-in WebView2 window with an acrylic (frosted-glass) background and G2 squircle card corners; auto-relocates the port if occupied |
 | **3D replay** | A ChroViewer port rendering maps/replays/environments fully locally, from local data only |
-| **AI coach** | Structured metrics interpreted by an LLM for personalized guidance; rule-based reports still available without AI |
+| **AI coach** | Structured metrics interpreted by an LLM for personalized guidance; can be disabled for rule-based reports (Settings → AI) |
 | **Online sync** | ScoreSaber star/PP cache rooted at local maps, with 429 rate-limit backoff and retry |
 | **Completion status** | Automatically detects mid-play exits / NF (Fail) / duration fallback — clear at a glance in lists and details |
 
@@ -81,7 +83,7 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 
 | File | Description | Size |
 | --- | --- | --- |
-| [SaberLab-v1.4.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v1.4.0/SaberLab-v1.4.0-win64.zip) | **User edition**: all dependencies bundled (Python runtime + chro 3D viewer). Unzip and double-click to run | ~45 MB |
+| [SaberLab-v1.5.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v1.5.0/SaberLab-v1.5.0-win64.zip) | **User edition**: all dependencies bundled (Python runtime + chro 3D viewer). Unzip and double-click to run | ~45 MB |
 | [Source (saberlab-src)](https://github.com/Zircon10086/SaberLab) | **Developer edition**: repository source; install dependencies yourself as described under "Build from Source" | — |
 
 > Older versions are available on the [Releases page](https://github.com/Zircon10086/SaberLab/releases).

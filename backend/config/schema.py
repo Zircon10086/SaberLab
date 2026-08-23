@@ -1,17 +1,19 @@
-"""配置项 Schema（developrules.md §3）。
+"""Config item Schema (developrules.md §3).
 
-每个配置项元数据包含：key / label / type / description /
-restart_required / required / sensitive / group / enum / default。
-前端据此动态生成设置 UI（§9），后端据此校验与读写。
+Each config item's metadata contains: key / label / type / description /
+restart_required / required / sensitive / group / enum / default.
+The frontend dynamically generates the settings UI from this (§9); the backend
+validates and reads/writes against it.
 """
 from __future__ import annotations
 
-# type 集合：
+# type set:
 #   string / integer / float / boolean / enum / directory / file / url / secret
 
 SETTINGS_SCHEMA: list[dict] = [
-    # ---------- 路径（hidden：设置页由"游戏路径"卡片接管，仅选择根目录，
-    # 后三项由根目录确定性派生，标准 Beat Saber 结构下无需手动指定） ----------
+    # ---------- paths (hidden: the settings page uses the "game path" card instead;
+    # only the root directory is chosen, the other three are deterministically derived
+    # from it and need no manual entry under a standard Beat Saber layout) ----------
     {
         "key": "game.instance_root",
         "label": "游戏根目录",
@@ -57,7 +59,7 @@ SETTINGS_SCHEMA: list[dict] = [
         "hidden": True,
     },
 
-    # ---------- 玩家 ----------
+    # ---------- player ----------
     {
         "key": "player.scoresaber_id",
         "label": "ScoreSaber ID",
@@ -80,28 +82,41 @@ SETTINGS_SCHEMA: list[dict] = [
         "group": "玩家",
     },
 
-    # ---------- 分析 ----------
+    # ---------- analysis ----------
     {
         "key": "analysis.window_seconds",
         "label": "时间窗口（秒）",
         "type": "float",
-        "description": "时间序列分析的窗口宽度",
+        "description": "（已弃用）固定时间窗口宽度。分析已改为按 note 事件锚定（per-note 曲线 + note 分组斜率），此项不再参与任何计算；保留仅为兼容旧 config.yaml",
         "restart_required": False,
         "required": False,
         "sensitive": False,
         "group": "分析",
         "default": 30.0,
+        "hidden": True,
     },
     {
         "key": "analysis.window_step_seconds",
         "label": "采样步长（秒）",
         "type": "float",
-        "description": "时间序列采样间隔（1s = 每秒一个点）",
+        "description": "（已弃用）固定时间窗口采样步长。分析已改为按 note 事件锚定，此项不再参与任何计算；保留仅为兼容旧 config.yaml",
         "restart_required": False,
         "required": False,
         "sensitive": False,
         "group": "分析",
         "default": 1.0,
+        "hidden": True,
+    },
+    {
+        "key": "analysis.slope_group_notes",
+        "label": "斜率分组大小（note）",
+        "type": "integer",
+        "description": "疲劳斜率与 AI 时间摘要的分组粒度：每 N 个 note 聚合为一组（组内中位时间为横轴锚点），再对全曲各组线性拟合得到每分钟变化斜率。组越小对局部波动越敏感但噪声越大，组越大趋势越平滑——两者结论可能不同，请按谱面密度选择：高速谱可调小（如 30），稀疏谱可调大（如 100）。默认 50（约 10-15 秒的方块量）",
+        "restart_required": False,
+        "required": False,
+        "sensitive": False,
+        "group": "分析",
+        "default": 50,
     },
     {
         "key": "analysis.fatigue_edge_seconds",
@@ -115,7 +130,7 @@ SETTINGS_SCHEMA: list[dict] = [
         "default": 30.0,
     },
 
-    # ---------- 服务器 ----------
+    # ---------- server ----------
     {
         "key": "server.host",
         "label": "监听地址",
@@ -205,8 +220,19 @@ SETTINGS_SCHEMA: list[dict] = [
         "group": "AI",
         "default": 2500,
     },
+    {
+        "key": "ai.ai_report_enabled",
+        "label": "使用 AI 生成报告",
+        "type": "boolean",
+        "description": "勾选后生成报告时调用 LLM（需配置 API key）；不勾选则使用确定性规则报告（不调用 AI，节省额度）",
+        "restart_required": False,
+        "required": False,
+        "sensitive": False,
+        "group": "AI",
+        "default": True,
+    },
 
-    # ---------- 网络 ----------
+    # ---------- network ----------
     {
         "key": "network.proxy",
         "label": "代理",
@@ -236,7 +262,7 @@ def get_schema() -> list[dict]:
 
 
 def get_group_order() -> list[str]:
-    """分组展示顺序。"""
+    """Group display order."""
     order = []
     for item in SETTINGS_SCHEMA:
         g = item.get("group")

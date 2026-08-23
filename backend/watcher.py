@@ -1,7 +1,8 @@
-"""Replay 发现与分析管线（设计文档 §7）。
+"""Replay discovery and analysis pipeline (design doc §7).
 
-MVP 策略：点击“开始分析”时扫描 Replay 目录，按 size/mtime/sha256 去重，
-等待文件写入稳定后解析。不常驻高频监听（watchdog 为后续可选项）。
+MVP strategy: when "Start Analysis" is clicked, scan the Replay directory,
+deduplicate by size/mtime/sha256, and parse only after the file write has
+settled. No resident high-frequency watcher (watchdog is a later option).
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ def _now() -> str:
 
 
 def wait_stable(path: pathlib.Path, checks: int = 2, interval: float = 0.5) -> bool:
-    """文件写入稳定判断（§7.3）：连续两次 size/mtime 不变。"""
+    """File-write stability check (§7.3): two consecutive size/mtime readings unchanged."""
     last = None
     for _ in range(checks + 1):
         try:
@@ -41,10 +42,13 @@ def wait_stable(path: pathlib.Path, checks: int = 2, interval: float = 0.5) -> b
 
 
 def _wait_stable_if_fresh(p: pathlib.Path, max_age: float = 5.0) -> bool:
-    """存量文件（mtime 距今 > max_age 秒）直接视为稳定，零等待。
+    """Existing files (mtime older than max_age seconds) are treated as stable
+    with zero waiting.
 
-    分层分析场景：批量入库 300+ 存量文件时 wait_stable 每次至少 0.5s，
-    会拖慢到分钟级；只有刚写入的文件才需要等待防读半截。
+    Layered-analysis scenario: when bulk-ingesting 300+ existing files,
+    wait_stable costs at least 0.5s each and would slow the batch down to
+    minutes; only freshly written files need waiting, to avoid reading a
+    half-written file.
     """
     try:
         age = time.time() - p.stat().st_mtime
@@ -62,12 +66,12 @@ class ReplayPipeline:
         self.resolver = resolver
 
     def update_config(self, cfg: Config) -> None:
-        """配置热更新（设置页保存后调用，路径类配置即时生效，无需重启）。"""
+        """Hot config update (called after saving settings; path-type settings take effect immediately, no restart needed)."""
         self.cfg = cfg
 
     # ---------- scan ----------
     def scan(self) -> dict:
-        """扫描 Replay 目录，返回新/变更文件列表（不解析）。"""
+        """Scan the Replay directory and return the list of new/changed files (no parsing)."""
         replay_dir = pathlib.Path(self.cfg.replay_dir)
         out = {"replay_dir": str(replay_dir), "exists": replay_dir.exists(),
                "total_files": 0, "new": [], "changed": []}
@@ -96,8 +100,8 @@ class ReplayPipeline:
     # ---------- single file ----------
     def process_file(self, path: str, run_ai: bool = False,
                      ai_client=None, build_context=None,
-                     force: bool = False) -> dict:
-        """解析 + 匹配谱面 + 分析 + 落库。force=True 时忽略已分析去重。"""
+                     force: bool = False, lang: str = "zh-CN") -> dict:
+        """Parse + match map + analyze + persist. With force=True, skip the already-analyzed dedup."""
         p = pathlib.Path(path)
         if not p.exists():
             return {"status": "error", "error": f"文件不存在: {path}"}
@@ -119,27 +123,29 @@ class ReplayPipeline:
                     "song_name": existing.get("song_name"),
                     "error": "该 Replay 已分析过（按内容 sha256 去重）"}
 
-        # 谱面匹配
+        # Map matching
         map_row = None
         map_status = "not_found"
         if replay.info.map_hash:
             map_row = self.resolver.resolve(replay.info.map_hash)
             if map_row:
                 map_status = "matched"
-                # Ranked 元数据统一由「谱面同步任务」负责（scoresaber_leaderboards 表），
-                # 此处不联网，避免拖慢 replay 分析（by-id 请求 ~44s）。
+                # Ranked metadata is handled centrally by the "map sync task"
+                # (scoresaber_leaderboards table); no network call here so
+                # replay analysis is not slowed down (by-id request ~44s).
 
-        # Profile 绑定（controller offset 来自 Replay metadata，source of truth §14）
+        # Profile binding (controller offset comes from Replay metadata, source of truth §14)
         profile_id = None
         if replay.controller_offsets is not None:
             profile_id = self._ensure_profile(replay)
 
-        # 文件名 exit 标记：BeatLeader 命名 <player_id>-exit-<song>-<diff>-...
-        # 游戏侧权威信息，中途退出明确标记；用于完成度判定（优先级最高）
+        # Filename exit marker: BeatLeader names files <player_id>-exit-<song>-<diff>-...
+        # Authoritative game-side info; an early quit is explicitly marked.
+        # Used for completion judgment (highest priority).
         filename_exit = "-exit-" in p.name or (
             p.name.split("-")[1] == "exit" if len(p.name.split("-")) > 1 else False)
 
-        # 分析
+        # Analysis
         result = analyze_replay(replay, self.cfg, self.repo, save=True,
                                 filename_exit=filename_exit)
         summary = result["summary"]
@@ -216,24 +222,26 @@ class ReplayPipeline:
             "profile_id": profile_id,
         }
 
-        # AI 报告（可选）
+        # AI report (optional)
         if run_ai and ai_client is not None and build_context is not None:
             try:
                 from .ai import run_ai_report
-                rep = run_ai_report(self.repo, self.cfg, rid, ai_client, build_context)
+                rep = run_ai_report(self.repo, self.cfg, rid, ai_client,
+                                    build_context, lang=lang)
                 out["ai_report"] = {"status": rep.get("status"),
                                     "report_id": rep.get("report_id")}
             except Exception as e:  # noqa: BLE001
                 out["ai_report"] = {"status": "error", "error": str(e)}
         return out
 
-    # ---------- layered ingest（分层分析策略 §分析策略）----------
+    # ---------- layered ingest (layered analysis strategy §analysis-strategy) ----------
     def ingest_file(self, path: str, force: bool = False) -> dict:
-        """轻量入库（元数据快照）：只解析 info section（~5ms/文件）。
+        """Lightweight ingest (metadata snapshot): only parse the info section (~5ms/file).
 
-        列表/搜索/历史立即可用；完整分析（motion/windows/fatigue ~0.5s）
-        延迟到详情页懒触发（analyze_ingested）或后台预计算（analyze_all_new）。
-        状态机：analysis_status pending -> analyzed；status parsed -> analyzed。
+        Lists/search/history become available immediately; full analysis
+        (motion/windows/fatigue ~0.5s) is deferred to the detail-page lazy
+        trigger (analyze_ingested) or background precompute (analyze_all_new).
+        State machine: analysis_status pending -> analyzed; status parsed -> analyzed.
         """
         p = pathlib.Path(path)
         if not p.exists():
@@ -255,8 +263,9 @@ class ReplayPipeline:
                     "song_name": existing.get("song_name"),
                     "error": "该 Replay 已分析过（按内容 sha256 去重）"}
 
-        # 谱面匹配（纯本地 DB 查询，不触发全量 scan——那是重型操作，留给
-        # 「重扫谱面库」或完整分析。分层原则：ingest 是秒级快速路径）
+        # Map matching (pure local DB query; does not trigger a full scan —
+        # that is a heavy operation left to "rescan map library" or full
+        # analysis. Layering principle: ingest is a second-scale fast path.)
         map_row = None
         map_status = "not_found"
         if replay.info.map_hash:
@@ -264,9 +273,11 @@ class ReplayPipeline:
             if map_row:
                 map_status = "matched"
 
-        # 文件名 exit 标记：元数据即可判定的完成度（优先级最高）。
-        # 三态补全：Replay 只有通关/exit/fail 三种标签——exit 与 fail 都不存在
-        # 即视为顺利通关（completed）；analyze 时若时长 <98% 会修正为 incomplete。
+        # Filename exit marker: completion decidable from metadata alone
+        # (highest priority).
+        # Three-state completion: replays only carry win/exit/fail tags — when
+        # neither exit nor fail is present it counts as completed; during
+        # analyze, a duration <98% is corrected to incomplete.
         filename_exit = "-exit-" in p.name or (
             p.name.split("-")[1] == "exit" if len(p.name.split("-")) > 1 else False)
         info = replay.info
@@ -310,7 +321,7 @@ class ReplayPipeline:
             "speed": info.speed,
             "won": 1 if info.won else 0,
             "completion_status": completion,
-            "analysis_version": None,   # 未完整分析，保持 NULL
+            "analysis_version": None,   # not fully analyzed, keep NULL
             "status": "parsed",
             "analysis_status": "pending",
             "error_message": None,
@@ -323,8 +334,9 @@ class ReplayPipeline:
                 "completion_status": completion, "score": info.score}
 
     def analyze_ingested(self, replay_id: str, run_ai: bool = False,
-                         ai_client=None, build_context=None) -> dict:
-        """对已入库（pending）的 Replay 做完整分析（详情页懒触发）。幂等。"""
+                         ai_client=None, build_context=None,
+                         lang: str = "zh-CN") -> dict:
+        """Full analysis of an already-ingested (pending) Replay (lazy trigger from the detail page). Idempotent."""
         row = self.repo.get_replay(replay_id)
         if not row:
             return {"status": "error", "error": f"Replay 不在库中: {replay_id}",
@@ -333,10 +345,12 @@ class ReplayPipeline:
         if not path or not pathlib.Path(path).exists():
             return {"status": "error", "error": "原始 .bsor 文件已不存在",
                     "replay_id": replay_id}
-        # 不传 force：pending 快照会被分析覆盖；已 analyzed 时 process_file 内部
-        # 按内容去重直接返回（幂等，详情页反复打开不重复计算）
+        # No force: a pending snapshot is overwritten by the analysis; when
+        # already analyzed, process_file returns early via content dedup
+        # (idempotent — repeatedly opening the detail page never recomputes).
         return self.process_file(path, run_ai=run_ai, ai_client=ai_client,
-                                 build_context=build_context, force=False)
+                                 build_context=build_context, force=False,
+                                 lang=lang)
 
     def _ensure_profile(self, replay) -> Optional[str]:
         co = replay.controller_offsets
@@ -369,13 +383,14 @@ class ReplayPipeline:
 
     # ---------- batch ----------
     def analyze_latest(self, run_ai: bool = False, ai_client=None,
-                       build_context=None) -> dict:
-        """设计文档 §18：扫描 -> 挑最新未分析 -> 解析 -> 分析 -> 报告。"""
+                       build_context=None, lang: str = "zh-CN") -> dict:
+        """Design doc §18: scan -> pick newest unanalyzed -> parse -> analyze -> report."""
         scan = self.scan()
         if not scan["exists"]:
             return {"status": "error", "error": f"Replay 目录不存在: {scan['replay_dir']}"}
         candidates = scan["new"] + scan["changed"]
-        # 已入库但 pending 的也算候选（打歌后先 ingest 再点「分析最新」的场景）
+        # Already-ingested but pending entries also count as candidates (the
+        # scenario of ingesting after a play, then clicking "Analyze Latest")
         for r in self.repo.list_pending_replays(limit=50):
             p = r.get("file_path")
             if p:
@@ -390,22 +405,24 @@ class ReplayPipeline:
         candidates.sort(key=lambda c: c["mtime"], reverse=True)
         target = candidates[0]
         res = self.process_file(target["path"], run_ai=run_ai,
-                                ai_client=ai_client, build_context=build_context)
+                                ai_client=ai_client, build_context=build_context,
+                                lang=lang)
         res["pending_remaining"] = len(candidates) - 1
         res["total_files"] = scan["total_files"]
         return res
 
     def analyze_all_new(self, progress_cb=None, limit: int = 0,
                         run_ai: bool = False, ai_client=None,
-                        build_context=None) -> list[dict]:
-        """后台预计算：分析 scan 新发现文件 + 已入库但 pending 的全部 Replay。"""
+                        build_context=None, lang: str = "zh-CN") -> list[dict]:
+        """Background precompute: analyze files newly found by scan + all ingested-but-pending replays."""
         scan = self.scan()
         candidates = scan["new"] + scan["changed"]
-        # 补充已入库未分析（pending）的条目——后台预计算的核心目标
+        # Also add ingested-but-unanalyzed (pending) entries — the core target
+        # of background precompute
         for r in self.repo.list_pending_replays():
             if r.get("file_path"):
                 candidates.append({"path": r["file_path"]})
-        # 去重（同一文件可能既 changed 又 pending）
+        # Dedup (the same file may be both changed and pending)
         seen: set[str] = set()
         uniq = []
         for c in candidates:
@@ -422,14 +439,16 @@ class ReplayPipeline:
                 progress_cb(i + 1, len(candidates), pathlib.Path(c["path"]).name)
             results.append(self.process_file(c["path"], run_ai=run_ai,
                                              ai_client=ai_client,
-                                             build_context=build_context))
+                                             build_context=build_context,
+                                             lang=lang))
         return results
 
     def ingest_all_new(self, progress_cb=None, limit: int = 0) -> list[dict]:
-        """批量轻量入库（场景一：首次使用/清库后）。
+        """Batch lightweight ingest (scenario 1: first use / after clearing the DB).
 
-        scan -> 对全部新/变更文件做元数据快照（秒级），
-        完整分析留给详情懒触发或 /api/analyze/all 后台预计算。
+        scan -> metadata snapshot of all new/changed files (second-scale);
+        full analysis is left to the detail-page lazy trigger or the
+        /api/analyze/all background precompute.
         """
         scan = self.scan()
         candidates = scan["new"] + scan["changed"]

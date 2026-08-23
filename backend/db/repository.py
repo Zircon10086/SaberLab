@@ -1,4 +1,4 @@
-"""SQLite 访问层。每个操作独立连接，避免跨线程问题（本地规模下开销可忽略）。"""
+"""SQLite access layer. Each operation opens its own connection to avoid cross-thread issues (the overhead is negligible at local scale)."""
 from __future__ import annotations
 
 import json
@@ -19,10 +19,31 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return {k: row[k] for k in row.keys()}
 
 
-class _ConnCtx:
-    """sqlite3.Connection 的 with 包装：退出时提交/回滚并真正 close。
+def _moving_average(values: list[float], window: int = 5) -> list[float]:
+    """Centered moving average (shrinking window at the edges; no padding copy, to avoid edge bias).
 
-    （sqlite3 自带的 __exit__ 只处理事务，不关闭连接。）
+    When there are not enough points in the window, the available range is used
+    (the window tapers over the first/last window//2 points), which is more
+    neutral than edge padding; an empty list returns empty.
+    """
+    if not values:
+        return []
+    w = max(1, int(window))
+    half = w // 2
+    n = len(values)
+    out: list[float] = []
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        seg = values[lo:hi]
+        out.append(round(sum(seg) / len(seg), 4))
+    return out
+
+
+class _ConnCtx:
+    """A with-wrapper around sqlite3.Connection: commits/rolls back and truly closes on exit.
+
+    (sqlite3's built-in __exit__ only handles the transaction, it does not close the connection.)
     """
 
     def __init__(self, conn: sqlite3.Connection):
@@ -52,26 +73,26 @@ class Repository:
 
     @staticmethod
     def _migrate(c: sqlite3.Connection) -> None:
-        """轻量列迁移：新列对已存在表用 ALTER TABLE 补齐（IF NOT EXISTS 只作用于建表）。
+        """Lightweight column migration: add new columns to existing tables with ALTER TABLE (IF NOT EXISTS only applies at CREATE TABLE time).
 
-        原则（developrules §23 向后兼容）：绝不丢数据，只加列/回填。
-        历史上 v2/v4/v5 的表结构变更曾散落在 _tools/migrate_db*.py（已废弃删除），
-        此处保留对旧库的升级路径，保证任意旧版本数据库打开即完成迁移。
+        Principle (developrules §23 backward compatibility): never drop data, only add columns/backfill.
+        Historically the v2/v4/v5 schema changes were scattered in _tools/migrate_db*.py (deprecated and removed);
+        this keeps the upgrade path for old databases so any older database completes migration on open.
         """
-        # --- replays.analysis_status（原 v6） ---
+        # --- replays.analysis_status (formerly v6) ---
         cols = {row["name"] for row in c.execute("PRAGMA table_info(replays)")}
         if "analysis_status" not in cols:
             c.execute(
                 "ALTER TABLE replays ADD COLUMN analysis_status TEXT DEFAULT 'pending'")
-            # 存量已完整分析过的行回填为 analyzed，避免迁移后误触发重复分析
+            # Backfill rows that were already fully analyzed to 'analyzed', to avoid spurious re-analysis after migration
             c.execute("UPDATE replays SET analysis_status='analyzed' "
                       "WHERE status='analyzed'")
 
-        # --- maps.beatmap_key / nps_json（原 v2/v5） ---
+        # --- maps.beatmap_key / nps_json (formerly v2/v5) ---
         cols = {row["name"] for row in c.execute("PRAGMA table_info(maps)")}
         if "beatmap_key" not in cols:
             c.execute("ALTER TABLE maps ADD COLUMN beatmap_key TEXT")
-            # 与原 v2 脚本一致：从文件夹名 "16633 (song - mapper)" 提取 key 回填
+            # Consistent with the original v2 script: extract the key from the folder name "16633 (song - mapper)" and backfill
             rows = c.execute(
                 "SELECT map_hash, folder_name FROM maps WHERE folder_name IS NOT NULL"
             ).fetchall()
@@ -82,8 +103,13 @@ class Repository:
                               (key, row["map_hash"]))
         if "nps_json" not in cols:
             c.execute("ALTER TABLE maps ADD COLUMN nps_json TEXT DEFAULT '{}'")
-        # map_ranked_cache / scoresaber_leaderboards 两张表由 SCHEMA 的
-        # CREATE TABLE IF NOT EXISTS 在 executescript 时自动补建（含索引）。
+
+        # --- windows.t_ref (v1.4.1 plan E: window timeline anchor = median note event time within the window) ---
+        cols = {row["name"] for row in c.execute("PRAGMA table_info(windows)")}
+        if "t_ref" not in cols:
+            c.execute("ALTER TABLE windows ADD COLUMN t_ref REAL")
+        # The map_ranked_cache / scoresaber_leaderboards tables are automatically
+        # created (with indexes) by SCHEMA's CREATE TABLE IF NOT EXISTS in executescript.
 
     def _conn(self) -> _ConnCtx:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -94,10 +120,10 @@ class Repository:
 
     # ---------- maps ----------
     def upsert_map(self, m: dict) -> None:
-        # 可选列缺省补齐：调用方（resolver 扫描 / NPS / ranked 同步）传入的
-        # 键子集不同，避免 "did not supply a value for binding parameter"。
-        # nps_json 缺省 None → COALESCE 保留旧值：map_scan 重扫不得覆盖
-        # 已计算的 NPS（曾因默认 "{}" 被 scan 冲空——一键刷新并行场景）。
+        # Default-fill optional columns: callers (resolver scan / NPS / ranked sync)
+        # pass different key subsets, avoiding "did not supply a value for binding parameter".
+        # nps_json defaults to None → COALESCE keeps the old value: a map_scan rescan must not
+        # overwrite already-computed NPS (it was once wiped by scan due to the "{}" default — parallel one-click refresh scenario).
         for k, default in (("ranked_difficulty", None), ("stars", None),
                            ("scoresaber_updated", None), ("nps_json", None),
                            ("beatmap_key", "")):
@@ -134,9 +160,9 @@ class Repository:
             return _row_to_dict(row) if row else None
 
     def get_map_by_path(self, path: str) -> Optional[dict]:
-        """按谱面文件夹路径精确查找（map 扫描的 DB 复用回退路径）。
+        """Find a map exactly by its folder path (DB reuse fallback path for map scanning).
 
-        替代旧的“全表加载后线性扫”（P1-3.3）：表小（千级）时索引无必要。
+        Replaces the old "load the whole table then scan linearly" (P1-3.3): an index is unnecessary while the table is small (thousands of rows).
         """
         with self._conn() as c:
             row = c.execute("SELECT * FROM maps WHERE path=?",
@@ -157,14 +183,14 @@ class Repository:
             return c.execute("SELECT COUNT(*) FROM maps").fetchone()[0]
 
     def clear_analysis_cache(self) -> dict:
-        """清空全部分析产物与联网缓存，保留原始 .bsor 文件与本地谱面库。
+        """Clear all analysis artifacts and online caches, keeping original .bsor files and the local map library.
 
-        删除的表：replays / notes / metrics / windows / motion_series /
-                 ai_reports / profiles / experiments / map_ranked_cache /
-                 scoresaber_leaderboards / scoresaber_cache。
-        保留：maps / scan_state。
-        下次扫描会重新发现全部 .bsor 并重新分析；STARS/PP 需重新点
-        「更新星级/PP（联网）」同步（谱面属性非本地计算取得）。
+        Tables deleted: replays / notes / metrics / windows / motion_series /
+                        ai_reports / profiles / experiments / map_ranked_cache /
+                        scoresaber_leaderboards / scoresaber_cache.
+        Kept: maps / scan_state.
+        The next scan will rediscover all .bsor files and re-analyze them; STARS/PP must be
+        re-synced via "Update Stars/PP (online)" (map attributes are not computed locally).
         """
         with self._conn() as c:
             c.execute("PRAGMA foreign_keys=OFF")
@@ -176,6 +202,24 @@ class Repository:
             c.execute("PRAGMA foreign_keys=ON")
         return {"cleared": True,
                 "message": "缓存已清空，即刻生效。"}
+
+    def reset_analysis_cache(self) -> dict:
+        """Clear analysis artifacts and reset all replays to pending (v1.4.1).
+
+        Use case: after analysis parameters (window/step/fatigue edges) change, all computed
+        metrics are based on old parameters and must be recomputed. Kept: replays rows
+        (list/history still visible), notes (judgement stats are independent of analysis
+        parameters), maps and online caches (stars/pp are independent of local parameters).
+        The detail page's lazy analysis (analyze_ingested) recomputes pending replays with the new parameters.
+        """
+        with self._conn() as c:
+            for t in ("metrics", "windows", "motion_series"):
+                c.execute(f"DELETE FROM {t}")
+            c.execute(
+                "UPDATE replays SET analysis_status='pending', status='parsed',"
+                " analysis_version=NULL, analyzed_at=NULL")
+        return {"cleared": True,
+                "message": "分析参数已变更：已清空分析缓存，详情页将按新参数重新计算"}
 
     # ---------- replays ----------
     def upsert_replay(self, r: dict) -> None:
@@ -219,7 +263,7 @@ class Repository:
 
     def count_replays(self, map_hash: str | None = None,
                       days: int | None = None) -> int:
-        """返回 replay 总数（用于分页）。"""
+        """Return the total number of replays (for pagination)."""
         sql = "SELECT COUNT(*) FROM replays"
         where, params = [], []
         if map_hash:
@@ -234,10 +278,10 @@ class Repository:
             return c.execute(sql, params).fetchone()[0]
 
     def most_common_player_id(self) -> str:
-        """从已入库 Replay 解析最常用的玩家 ID（BSOR 自带，含 ScoreSaber ID）。
+        """Resolve the most common player ID from stored replays (provided by BSOR, includes ScoreSaber ID).
 
-        排除 "Noob"（未登录 ScoreSaber 时的默认回落用户名）。
-        返回 "" 表示库中无玩家数据（此时调用方可用配置兜底）。
+        Excludes "Noob" (the default fallback username when not logged into ScoreSaber).
+        Returns "" when the library has no player data (the caller can then fall back to config).
         """
         with self._conn() as c:
             row = c.execute(
@@ -248,8 +292,8 @@ class Repository:
         return row[0] if row else ""
 
     def latest_player_id(self) -> str:
-        """返回最近一次游戏记录的玩家 ID（排除 Noob 默认用户名；
-        多玩家库中取"当前玩家"的直觉来源）。"""
+        """Return the player ID of the most recent play (excluding the Noob default username;
+        the intuitive source for "current player" in a multi-player library)."""
         with self._conn() as c:
             row = c.execute(
                 "SELECT player_id FROM replays "
@@ -258,10 +302,10 @@ class Repository:
         return row[0] if row else ""
 
     def list_pending_replays(self, limit: int = 100000) -> list[dict]:
-        """返回已入库但未完整分析（analysis_status='pending'）的 Replay。
+        """Return replays that are stored but not fully analyzed (analysis_status='pending').
 
-        后台预计算（/api/analyze/all）的目标集合：它们已在库中，
-        scan() 不会再把它们判为 new/changed。
+        The target set of background precomputation (/api/analyze/all): they are already in the
+        library, so scan() will not classify them as new/changed again.
         """
         with self._conn() as c:
             rows = c.execute(
@@ -275,9 +319,9 @@ class Repository:
             return c.execute("SELECT 1 FROM replays WHERE replay_id=?",
                              (replay_id,)).fetchone() is not None
 
-    # ---------- scoresaber leaderboards（以谱面为根） ----------
+    # ---------- scoresaber leaderboards (rooted at the map) ----------
     def upsert_ss_leaderboard(self, lb: dict) -> None:
-        """插入/更新一个 ScoreSaber leaderboard（以 leaderboard_id 为主键）。"""
+        """Insert/update a ScoreSaber leaderboard (keyed by leaderboard_id)."""
         with self._conn() as c:
             c.execute("""
                 INSERT INTO scoresaber_leaderboards(
@@ -312,7 +356,7 @@ class Repository:
             return _row_to_dict(row) if row else None
 
     def get_ss_leaderboards_by_hash(self, map_hash: str) -> list[dict]:
-        """获取某谱面的全部 leaderboard（以谱面为根缓存）。"""
+        """Get all leaderboards for a map (map-rooted cache)."""
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM scoresaber_leaderboards WHERE map_hash=?"
@@ -363,9 +407,9 @@ class Repository:
     def list_replays_by_day(self, page: int = 1,
                             map_hash: str | None = None,
                             days: int | None = None) -> dict:
-        """按本地日期分组返回 replay 列表。
+        """Return the replay list grouped by local date.
 
-        同一天完成的记录归为一页。返回:
+        Records completed on the same day are grouped into one page. Returns:
         {days: [{date: "YYYY-MM-DD", replays: [...]}], total_days, page, pages}
         """
         import collections
@@ -379,7 +423,7 @@ class Repository:
                 date_str = "未知日期"
             groups.setdefault(date_str, []).append(r)
         day_list = [{"date": d, "replays": rows}
-                    for d, rows in groups.items()]  # 已按 timestamp 降序
+                    for d, rows in groups.items()]  # already sorted by timestamp descending
         total_days = len(day_list)
         if not day_list:
             return {"days": [], "total_days": 0, "page": page, "pages": 0}
@@ -392,7 +436,7 @@ class Repository:
         }
 
     def known_file_states(self) -> dict[str, tuple]:
-        """file_path -> (size, mtime)，用于扫描去重。"""
+        """file_path -> (size, mtime), used for scan deduplication."""
         with self._conn() as c:
             rows = c.execute(
                 "SELECT file_path, file_size, file_mtime FROM replays").fetchall()
@@ -401,7 +445,9 @@ class Repository:
     def previous_attempts_on_map(self, map_hash: str, difficulty: str,
                                   before_ts: int, exclude_id: str | None = None,
                                   limit: int = 5) -> list[dict]:
-        """同谱同难度的历史游玩记录（排除 exclude_id 自身）。"""
+        """Historical plays on the same map and difficulty (excluding exclude_id itself)."""
+        if not map_hash or not difficulty:
+            return []   # Guard: abnormal rows (missing hash/difficulty) skip same-map history lookup
         sql = ("SELECT replay_id, file_name, timestamp, song_name, difficulty, mode,"
                " map_hash, score, score_effective, has_nf, accuracy, good_count,"
                " bad_count, miss_count, bomb_count, max_combo, full_combo, won,"
@@ -462,28 +508,191 @@ class Repository:
         return out
 
     # ---------- windows / motion series ----------
+    # [DEPRECATED] The windows table is kept (old-database data/structure compatibility); the engine no longer writes to it;
+    # curves/slopes/AI summaries are all computed live from the notes table instead (see get_note_events).
     def save_windows(self, replay_id: str, windows: list[dict]) -> None:
         with self._conn() as c:
             c.execute("DELETE FROM windows WHERE replay_id=?", (replay_id,))
             c.executemany(
-                "INSERT INTO windows(replay_id, window_idx, t_start, t_end, metrics_json)"
-                " VALUES(?,?,?,?,?)",
+                "INSERT INTO windows(replay_id, window_idx, t_start, t_end, t_ref,"
+                " metrics_json) VALUES(?,?,?,?,?,?)",
                 [(replay_id, w["window_idx"], w["t_start"], w["t_end"],
-                  json.dumps(w["metrics"], ensure_ascii=False)) for w in windows])
+                  w.get("t_ref"), json.dumps(w["metrics"], ensure_ascii=False))
+                 for w in windows])
 
     def get_windows(self, replay_id: str) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
-                "SELECT window_idx, t_start, t_end, metrics_json FROM windows"
+                "SELECT window_idx, t_start, t_end, t_ref, metrics_json FROM windows"
                 " WHERE replay_id=? ORDER BY window_idx", (replay_id,)).fetchall()
-        return [{"window_idx": r["window_idx"], "t_start": r["t_start"],
-                 "t_end": r["t_end"], "metrics": json.loads(r["metrics_json"])}
-                for r in rows]
+            out = []
+            for r in rows:
+                d = {"window_idx": r["window_idx"], "t_start": r["t_start"],
+                     "t_end": r["t_end"], "t_ref": r["t_ref"], "metrics": {}}
+                try:
+                    m = json.loads(r["metrics_json"] or "{}")
+                    if isinstance(m, dict):
+                        d["metrics"] = m
+                except json.JSONDecodeError:
+                    pass
+                out.append(d)
+            return out
+
+    def get_miss_bad_events(self, replay_id: str) -> dict:
+        """Timestamps of miss/bad events (for the cumulative miss curve, v1.4.1).
+
+        Why not accumulate from the windows' miss counts: time windows overlap with a 1s step
+        (30s wide), so the same miss event falls into ~30 windows and gets counted repeatedly —
+        GENTLEMAN's 4 misses were once accumulated to 120. Here we take each event's timestamp
+        directly from the notes table (events are unique, timestamps are exact); the frontend
+        draws a step line indexed by event ordinal.
+        """
+        from ..bsor.models import BAD, MISS
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT event_time, event_type FROM notes"
+                " WHERE replay_id=? AND event_type IN (?, ?)"
+                " ORDER BY event_time", (replay_id, MISS, BAD)).fetchall()
+        return {"miss": [r["event_time"] for r in rows if r["event_type"] == MISS],
+                "bad": [r["event_time"] for r in rows if r["event_type"] == BAD]}
+
+    def get_note_events(self, replay_id: str) -> list[dict]:
+        """All note event rows (the time-series data source after the fixed windows were retired, 2026).
+
+        Used for live computation of per-note curves (saber speed/density) and note grouping
+        (slope/AI summary). Returns [{event_time, event_type, note_score, center_score,
+        saber_speed, saber}], ordered by event_time ascending.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT event_time, event_type, note_score, center_score,"
+                " saber_speed, saber FROM notes WHERE replay_id=?"
+                " ORDER BY event_time", (replay_id,)).fetchall()
+            return [_row_to_dict(r) for r in rows]
+
+    def get_note_time_range(self, replay_id: str) -> dict:
+        """First/last note event times (timeline trim bounds, v1.4.1).
+
+        Both time-series and hand-motion metrics depend on notes (acc/center/miss/bad); the timeline
+        starts at the first note and ends at the last note, and redundant leading/trailing periods
+        (pre-song waiting / trailing empty beats) are always trimmed; both cards share the same range.
+        """
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT MIN(event_time), MAX(event_time) FROM notes"
+                " WHERE replay_id=?", (replay_id,)).fetchone()
+        first = row[0] if row and row[0] is not None else 0.0
+        last = row[1] if row and row[1] is not None else 0.0
+        return {"first_note": float(first), "last_note": float(last)}
+
+    def get_note_series(self, replay_id: str) -> dict:
+        """per-note time series (v1.4.1 plan A).
+
+        acc/center/saber speed are note-event-level metrics; aggregating them with time windows
+        misaligns them (30s window center vs the note's actual time inside the window deviates by
+        ±15s; Hatatagami empirically showed -14.8s on sparse sections). Changed to one point per note:
+          x = note event time (exact, unique)
+          y = acc = note_score/115 (miss/bad = 0, the curve dips)
+              center = center_score (0-15)
+              speed = cut saber speed (only good cuts have a value; miss/bad are null)
+        bombs (event_type=3) are excluded (not player mistakes). Returned compactly as columns.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT event_time, note_score, center_score, saber_speed FROM notes"
+                " WHERE replay_id=? AND event_type != 3 ORDER BY event_time",
+                (replay_id,)).fetchall()
+        t = [r["event_time"] for r in rows]
+        acc = [round((r["note_score"] or 0) / 115.0, 4) for r in rows]
+        center = [r["center_score"] or 0 for r in rows]
+        speed = [round(r["saber_speed"], 3) if r["saber_speed"] is not None else None
+                 for r in rows]
+        return {"t": t, "acc": acc, "center": center, "speed": speed}
+
+    def get_accuracy_curve(self, replay_id: str, ma_window: int = 5) -> dict:
+        """per-note acc / Center curves (official convention, corrected 2026-08).
+
+        **acc = official convention** (identical to the replay record / 3D replay / chro):
+        accuracy = score / maxScore —— numerator = current actual score (bad=-2/miss=-3/
+        bomb=-4/wall=-5 penalties + multiplier bonus), denominator = the theoretical max under
+        the same multiplier curve, one point per **block note** (good/bad/miss, including penalty points).
+        The old convention (good-only: cumulative score/(good×115)) excluded miss/bad from the
+        denominator, so the curve endpoint ≠ the replay record — Hatatagami empirically showed 87.5% vs 81.68%.
+
+        Data source: the accuracy_curve table (persisted during analysis from compute_score's
+        running_accuracy — includes wall penalties; the notes table has no wall data so it cannot be
+        rebuilt). Historical replays that were not recomputed fall back to the old good-only
+        convention (displayable in the frontend; auto-aligned once recomputed).
+
+        **center = good-only cumulative average** (0-15): bad/miss have no center measurement and
+        are not fabricated — center_t is independent of acc's t (the frontend uses separate timelines).
+        """
+        from ..bsor.models import GOOD
+        # 1) acc: official convention first (accuracy_curve table), fall back to good-only
+        t: list[float] = []
+        acc_raw: list[float] = []
+        with self._conn() as c:
+            row = c.execute("SELECT curve_json FROM accuracy_curve"
+                            " WHERE replay_id=?", (replay_id,)).fetchone()
+        if row:
+            try:
+                curve = json.loads(row["curve_json"] or "{}")
+                t = [float(x) for x in curve.get("t", [])]
+                acc_raw = [float(x) for x in curve.get("acc", [])]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                t, acc_raw = [], []
+        if not t:
+            # Fallback: good-only cumulative (old convention, historical replay not recomputed)
+            with self._conn() as c:
+                rows = c.execute(
+                    "SELECT event_time, note_score FROM notes"
+                    " WHERE replay_id=? AND event_type=? ORDER BY event_time",
+                    (replay_id, GOOD)).fetchall()
+            cum_score = 0
+            cum_n = 0
+            for r in rows:
+                cum_n += 1
+                cum_score += r["note_score"] or 0
+                t.append(r["event_time"])
+                acc_raw.append(round(cum_score / (cum_n * 115), 4))
+        # 2) center: good-only cumulative average (independent timeline, shared by both paths)
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT event_time, center_score FROM notes"
+                " WHERE replay_id=? AND event_type=? ORDER BY event_time",
+                (replay_id, GOOD)).fetchall()
+        center_t: list[float] = []
+        center_raw: list[float] = []
+        cum_center = 0
+        cum_n = 0
+        for r in rows:
+            cum_n += 1
+            cum_center += r["center_score"] or 0
+            center_t.append(r["event_time"])
+            center_raw.append(round(cum_center / cum_n, 3))
+        return {"t": t,
+                "acc": _moving_average(acc_raw, ma_window),
+                "center_t": center_t,
+                "center": _moving_average(center_raw, ma_window)}
 
     def save_motion_series(self, replay_id: str, series: dict) -> None:
         with self._conn() as c:
             c.execute("INSERT OR REPLACE INTO motion_series(replay_id, series_json)"
                       " VALUES(?,?)", (replay_id, json.dumps(series)))
+
+    def save_accuracy_curve(self, replay_id: str,
+                            block_accuracy: list[tuple]) -> None:
+        """Persist the official-convention per-block accuracy curve (2026-08).
+
+        block_accuracy: [(event_time, running_accuracy)], from analysis-time
+        compute_score's block_accuracy (score/maxScore official convention, including
+        bad/miss/bomb/wall penalties and multiplier). Stores raw; MA smoothing is done at read time.
+        """
+        curve = {"t": [round(float(t), 4) for t, _ in block_accuracy],
+                 "acc": [round(float(a), 6) for _, a in block_accuracy]}
+        with self._conn() as c:
+            c.execute("INSERT OR REPLACE INTO accuracy_curve(replay_id, curve_json)"
+                      " VALUES(?,?)", (replay_id, json.dumps(curve)))
 
     def get_motion_series(self, replay_id: str) -> Optional[dict]:
         with self._conn() as c:

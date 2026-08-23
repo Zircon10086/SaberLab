@@ -1,8 +1,9 @@
-"""Accuracy Analyzer：Pre/Center/Post、左右手、网格、切准细节。
+"""Accuracy Analyzer: Pre/Center/Post, per-hand, grid, and cut-precision details.
 
-口径与官方 ReplayStatisticUtils.AccuracyTracker 对齐（含 scoringType 排除规则），
-并补充 SaberLab 需要的原始量（cut 距离 cm、saber 速度、timing 偏差）。
-设计文档 §13 重点：高密度/高压力下 Center 是否退化。
+Convention aligned with the official ReplayStatisticUtils.AccuracyTracker (including
+the scoringType exclusion rules), plus the raw quantities SaberLab needs (cut distance
+in cm, saber speed, timing deviation).
+Design doc §13 focus: whether Center degrades under high density/pressure.
 """
 from __future__ import annotations
 
@@ -20,16 +21,16 @@ from .scoring import cut_scores
 @dataclass
 class HandStats:
     saber: str
-    cuts: int = 0                     # 参与统计的 good cut 数（按分量各自计数）
-    pre_score_avg: float = 0.0        # Pre 均分 (0-70) —— fixture 口径
-    center_score_avg: float = 0.0     # Center 均分 (0-15) —— fixture 口径
-    post_score_avg: float = 0.0       # Post 均分 (0-30) —— fixture 口径
-    pre_rating_avg: float = 0.0       # beforeCutRating 原始均值（未 clamp）
+    cuts: int = 0                     # number of good cuts in the stats (counted per component)
+    pre_score_avg: float = 0.0        # Pre average (0-70) — fixture convention
+    center_score_avg: float = 0.0     # Center average (0-15) — fixture convention
+    post_score_avg: float = 0.0       # Post average (0-30) — fixture convention
+    pre_rating_avg: float = 0.0       # beforeCutRating raw mean (not clamped)
     post_rating_avg: float = 0.0
-    cut_distance_cm_avg: float = 0.0  # cutDistanceToCenter 均值（厘米）
+    cut_distance_cm_avg: float = 0.0  # cutDistanceToCenter mean (cm)
     saber_speed_avg: float = 0.0
-    time_devs: list = field(default_factory=list)   # 原始 time_deviation 序列（秒）
-    time_dependence: float = 0.0      # 官方 LeftTimeDependence: avg |cutNormal.z|
+    time_devs: list = field(default_factory=list)   # raw time_deviation series (seconds)
+    time_dependence: float = 0.0      # official LeftTimeDependence: avg |cutNormal.z|
     late_count: int = 0
     pre_n: int = 0
     center_n: int = 0
@@ -38,7 +39,7 @@ class HandStats:
     bad: int = 0
     miss: int = 0
     bomb: int = 0
-    grid: list = field(default_factory=lambda: [0.0] * 12)   # 12 宫格平均分
+    grid: list = field(default_factory=lambda: [0.0] * 12)   # 12-grid average score
     grid_n: list = field(default_factory=lambda: [0] * 12)
 
 
@@ -72,7 +73,7 @@ def analyze_accuracy(replay: Replay) -> dict:
         if ev == GOOD and note.cut is not None and hs is not None:
             c = note.cut
             st = p.scoring_type
-            # —— 官方排除规则（ReplayStatisticUtils.Accuracy）——
+            # —— official exclusion rules (ReplayStatisticUtils.Accuracy) ——
             if st not in (SCORING_SLIDER_TAIL, SCORING_BURST_SLIDER_ELEMENT):
                 hs.pre_score_avg += before
                 hs.pre_rating_avg += c.before_cut_rating

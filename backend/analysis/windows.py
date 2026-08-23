@@ -1,7 +1,21 @@
-"""时间窗口指标（设计文档 §10.2：默认 30s 窗口 + 10s 滑动步长）。
+"""DEPRECATED: fixed time-window aggregation (marked deprecated per the 2026 decision).
 
-每个窗口计算：accuracy 代理、Pre/Center/Post、miss/bad 率、左右失衡、
-saber 速度、note 密度、timing 偏差。
+Kept for: windows table structure / legacy database compatibility (t_ref column
+migration, test_windows_tref regression), and historical data comparison.
+**The engine no longer calls it** — all time-based analysis now uses note anchoring
+(backend/analysis/notes.py):
+
+- Curves: per-note cumulative/local mean (x = event time)
+- Density: per-note local density (gaps naturally show valleys, faithful to the data)
+- Slopes/AI summaries: every N notes grouped (x = in-group median time)
+
+The three main distortions of fixed windows [0, duration] (proven on long intros/outros):
+empty windows (no notes), mixed windows (silence + gameplay dilutes density; the first
+window measured at only 18%), small-sample endpoints (2-3 notes weighted equally in slope
+fitting; saber-speed slope distorted 4.4x).
+
+This module, together with the windows table and the analysis.window_seconds /
+window_step_seconds config options, is marked deprecated; do not use it in new code.
 """
 from __future__ import annotations
 
@@ -24,7 +38,16 @@ def build_windows(replay: Replay, window_sec: float = 30.0,
     while t < duration:
         t_end = min(t + window_sec, duration)
         w = _window_metrics(notes, t, t_end)
-        w.update({"window_idx": wi, "t_start": round(t, 2), "t_end": round(t_end, 2)})
+        in_win = [n.event_time for n in notes if t <= n.event_time < t_end]
+        t_ref = None
+        if in_win:
+            times = sorted(in_win)
+            mid = len(times) // 2
+            t_ref = (times[mid] if len(times) % 2 == 1
+                     else (times[mid - 1] + times[mid]) / 2.0)
+        w.update({"window_idx": wi, "t_start": round(t, 2),
+                  "t_end": round(t_end, 2),
+                  "t_ref": round(t_ref, 3) if t_ref is not None else None})
         windows.append(w)
         wi += 1
         t += step_sec
@@ -81,6 +104,6 @@ def _window_metrics(notes, t0: float, t1: float) -> dict:
         m["left_notes"] = left_n
         m["right_notes"] = right_n
         denom = left_score + right_score
-        # >0 偏右手，<0 偏左手
+        # >0 favors the right hand, <0 favors the left hand
         m["lr_imbalance"] = round((right_score - left_score) / denom, 4) if denom else 0.0
     return {"metrics": m}

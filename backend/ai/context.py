@@ -1,20 +1,66 @@
-"""AI Context Builder（设计文档 §15.1）。
+"""AI Context Builder (design docs §15.1).
 
-AI 不算原始指标；这里把引擎算好的结构化结果 + 历史同谱成绩 + 研究假设
-打包成紧凑 JSON。
+The AI never computes raw metrics; this module packs the structured results
+produced by the engine + historical scores on the same map + research
+hypotheses into a compact JSON.
+
+Timeline (2026 decision, fixed-window retirement): window summaries were
+replaced with **note-group summaries** (backend/analysis/notes.py
+build_note_groups) — one group per N notes, a group being a set of notes;
+there are no empty or mixed windows, and every group outputs its real time
+range [t_first, t_last]. This also eliminates the problems of the
+fixed-window era: empty windows in the intro/outro (acc/center/speed all
+None) and silently diluted mixed windows (distorted density, t starting at 0).
 """
 from __future__ import annotations
 
 from ..config import Config
 from ..db.repository import Repository
+from ..analysis.notes import build_note_groups
 
 RESEARCH_HYPOTHESES = (
-    "H1: Center 是主要 Accuracy 技术瓶颈；"
-    "H2: 高难度下 Center 会退化（低压 vs 高压对比）；"
-    "H3: 局部疲劳首先表现为连续换向失败和 Miss，而非立即 Center 下降；"
-    "H4: Saber Profile 显著影响运动经济性；"
-    "H5: 训练有效性 = 跨时间、跨难度保持动作质量，而非单次 PP。"
+    "H1: Center is the main Accuracy technical bottleneck; "
+    "H2: Center degrades at high difficulty (low-pressure vs high-pressure); "
+    "H3: Local fatigue first shows up as direction-change failures and misses, "
+    "not an immediate Center drop; "
+    "H4: Saber Profile significantly affects movement economy; "
+    "H5: Training effectiveness = keeping movement quality across time and "
+    "difficulty, not a single PP score."
 )
+
+
+def _note_group_timeline(note_groups: list[dict],
+                         include_groups: int = 8) -> list[dict]:
+    """Compress the note-group sequence into an AI context summary (after fixed-window retirement).
+
+    Each group holds a fixed N notes (no empty groups); take the first and
+    last include_groups//2 groups each plus an ellipsis marker in the middle;
+    every group outputs its real time range [t_first, t_last] and key metrics.
+    """
+    out: list[dict] = []
+    if len(note_groups) > include_groups:
+        head = note_groups[: include_groups // 2]
+        tail = note_groups[-(include_groups // 2):]
+        picked = head + [None] + tail
+    else:
+        picked = note_groups
+    for g in picked:
+        if g is None:
+            out.append({"note": "...intermediate groups omitted..."})
+            continue
+        m = g["metrics"]
+        out.append({
+            "t": [round(g["t_first"], 1), round(g["t_last"], 1)],
+            "acc": m.get("accuracy_local"),
+            "center": m.get("center_avg"),
+            "miss_rate": m.get("miss_rate"),
+            "bad_rate": m.get("bad_rate"),
+            "speed": m.get("saber_speed_avg"),
+            "density": m.get("note_density"),
+            "imbalance": m.get("lr_imbalance"),
+            "notes": m.get("note_events"),
+        })
+    return out
 
 
 def build_context(repo: Repository, cfg: Config, replay_id: str,
@@ -23,39 +69,25 @@ def build_context(repo: Repository, cfg: Config, replay_id: str,
     if replay is None:
         raise KeyError(f"replay 不存在: {replay_id}")
     metrics = repo.get_metrics(replay_id)
-    windows = repo.get_windows(replay_id)
     motion_series = repo.get_motion_series(replay_id)
 
-    # 历史同谱（同难度）对比
+    # Historical attempts on the same map (same difficulty)
     history = repo.previous_attempts_on_map(
         replay["map_hash"], replay["difficulty"], replay["timestamp"], limit=5)
 
-    # 窗口序列压缩：取前中后各若干 + 关键量
-    win_summary = []
-    for w in windows:
-        m = w["metrics"]
-        win_summary.append({
-            "t": [w["t_start"], w["t_end"]],
-            "acc": m.get("accuracy_local"),
-            "center": m.get("center_avg"),
-            "miss_rate": m.get("miss_rate"),
-            "bad_rate": m.get("bad_rate"),
-            "speed": m.get("saber_speed_avg"),
-            "density": m.get("note_density"),
-            "imbalance": m.get("lr_imbalance"),
-        })
-    if len(win_summary) > include_windows:
-        head = win_summary[: include_windows // 2]
-        tail = win_summary[-(include_windows // 2):]
-        win_summary = head + [{"note": "...中间窗口省略..."}] + tail
+    # Time-series compression: take note groups from the head/middle/tail
+    # (fixed-window retirement, see module docstring)
+    note_groups = build_note_groups(repo.get_note_events(replay_id),
+                                    cfg.slope_group_notes)
+    win_summary = _note_group_timeline(note_groups, include_windows)
 
     ctx = {
         "meta": {
-            "analysis_scope": "本地 Replay 确定性分析结果，AI 仅解释",
-            "units": {"center_score": "0-15 越高越好", "pre_score": "0-70",
-                      "post_score": "0-30", "cut_distance_cm": "越小越好",
-                      "time_dev_ms": "切刀时间偏差"},
-            "fatigue_note": "疲劳相关输出均为运动学推断，不是医学诊断",
+            "analysis_scope": "Local deterministic Replay analysis result; the AI only interprets",
+            "units": {"center_score": "0-15, higher is better", "pre_score": "0-70",
+                      "post_score": "0-30", "cut_distance_cm": "lower is better",
+                      "time_dev_ms": "cut timing deviation"},
+            "fatigue_note": "Fatigue-related output is a kinematic proxy, not a medical diagnosis",
         },
         "replay": {
             "song_name": replay["song_name"],

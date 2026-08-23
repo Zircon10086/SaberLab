@@ -1,11 +1,12 @@
-"""SQLite schema（设计文档 §17）。
+"""SQLite schema (design doc §17).
 
-原则：
-- 原始 BSOR 保留文件不入库；SQLite 只存摘要与指标。
-- replay 主键 = 文件内容 sha256（设计文档 §7.4）。
-- 每次重新分析产生新的 analysis_version。
-- 迁移史全部收敛到这里 + repository._migrate()：全新库 executescript(SCHEMA)
-  即得到完整结构；旧库由 _migrate() 幂等补列/补表（不再依赖 _tools 脚本）。
+Principles:
+- Raw BSOR files are kept and never stored in the DB; SQLite only stores summaries and metrics.
+- The replay primary key = sha256 of the file content (design doc §7.4).
+- Every re-analysis produces a new analysis_version.
+- The whole migration history is consolidated here + repository._migrate(): a fresh DB gets the
+  complete structure via executescript(SCHEMA); old DBs get columns/tables added idempotently by
+  _migrate() (no longer relying on _tools scripts).
 """
 
 SCHEMA = """
@@ -17,15 +18,15 @@ CREATE TABLE IF NOT EXISTS maps (
     song_author     TEXT,
     mapper          TEXT,
     bpm             REAL,
-    song_length     REAL,              -- 歌曲时长（秒），来自 info.dat
+    song_length     REAL,              -- song duration in seconds, from info.dat
     version         TEXT,
     difficulties    TEXT,          -- JSON: [{characteristic, difficulty, label}]
-    info_json       TEXT,          -- 完整 info.dat（压缩存储可选，先存原文）
+    info_json       TEXT,          -- full info.dat (compression optional for storage; keep raw text for now)
     hash_source     TEXT,          -- songcore_cache | computed
-    ranked_difficulty TEXT,        -- ranked 难度名称（如 "Expert"）
-    stars           REAL,          -- 星级评分
-    scoresaber_updated TEXT,      -- 最后更新时间
-    beatmap_key     TEXT,          -- BeatSaver key（从文件夹名 "16633 (song)" 提取）
+    ranked_difficulty TEXT,        -- ranked difficulty name (e.g. "Expert")
+    stars           REAL,          -- star rating
+    scoresaber_updated TEXT,      -- last update time
+    beatmap_key     TEXT,          -- BeatSaver key (extracted from the folder name "16633 (song)")
     nps_json        TEXT DEFAULT '{}',  -- JSON: {"Standard|Expert": nps, ...}
     last_scanned    TEXT
 );
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS replays (
     file_name       TEXT,
     file_size       INTEGER,
     file_mtime      REAL,
-    timestamp       INTEGER,               -- 游玩开始 unix 时间
+    timestamp       INTEGER,               -- unix time of play start
     player_id       TEXT,
     player_name     TEXT,
     platform        TEXT,
@@ -52,15 +53,16 @@ CREATE TABLE IF NOT EXISTS replays (
     mode            TEXT,
     environment     TEXT,
     modifiers       TEXT,
-    score           INTEGER,               -- Replay 记录的总分
-    score_recomputed INTEGER,              -- 解析器独立重算的总分（校验用）
-    score_effective INTEGER,               -- 有效分（NF/Fail 时减半，否则 = score）
-    has_nf          INTEGER DEFAULT 0,     -- modifiers 含 NF（实际 Fail 过）
+    score           INTEGER,               -- total score recorded in the replay
+    score_recomputed INTEGER,              -- total score independently recomputed by the parser (for validation)
+    score_effective INTEGER,               -- effective score (halved on NF/Fail, otherwise = score)
+    has_nf          INTEGER DEFAULT 0,     -- modifiers contains NF (actually failed)
     jump_distance   REAL,
     left_handed     INTEGER,
     height          REAL,
     start_time      REAL,
-    fail_time       REAL,
+    fail_time       REAL,               -- .bsor failTime (official semantics: only meaningful if failed;
+                                        --   measured with mod 0.9.33 it is always 0 → frontend marks a pause on the red axis, see parser.py comment)
     speed           REAL,
     won             INTEGER,
     frame_count     INTEGER,
@@ -71,14 +73,14 @@ CREATE TABLE IF NOT EXISTS replays (
     bad_count       INTEGER,
     miss_count      INTEGER,
     bomb_count      INTEGER,
-    accuracy        REAL,                  -- 重算 accuracy（BeatLeader 口径）
+    accuracy        REAL,                  -- recomputed accuracy (BeatLeader convention)
     max_combo       INTEGER,
     full_combo      INTEGER,
     completion_status TEXT DEFAULT 'completed',  -- completed | failed | incomplete | pending
     profile_id      TEXT,
     analysis_version INTEGER DEFAULT 1,
     status          TEXT DEFAULT 'parsed', -- parsed | analyzed | error
-    analysis_status TEXT DEFAULT 'pending', -- pending | analyzed（分层分析状态机）
+    analysis_status TEXT DEFAULT 'pending', -- pending | analyzed (layered analysis state machine)
     error_message   TEXT,
     parsed_at       TEXT,
     analyzed_at     TEXT
@@ -93,7 +95,7 @@ CREATE TABLE IF NOT EXISTS notes (
     note_id         INTEGER,
     event_time      REAL,
     spawn_time      REAL,
-    event_type      INTEGER,       -- 有效类型（bomb 已重标记）
+    event_type      INTEGER,       -- effective type (bomb has been re-marked)
     saber           TEXT,          -- left/right
     scoring_type    INTEGER,
     line_index      INTEGER,
@@ -103,8 +105,8 @@ CREATE TABLE IF NOT EXISTS notes (
     before_score    INTEGER,       -- 0..70
     center_score    INTEGER,       -- 0..15
     after_score     INTEGER,       -- 0..30
-    note_score      INTEGER,       -- 三项合计 0..115
-    cut_distance    REAL,          -- 米
+    note_score      INTEGER,       -- total of the three, 0..115
+    cut_distance    REAL,          -- meters
     saber_speed     REAL,
     time_deviation  REAL,
     PRIMARY KEY (replay_id, idx)
@@ -115,7 +117,7 @@ CREATE TABLE IF NOT EXISTS metrics (
     scope       TEXT NOT NULL,     -- overall | left | right | fatigue
     name        TEXT NOT NULL,
     value       REAL,
-    detail      TEXT,              -- 可选 JSON 细节
+    detail      TEXT,              -- optional JSON detail
     PRIMARY KEY (replay_id, scope, name)
 );
 
@@ -124,13 +126,23 @@ CREATE TABLE IF NOT EXISTS windows (
     window_idx  INTEGER NOT NULL,
     t_start     REAL,
     t_end       REAL,
-    metrics_json TEXT,             -- 该窗口全部指标
+    t_ref       REAL,              -- median note event time within the window (timeline anchor, v1.4.1)
+    metrics_json TEXT,             -- all metrics of this window
     PRIMARY KEY (replay_id, window_idx)
 );
 
 CREATE TABLE IF NOT EXISTS motion_series (
     replay_id   TEXT PRIMARY KEY,
-    series_json TEXT               -- 降采样后的手速/角速度时间序列（图表用）
+    series_json TEXT               -- downsampled saber-speed/angular-velocity time series (for charts)
+);
+
+-- Official-convention per-block accuracy curve (2026-08: fixes the curve not matching the replay record)
+-- Data source: analysis-time running_accuracy from compute_score (score/maxScore, including
+-- bad/miss/bomb/wall penalties and multiplier — the notes table has no wall data so it cannot be rebuilt).
+-- get_accuracy_curve reads this table first; historical replays not recomputed fall back to the good-only convention.
+CREATE TABLE IF NOT EXISTS accuracy_curve (
+    replay_id   TEXT PRIMARY KEY,
+    curve_json  TEXT               -- {"t": [...], "acc": [...]} (raw; smoothing is done at read time)
 );
 
 CREATE TABLE IF NOT EXISTS profiles (
@@ -174,11 +186,11 @@ CREATE TABLE IF NOT EXISTS scoresaber_cache (
 );
 
 CREATE TABLE IF NOT EXISTS scan_state (
-    key   TEXT PRIMARY KEY,        -- replay 目录路径
+    key   TEXT PRIMARY KEY,        -- replay directory path
     value TEXT                     -- JSON
 );
 
--- (map_hash, difficulty) -> 玩家成绩星级/pp 索引（原 _tools/migrate_db_v2）
+-- (map_hash, difficulty) -> player-score stars/pp index (originally _tools/migrate_db_v2)
 CREATE TABLE IF NOT EXISTS map_ranked_cache (
     map_hash    TEXT NOT NULL,
     difficulty  TEXT NOT NULL,
@@ -189,8 +201,8 @@ CREATE TABLE IF NOT EXISTS map_ranked_cache (
     PRIMARY KEY (map_hash, difficulty)
 );
 
--- 以谱面为根的 ScoreSaber leaderboard 缓存：一个 map_hash 对应多个难度/模式
--- （原 _tools/migrate_db_v4；通过 get-difficulties/{hash} 枚举 + by-id 补齐星级）
+-- Map-rooted ScoreSaber leaderboard cache: one map_hash maps to multiple difficulties/modes
+-- (originally _tools/migrate_db_v4; enumerated via get-difficulties/{hash} + star ratings filled in by-id)
 CREATE TABLE IF NOT EXISTS scoresaber_leaderboards (
     leaderboard_id  INTEGER PRIMARY KEY,
     map_hash       TEXT NOT NULL,

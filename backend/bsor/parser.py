@@ -1,13 +1,14 @@
-"""BSOR v1 二进制解析器（严格对照官方 C# ReplayDecoder）。
+"""BSOR v1 binary parser (strictly aligned with the official C# ReplayDecoder).
 
-格式要点（官方 README + Replay.cs）:
+Format summary (official README + Replay.cs):
 - little-endian
 - magic int32 = 0x442D3D69, version byte = 1
-- 每个 section 以 1 byte 类型标识开始: 0=info 1=frames 2=notes 3=walls
-  4=heights 5=pauses 6=controller offsets(可选) 7=user data(可选)
-- string = int32 字节数 + UTF-8
-- playerName 的长度前缀存在官方已知 bug（C# 按 UTF-16 字符数写入），
-  非 ASCII 名字需要前向扫描修复（对齐官方 DecodeName 逻辑）。
+- each section starts with a 1-byte type tag: 0=info 1=frames 2=notes 3=walls
+  4=heights 5=pauses 6=controller offsets (optional) 7=user data (optional)
+- string = int32 byte count + UTF-8
+- playerName's length prefix has a known official bug (C# writes the UTF-16
+  char count), so non-ASCII names need forward scanning to repair
+  (aligned with the official DecodeName logic).
 """
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ FRAME_BYTES = FRAME_DTYPE.itemsize  # 92
 
 
 class BsorError(Exception):
-    """BSOR 解析错误基类。"""
+    """Base class for BSOR parse errors."""
 
     def __init__(self, message: str, offset: int = -1):
         self.offset = offset
@@ -42,7 +43,7 @@ class BsorError(Exception):
 
 
 class UnsupportedFormatError(BsorError):
-    """magic/version 不受支持（包括 Quest 旧格式）。"""
+    """Unsupported magic/version (including the legacy Quest format)."""
 
 
 class _Reader:
@@ -107,11 +108,13 @@ class _Reader:
         return s
 
     def player_name(self) -> str:
-        """读取 playerName，兼容官方 mod 的长度前缀 bug。
+        """Read playerName, tolerating the official mod's length-prefix bug.
 
-        C# 编码器写入的是 UTF-16 字符数而非 UTF-8 字节数；名字含非 ASCII 时
-        前缀偏小。官方解码器通过前向扫描到下一个合法 section/字段修复；
-        这里以“其后必须跟着合法的 platform 字符串”作为对齐条件，更稳健。
+        The C# encoder writes the UTF-16 char count instead of the UTF-8 byte
+        count, so names containing non-ASCII chars get a too-small prefix. The
+        official decoder repairs this by scanning forward to the next valid
+        section/field; here we use "must be followed by a valid platform
+        string" as the alignment condition, which is more robust.
         """
         length = self.i32()
         if length < 0 or length > 4096:
@@ -134,7 +137,7 @@ class _Reader:
             self.p = start + length
             return self.buf[start:self.p].decode("utf-8", errors="replace")
 
-        # 前向扫描（官方 DecodeName 的泛化版本）
+        # Forward scan (generalized version of the official DecodeName)
         for extra in range(1, 512):
             if plausible_platform(start + length + extra):
                 end = start + length + extra
@@ -168,9 +171,15 @@ def _decode_info(r: _Reader) -> ReplayInfo:
     info.jump_distance = r.f32()
     info.left_handed = r.bool_()
     info.height = r.f32()
-    info.start_time = r.f32()
-    info.fail_time = r.f32()
-    info.speed = r.f32()
+    info.start_time = r.f32()   # song start time (practice mode), seconds — official format
+    info.fail_time = r.f32()    # song fail time (only if failed), seconds — official format
+    # ⚠️ Tested (2026-08-23): in BeatLeader 0.9.33 .bsor files this field is
+    # always 0 (326/326 local files, including NF-triggered and mid-song exit
+    # samples; field order/types verified byte-by-byte against the binary) —
+    # likely the mod writer never implements it. The frontend "fail-time red
+    # axis marker" is therefore disabled
+    # (see FAIL_TIME_MARKER_ENABLED in frontend/app.js drawTimeline).
+    info.speed = r.f32()        # song speed (practice mode), seconds — official format
     return info
 
 
@@ -219,7 +228,7 @@ def _decode_notes(r: _Reader) -> list[NoteEvent]:
         if raw_type in (GOOD, BAD):
             cut = _decode_cut_info(r)
         event_type = raw_type
-        # 官方规则: noteID 末位 9（或 -1）为 bomb，重标记事件类型
+        # Official rule: noteID ending in 9 (or -1) is a bomb; re-tag the event type
         if note_id == -1 or note_id % 10 == 9:
             event_type = BOMB
         notes.append(NoteEvent(note_id, event_time, spawn_time,
@@ -262,7 +271,7 @@ def _decode_controller_offsets(r: _Reader) -> ControllerOffsets:
 
 
 def parse_bytes(data: bytes, file_path: str = "", file_sha256: str = "") -> Replay:
-    """解析 BSOR v1 字节流。失败抛出 BsorError 子类。"""
+    """Parse a BSOR v1 byte stream. Raises a BsorError subclass on failure."""
     if len(data) < 5:
         raise BsorError(f"文件过小 ({len(data)} bytes)", 0)
     r = _Reader(data)
@@ -278,8 +287,8 @@ def parse_bytes(data: bytes, file_path: str = "", file_sha256: str = "") -> Repl
         raise UnsupportedFormatError(f"不支持的 BSOR 版本 {version}（仅支持 v1）", 4)
 
     replay = Replay()
-    # 官方解码器按 0..5 顺序循环读取；这里改为按实际 tag 读取，
-    # 兼容含可选 section(6/7) 的文件。
+    # The official decoder loops over sections 0..5 in order; here we read by
+    # the actual tag instead, so files with optional sections (6/7) work too.
     while r.p < r.n:
         tag = r.u8()
         if tag == 0:
@@ -312,7 +321,7 @@ def parse_bytes(data: bytes, file_path: str = "", file_sha256: str = "") -> Repl
 
 
 def parse_file(path: str | Path) -> Replay:
-    """解析 .bsor 文件（计算 sha256 用于去重主键）。"""
+    """Parse a .bsor file (computes sha256 as the dedup primary key)."""
     path = Path(path)
     data = path.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
@@ -321,11 +330,14 @@ def parse_file(path: str | Path) -> Replay:
 
 
 def parse_metadata_only(path: str | Path) -> Replay:
-    """轻量解析：只读 info section，跳过 frames/notes 等大数组（§分析策略）。
+    """Lightweight parse: only reads the info section, skipping big arrays
+    like frames/notes (§analysis strategy).
 
-    用途：扫描时秒级入库元数据（列表/历史/搜索立即可用），
-    完整分析（motion/windows/fatigue）延迟到点击详情或后台预计算。
-    返回的 Replay 只有 info / file_path / file_size / file_sha256 有效。
+    Purpose: ingest metadata in seconds during scanning (lists/history/search
+    become available immediately); full analysis (motion/windows/fatigue) is
+    deferred until detail view is opened or background precompute runs.
+    Only info / file_path / file_size / file_sha256 of the returned Replay
+    are valid.
     """
     path = Path(path)
     data = path.read_bytes()
@@ -336,11 +348,11 @@ def parse_metadata_only(path: str | Path) -> Replay:
     magic = r.i32()
     version = r.u8()
     if magic != MAGIC_V1 or version != 1:
-        # 非 v1：走完整解析以得到标准错误
+        # Not v1: fall through to full parsing to get the standard error
         return parse_bytes(data, file_path=str(path), file_sha256=digest)
 
     replay = Replay()
-    # 只消费 sections 直到拿到 info（tag 0），其余按字节长度跳过。
+    # Consume sections only until info (tag 0) is found; skip the rest by byte length.
     while r.p < r.n:
         tag = r.u8()
         if tag == 0:

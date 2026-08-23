@@ -1,5 +1,6 @@
-"""服务层：从 main.py 提取的编排/富化逻辑（架构审查 P3-5.1 第一批）。
+"""Service layer: orchestration/enrichment logic extracted from main.py
+(architecture review P3-5.1, first batch).
 
-保持 main.py 只做路由组装；这里放带状态的领域服务。
-当前成员：enrichment（replay 列表富化，带进程内缓存）。
+Keeps main.py as pure route assembly; stateful domain services live here.
+Current members: enrichment (replay list enrichment with in-process cache).
 """

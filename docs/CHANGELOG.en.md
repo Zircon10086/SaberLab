@@ -2,6 +2,39 @@
 
 > Version format: `vX.Y (date)` — change summary. Parts of this document were described with AI assistance.
 
+## v1.5.0 (2026-08-23)
+
+### Analysis engine: fixed time windows retired
+- All time-based analysis is now **note-anchored** (timeline = first/last note):
+  saber speed & density are per-note curves (±7 local mean / ±5 neighborhood +
+  smoothing), fatigue slopes & AI timeline summaries use note groups
+  (N notes per group, configurable); mid-song density dips faithfully reflect
+  the map layout; the fixed-window config keys are marked deprecated
+  (hidden, kept for compatibility)
+- **Accuracy curve now uses the official formula** (score/maxScore incl.
+  penalties & multiplier) — the curve end matches the replay record and the
+  3D viewer exactly
+
+### Multilingual (简体中文 / English / 日本語)
+- UI language switching (JSON tables; the settings language card **auto-discovers
+  language files** — adding a JSON file enables a new language)
+- AI and rule-based report language follows the UI language; backend comments
+  and logs are now in English
+
+### Settings & visuals
+- New "Use AI for Reports" toggle (Settings → AI): unchecked = deterministic
+  rule-based reports, no LLM calls (saves quota)
+- Squircle (G2 continuous-curvature) card corners (native on Chrome 139+,
+  graceful fallback elsewhere)
+
+### Fixes
+- Frosted-glass background lost after language switch (reload re-pushes the
+  wallpaper via the backdrop-ready notification)
+- Settings page crashed on boolean items (local variable shadowing the global
+  i18n function)
+- NF fail-time red-line marker: implemented but **paused** — BeatLeader 0.9.33
+  writes failTime=0 in every local .bsor
+
 ## v1.4 (2026-08-21)
 
 ### Acrylic Background

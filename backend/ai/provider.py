@@ -1,10 +1,10 @@
-"""LLM Provider 抽象（设计文档 §6：不写死厂商）。
+"""LLM Provider abstraction (design docs §6: vendors are not hardcoded).
 
-统一走 OpenAI 兼容 /chat/completions：
+All providers go through the OpenAI-compatible /chat/completions endpoint:
 - deepseek: https://api.deepseek.com/v1
 - qwen:     https://dashscope.aliyuncs.com/compatible-mode/v1
 - openai:   https://api.openai.com/v1
-- custom:   config.yaml 里自填 base_url（本地 gateway / 其他兼容服务）
+- custom:   base_url filled in config.yaml (local gateway / other compatible services)
 """
 from __future__ import annotations
 

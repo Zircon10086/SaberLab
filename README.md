@@ -36,7 +36,7 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 </a>
 </p>
 
-<!-- 界面预览（v1.4.0 真实截图） -->
+<!-- 界面预览（真实截图） -->
 
 <p>
 <a href="docs/screenshots/overview.png">
@@ -66,10 +66,12 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 | 能力 | 说明 |
 | --- | --- |
 | **本地优先** | 读取本地 BeatLeader `.bsor` Replay + 本地谱面；全部指标 Python 确定性计算，原始 Replay 永远只读 |
-| **官方算法** | BSOR 官方解码器/计分器逐项移植，重算总分与 Replay 记录**逐分一致** |
-| **独立窗口** | 自带 WebView2 窗口与毛玻璃背景；端口占用自动顺延 |
+| **官方算法** | BSOR 官方解码器/计分器逐项移植，重算总分与 Replay 记录**逐分一致**（acc 曲线同口径） |
+| **Note 锚定分析** | 时间序列/疲劳/摘要全部锚定真实 note 事件（固定时间窗口已退役），中段密度低谷忠实呈现谱面结构 |
+| **多语言** | 简体中文 / English / 日本語 界面切换（设置页自动发现语言文件），AI 报告语言跟随界面 |
+| **独立窗口** | 自带 WebView2 窗口与毛玻璃背景（G2 连续曲率卡片圆角）；端口占用自动顺延 |
 | **3D 回放** | ChroViewer 移植，谱面/回放/环境全本地渲染，纯本地数据源 |
-| **AI 教练** | 结构化指标交给 LLM 解读，获取个性化指导；亦可不使用AI获取基础报告 |
+| **AI 教练** | 结构化指标交给 LLM 解读，获取个性化指导；可关闭 AI 使用规则报告（设置 → AI） |
 | **联网同步** | ScoreSaber 星级/PP 缓存（以本地谱面为根）、429 限速退避重试 |
 | **完成度判断** | 中途退出 / NF（Fail）/ 时长 自动判定，列表/详情一目了然 |
 
@@ -81,7 +83,7 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 
 | 文件 | 说明 | 大小 |
 | --- | --- | --- |
-| [SaberLab-v1.4.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v1.4.0/SaberLab-v1.4.0-win64.zip) | **用户版**：内置全部依赖（Python 运行时 + chro 3D 查看器），解压双击即用 | ~45 MB |
+| [SaberLab-v1.5.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v1.5.0/SaberLab-v1.5.0-win64.zip) | **用户版**：内置全部依赖（Python 运行时 + chro 3D 查看器），解压双击即用 | ~45 MB |
 | [源码（saberlab-src）](https://github.com/Zircon10086/SaberLab) | **开发者版**：仓库源码，按下方「从源码构建」自行安装依赖 | — |
 
 > 更早版本见 [Releases 页面](https://github.com/Zircon10086/SaberLab/releases)。

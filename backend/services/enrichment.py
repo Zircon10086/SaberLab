@@ -1,19 +1,20 @@
-"""Replay 列表富化：附加 beatmap_key / stars / pp / nps（带进程内缓存）。
+"""Replay list enrichment: attach beatmap_key / stars / pp / nps (with in-process cache).
 
-从 main.py 的 _enrich_replays 提取（架构审查 P1-3.1）。原实现每次
-/api/replays、/api/replays/{id}、/api/history 请求都：
-  1. 全量加载 maps 表（list_maps(limit=100000)）
-  2. 全量加载 scoresaber_leaderboards
-  3. 全量加载 map_ranked_cache
-  4. 对每条 replay 重复 json.loads(同一谱面的 nps_json)
+Extracted from main.py's _enrich_replays (architecture review P1-3.1). The old
+implementation did, on every /api/replays, /api/replays/{id}, and /api/history request:
+  1. Load the whole maps table (list_maps(limit=100000))
+  2. Load all scoresaber_leaderboards
+  3. Load all map_ranked_cache
+  4. Re-run json.loads on the same level's nps_json for every replay
 
-本服务把三张表构建为一份进程内快照（nps_json 只解析一次），
-由数据变更方写穿失效（invalidate）。失效时机由 main.py 在
-任务结束（_set_task(running=False)）与同步端点（scoresaber refresh、
-清缓存）处触发。
+This service builds the three tables into one in-process snapshot (nps_json parsed
+only once), invalidated write-through by data mutators (invalidate). Invalidation
+is triggered by main.py when a task finishes (_set_task(running=False)) and at the
+sync endpoints (scoresaber refresh, cache clear).
 
-线程模型：快照构建/读取无锁——最坏情形是并发下重复构建一次，
-读到的数据与“无缓存时直接查库”一样新旧，无正确性影响。
+Threading model: snapshot build/read is lock-free - the worst case is one redundant
+rebuild under concurrency, and the data read is as fresh as a direct DB query without
+the cache, so there is no correctness impact.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ import json
 
 
 def _lb_better(a: dict, b: dict) -> bool:
-    """a 是否比 b 更优（ranked 优先 > SoloStandard 优先 > 有星级优先）。"""
+    """Whether a is better than b (ranked first > SoloStandard first > has stars first)."""
 
     def score(lb):
         s = 0
@@ -37,9 +38,9 @@ def _lb_better(a: dict, b: dict) -> bool:
 
 
 class EnrichmentService:
-    """map 元数据快照 + replay 富化。
+    """Map metadata snapshot + replay enrichment.
 
-    snapshot 结构：
+    snapshot structure:
       key_map: {map_hash: {beatmap_key, nps: dict}}
       lb_map:  {(map_hash, difficulty_name): leaderboard row}
       rc:      {(map_hash, difficulty): ranked cache row}
@@ -50,7 +51,7 @@ class EnrichmentService:
         self._snapshot: tuple[dict, dict, dict] | None = None
 
     def invalidate(self) -> None:
-        """数据变更后调用（rescan / ranked 同步 / NPS 更新 / 清缓存）。"""
+        """Call after data changes (rescan / ranked sync / NPS update / cache clear)."""
         self._snapshot = None
 
     def _ensure_snapshot(self) -> tuple[dict, dict, dict]:
@@ -79,7 +80,7 @@ class EnrichmentService:
         return self._snapshot
 
     def enrich(self, days: list[dict]) -> None:
-        """为按天分组的 replay 列表附加 beatmap_key / stars / pp / nps。"""
+        """Attach beatmap_key / stars / pp / nps to the per-day grouped replay lists."""
         if not days:
             return
         key_map, lb_map, rc = self._ensure_snapshot()
@@ -88,28 +89,28 @@ class EnrichmentService:
                 mh = (r.get("map_hash") or "").upper()
                 meta = key_map.get(mh, {})
                 r["beatmap_key"] = meta.get("beatmap_key", "")
-                # NPS：方块密度（按 mode|difficulty 匹配难度文件）
+                # NPS: note density (match difficulty file by mode|difficulty)
                 nps_map = meta.get("nps") or {}
                 diff = r.get("difficulty") or ""
                 mode = r.get("mode") or ""
                 r["nps"] = nps_map.get(f"{mode}|{diff}") or nps_map.get(f"Standard|{diff}")
-                # 星级：scoresaber_leaderboards（谱面属性，与玩家成绩无关）
+                # Stars: scoresaber_leaderboards (level property, independent of player scores)
                 lb = lb_map.get((mh, diff))
                 r["stars"] = lb.get("stars") if lb else None
                 r["ranked"] = bool(lb.get("ranked")) if lb else None
-                # ---- 0.00 星兜底：stars 为 0/None = 未认证（unranked）----
-                # ScoreSaber 对 unranked leaderboard 写入 stars=0/ranked=0，
-                # 展示层统一按"无星级"处理（列表页 "-"，详情页 UNRANKED），
-                # 避免出现"0.00★"误导
+                # ---- 0.00 star fallback: stars of 0/None = unranked ----
+                # ScoreSaber writes stars=0/ranked=0 for unranked leaderboards; the
+                # display layer uniformly treats that as "no stars" (list page "-",
+                # detail page UNRANKED) to avoid a misleading "0.00★"
                 if r.get("stars") in (None, 0, 0.0):
                     r["stars"] = None
                     r["ranked"] = False
-                # pp：玩家成绩索引（个人游玩记录）
+                # pp: player score index (personal play records)
                 c = rc.get((mh, diff))
                 pp = c.get("pp") if c else None
-                # ---- pp 兜底策略 ----
-                # 1. 中途退出的游玩（incomplete）不可能产生 pp
-                # 2. 0 星或无星级 = 谱面未通过认证，无 pp 产出
+                # ---- pp fallback strategy ----
+                # 1. A quit-in-progress play (incomplete) cannot have produced pp
+                # 2. 0 stars or no stars = the level is not ranked, so no pp is produced
                 if r.get("completion_status") == "incomplete":
                     pp = None
                 stars = r.get("stars")
@@ -118,6 +119,6 @@ class EnrichmentService:
                 r["pp"] = pp
 
     def enrich_flat(self, replays: list[dict]) -> None:
-        """为扁平 replay 列表（不分天）附加同样的富化字段。"""
+        """Attach the same enrichment fields to a flat replay list (not grouped by day)."""
         if replays:
             self.enrich([{"replays": replays}])

@@ -44,7 +44,7 @@ Current dependencies: fastapi / uvicorn / numpy / pyyaml / pywebview 6.2.1 / pyi
 backend/
   bsor/        BSOR v1 parser (pure functions, zero external coupling)
   maps/        map hash parsing and caching
-  analysis/    deterministic metrics (scoring/accuracy/windows/motion/fatigue/compare)
+  analysis/    deterministic metrics (scoring/accuracy/notes/motion/fatigue/compare)
   ai/          LLM provider abstraction + prompts + rule-based fallback
   config/      ConfigService (config.yaml is the single source of truth) + schema (drives frontend dynamic forms)
   db/          SQLite schema + repository (all migrations consolidated; fresh DBs are created with the full schema)
@@ -52,10 +52,11 @@ backend/
   watcher.py   scanning + layered analysis pipeline
   scoresaber.py  online sync (persistent per-thread connections + concurrency + 429 backoff)
   desktop.py   wallpaper / monitor geometry (ctypes Win32, acrylic scheme C backend)
-  dialog.py    native dialog bridge (shared state between __main__ and backend.main)
+  dialog.py    native dialog bridge + backdrop-ready flag (shared state between __main__ and backend.main)
   host.py      standalone window host (port / single instance / uvicorn thread / pywebview / acrylic)
   main.py      FastAPI entry (route assembly)
-frontend/      vanilla dashboard (index.html + app.js + style.css)
+frontend/      vanilla dashboard (index.html + app.js + style.css + i18n.js)
+frontend/i18n/ language tables (zh-CN/en-US/ja-JP.json, each with its own lang.name)
 frontend/chro/ ChroViewer port subproject (standalone Vite build)
 tests/         unit tests (golden fixture regression + schema bootstrap/upgrade)
 config/        config.yaml
@@ -71,6 +72,7 @@ _tmp/          temporary test area (probes/screenshot scripts, safe to wipe)
 - `config/schema.py` defines every config item (key/label/type/group/hidden/restart_required); the frontend generates the settings UI from it and the backend reads/validates against it
 - Path derivation: `game.instance_root` → replay / custom_levels / songcore (`config/service.py` DERIVED_PATHS, standard Beat Saber relative paths); `hidden: True` items are handled by the "Game Path" card (native folder dialog + automatic validation)
 - Atomic writes: tmp → flush → os.replace; a corrupt config.yaml is auto-backed up as `.corrupt-<ts>`
+- Key items: `ai.ai_report_enabled` ("Use AI for Reports" — unchecked short-circuits `run_ai_report` to the rule report, no LLM calls); `analysis.slope_group_notes` (note-group size); `analysis.window_seconds/window_step_seconds` (deprecated, hidden, kept for compatibility)
 
 ### 5.2 dialog.py Bridge (important)
 When started via `python backend\host.py`, the script runs as `__main__`; if main.py does `from backend.host import ...` it gets a **duplicate module** of host.py (module-level global state is not shared — this once made the folder dialog permanently unavailable). Shared state always goes through `backend/dialog.py`: host.py registers the window shell, main.py routes read it.
@@ -82,6 +84,9 @@ host.py service thread  initial push + 1s polling (wallpaper mtime/size, monitor
 frontend app.js         rAF reads screenX/Y every frame for self-cropping (zero IPC) + wallpaper preload/swap
 move cover             moved/resized → __saberlabBackdropMoving(true); no events for 1s → false
                        (backend watchdog + frontend 1.5s fallback)
+reload re-push         frontend POSTs /api/desktop/backdrop-ready on load/reload (dialog.py
+                       flag bridge) → service thread consumes it and re-pushes the payload
+                       (otherwise any reload — e.g. language switch — permanently loses the glass)
 ```
 Frontend contract: `window.__saberlabBackdrop(payload)` (mode=wallpaper/backdrop, monitor, wallpaper_url?v=), `window.__saberlabBackdropMoving(bool)`. Browser mode (no `?shell=webview`) never enables it.
 
@@ -98,6 +103,36 @@ SQLite opens a new connection per call (WAL, 30s timeout); all SQL lives in `db/
 - Dynamic settings form: driven by `/api/settings/schema` (`renderSettingsForm`, `hidden` items skipped)
 - Charts: `lineChart` (SVG + crosshair hover); detail-page equal-height logic — `fixDetailLayout()` fixes chart heights once on entry (do not revert to `height: auto` live calculation; it triggers a positive-feedback height loop)
 - Acrylic layer: `#acrylic-backdrop` (fixed inset 0 + blur); the `.moving` class maxes the blur while moving
+
+### 6.1 i18n (multilingual)
+- Mechanism: `frontend/i18n.js` (`I18N.init/t/renderLangSwitch`) + `frontend/i18n/{lang}.json`
+  tables (zh-CN is the baseline; missing keys fall back to Chinese); the preference
+  lives in localStorage (`saberlab.lang`)
+- **Auto-discovery**: `GET /api/i18n/langs` scans `frontend/i18n/*.json` (filename regex
+  `[a-z]{2}(-[A-Z]{2})?`) and reads each file's `lang.name` for the button label —
+  adding a JSON file is all it takes to enable a new language
+- Text hooks: static text `data-i18n` / `data-i18n-placeholder` / `data-i18n-title`
+  (titles containing child elements must wrap the text in `<span data-i18n>`); dynamic
+  text via `t(key, params)`; backend error messages via `tErr(msg)` (en/ja `err` tables
+  keyed by the Chinese source text, `{param}` template regex matching)
+- Settings wording: schema labels/descriptions are Chinese; the frontend looks up
+  `set.{key}.label/.desc` + `set.group.{group}` by config key (falls back to Chinese)
+- Chart labels (TL_LABELS/TL_VALUE_FMT) depend on the dict, so build them after
+  `I18N.init()` via `buildTimelineI18n()` (top-level t() calls run before the dict loads)
+- Squircle corners: at the END of style.css
+  `@supports (corner-shape: squircle) { .surface, .kpi { border-radius: 40px; corner-shape: squircle; } }`
+  (native on Chrome 139+, 12px fallback elsewhere; **must be at the end** — earlier it
+  gets overridden by `.kpi`'s own border-radius, see §4.18)
+
+### 6.2 AI report language
+- `ai/prompts.py`: `build_system_prompt(lang)` = English base rules + a STRONG output-language
+  instruction (MUST / 务必 / 必ず) + language-specific section headings
+  (## 结论 / ## Conclusion / ## 結論) — the prompt body must stay English, otherwise the
+  LLM follows the body language (§4.16 lesson)
+- Entry points pass `lang` through: `/api/ai/analyze/{id}?lang=`, batch-analysis body `lang`
+  (frontend sends `I18N.lang`); the rule report (`ai/fallback.py` `_TEXT`, three languages) follows too
+- Whether the LLM is called at all is decided by `ai.ai_report_enabled` (single short-circuit
+  inside `run_ai_report`)
 
 ## 7. Testing & Debugging
 

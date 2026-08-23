@@ -1,7 +1,12 @@
-"""分析引擎编排：parse 结果 -> 全部指标 -> DB 落库格式。
+"""Analysis engine orchestration: parse result -> all metrics -> DB persistence format.
 
-原则（设计文档 §3.4 / Rule 7）：所有数字由本层确定性计算，
-AI 层只做解释，不产生数据。
+Principle (design doc §3.4 / Rule 7): all numbers are computed deterministically
+in this layer; the AI layer only interprets and never produces data.
+
+Timeline (2026 decision, fixed windows retired): all time-based analysis is anchored
+to note events (backend/analysis/notes.py) — curves are per-note, slopes are grouped
+per note; fixed [0, duration] time windows are no longer used
+(backend/analysis/windows.py is deprecated).
 """
 from __future__ import annotations
 
@@ -13,32 +18,32 @@ from ..bsor.models import Replay
 from ..db.repository import Repository
 from .scoring import compute_score
 from .accuracy import analyze_accuracy
-from .windows import build_windows
+from .notes import build_note_groups
 from .motion import analyze_motion
 from .fatigue import analyze_fatigue
 
 
 def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
                    save: bool = True, filename_exit: bool = False) -> dict:
-    """对单个已解析 Replay 跑全部分析。返回结构化结果。
+    """Run the full analysis for a single parsed Replay. Returns structured results.
 
-    filename_exit: BeatLeader 文件名中的 "-exit-" 标记（中途退出）。
-    文件名标记是游戏侧的权威信息，优先级最高。
+    filename_exit: the "-exit-" marker in BeatLeader filenames (mid-run exit).
+    The filename marker is authoritative on the game side and takes highest priority.
     """
-    # 1) 官方口径总分 / accuracy / combo
+    # 1) Official-convention total score / accuracy / combo
     score_result = compute_score(replay)
 
-    # 2) Accuracy / Pre-Center-Post / 左右手 / 网格
+    # 2) Accuracy / Pre-Center-Post / per-hand / grid
     acc = analyze_accuracy(replay)
 
-    # 3) 时间窗口
-    windows = build_windows(replay, cfg.window_seconds, cfg.window_step_seconds)
+    # 3) Note grouping (for slopes / AI summaries; fixed windows retired, no window aggregation)
+    note_groups = build_note_groups(replay.notes, cfg.slope_group_notes)
 
-    # 4) 运动学
+    # 4) Kinematics
     motion = analyze_motion(replay)
 
-    # 5) 疲劳
-    fatigue = analyze_fatigue(replay, windows, motion, cfg.fatigue_edge_seconds)
+    # 5) Fatigue (early/late segments + group-level slopes, all note-anchored)
+    fatigue = analyze_fatigue(replay, note_groups, motion, cfg.fatigue_edge_seconds)
 
     duration = float(replay.frames["time"][-1]) if replay.frame_count else 0.0
     fps_median = float(np.median(replay.frames["fps"])) if replay.frame_count else 0.0
@@ -46,9 +51,9 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
     counts = acc["counts"]
     full_combo = counts["bad"] == 0 and counts["miss"] == 0
 
-    # 6) 完成度判断
-    # 优先级：文件名 exit（中途退出，权威）> modifiers 含 NF（Fail 后自动启用）> fail_time > 时长
-    # 获取谱面 song_length（从 repo 查询）
+    # 6) Completion status determination
+    # Priority: filename exit (mid-run exit, authoritative) > modifiers contain NF (auto-enabled after Fail) > fail_time > duration
+    # Fetch the map song_length (queried from the repo)
     song_length = 0.0
     if repo is not None and replay.info.map_hash:
         map_info = repo.get_map(replay.info.map_hash)
@@ -56,13 +61,13 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
             song_length = float(map_info.get("song_length") or 0.0)
 
     mods = (replay.info.modifiers or "").upper()
-    has_nf = "NF" in mods          # No Fail：能量耗尽后自动启用，即实际 Fail 过
+    has_nf = "NF" in mods          # No Fail: auto-enabled after energy depletion, i.e. actually failed
     fail_time = float(replay.info.fail_time or 0.0)
     if filename_exit:
-        # BeatLeader 文件名明确标记中途退出 -> 未完成
+        # BeatLeader filename explicitly marks a mid-run exit -> incomplete
         completion_status = "incomplete"
     elif has_nf:
-        # NF 标记 = 实际 Fail 过（Beat Saber 自动启用 No Fail 继续）-> 已完成但 Fail
+        # NF marker = actually failed (Beat Saber auto-enables No Fail to continue) -> completed but failed
         completion_status = "failed"
     elif fail_time > 0:
         completion_status = "failed"
@@ -71,7 +76,7 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
     else:
         completion_status = "completed"
 
-    # NF（Fail）分数惩罚：Beat Saber 官方口径 Fail 后实际得分减半
+    # NF (fail) score penalty: per Beat Saber's official convention, the actual score after failing is halved
     raw_score = int(replay.info.score or 0)
     effective_score = raw_score // 2 if has_nf else raw_score
 
@@ -95,8 +100,9 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
     result = {
         "summary": summary,
         "score_graph": score_result.score_graph,
+        "block_accuracy": score_result.block_accuracy,
         "accuracy": acc,
-        "windows": windows,
+        "note_groups": note_groups,
         "motion": motion,
         "fatigue": fatigue,
     }
@@ -108,10 +114,10 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
 
 def _persist(replay: Replay, result: dict, repo: Repository) -> None:
     rid = replay.file_sha256
-    # notes 表
+    # notes table
     repo.insert_notes(rid, result["accuracy"]["note_rows"])
 
-    # metrics 表
+    # metrics table
     rows: list[tuple[str, str, float, str]] = []
     s = result["summary"]
     rows.append(("overall", "score", float(replay.info.score), ""))
@@ -167,12 +173,10 @@ def _persist(replay: Replay, result: dict, repo: Repository) -> None:
 
     repo.save_metrics(rid, rows)
 
-    # windows 表
-    repo.save_windows(rid, [
-        {"window_idx": w["window_idx"], "t_start": w["t_start"],
-         "t_end": w["t_end"], "metrics": w["metrics"]} for w in result["windows"]
-    ])
-
-    # 运动序列（图表）
+    # Motion series (charts)
     if result["motion"].get("series"):
         repo.save_motion_series(rid, result["motion"]["series"])
+
+    # Official-convention per-block accuracy curve (2026-08: curve aligned with replay records)
+    if result.get("block_accuracy"):
+        repo.save_accuracy_curve(rid, result["block_accuracy"])

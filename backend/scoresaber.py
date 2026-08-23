@@ -1,7 +1,7 @@
-"""ScoreSaber API 客户端（非官方公开 API，仅用于验证与展示）。
+"""ScoreSaber API client (unofficial public API, used only for verification and display).
 
-端点（实测可用）:
-- GET https://scoresaber.com/api/player/{id}/full    -> 玩家资料
+Endpoints (verified working):
+- GET https://scoresaber.com/api/player/{id}/full    -> player profile
 - GET https://scoresaber.com/api/player/{id}/scores?limit=N&sort=recent|top&page=N
 """
 from __future__ import annotations
@@ -20,7 +20,7 @@ BASE = "https://scoresaber.com/api"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36 SaberLab/1.0")
 
-# ScoreSaber 难度名 -> Replay/BSOR 难度名
+# ScoreSaber difficulty name -> Replay/BSOR difficulty name
 _DIFF_NORM = {
     "easy": "Easy", "normal": "Normal", "hard": "Hard",
     "expert": "Expert", "expert+": "ExpertPlus", "expertplus": "ExpertPlus",
@@ -34,12 +34,13 @@ def norm_difficulty(name) -> str:
 
 
 class ScoreSaberError(Exception):
-    """ScoreSaber 请求失败。status：HTTP 状态码（int），None = 网络/解析错误。
+    """A ScoreSaber request failed. status: HTTP status code (int), None = network/parse error.
 
-    区分二者是缓存正确性的关键（P0-2.4）：
-    - status=404 → 谱面确实不在 ScoreSaber，可以安全写“未找到”缓存
-    - status=None（超时/断网/5xx）→ 绝不能写“未找到”，否则缓存被投毒，
-      断网一次整批谱面星级丢失，只能手动清缓存恢复
+    Distinguishing the two is key to cache correctness (P0-2.4):
+    - status=404 -> the map truly is not on ScoreSaber; a "not found" cache can be written safely
+    - status=None (timeout/offline/5xx) -> never write "not found", otherwise the cache is
+      poisoned: one offline moment loses stars for a whole batch of maps, recoverable only by
+      manually clearing the cache
     """
 
     def __init__(self, msg: str, status: Optional[int] = None):
@@ -47,16 +48,19 @@ class ScoreSaberError(Exception):
         self.status = status
 
 
-# 每线程一个持久 HTTPS 连接（http.client 显式复用 keep-alive）。
-# 背景（实测）：ScoreSaber 对新 TCP 连接的首个请求有 ~43s 固定延迟，
-# 同连接后续请求 ~0.2s。urllib.request 在 Python 3.12+ 已无 keep-alive
-# 连接池（每次 urlopen 都新建连接），所以这里直接管理 http.client 连接：
-# 首请求吃 43s 后，本线程所有后续请求都是毫秒级。
+# One persistent HTTPS connection per thread (http.client explicitly reuses keep-alive).
+# Background (measured): ScoreSaber adds a fixed ~43s delay to the first request on a
+# new TCP connection; subsequent requests on the same connection take ~0.2s.
+# urllib.request no longer has a keep-alive connection pool in Python 3.12+
+# (every urlopen opens a new connection), so http.client connections are managed
+# directly here: after the first request eats the 43s, all later requests on this
+# thread are millisecond-fast.
 _conn_local = threading.local()
-_REQUEST_TIMEOUT = 120.0  # socket 超时（首请求 43s 是常态，30s 会误杀）
-# 429（限速）退避：连接复用时毫秒级连发会触发 ScoreSaber 限速
-# （实测 8 并发下约 1/3 by-id 请求 429）。退避后重试，避免每次同步
-# 都有一批固定失败且永不写缓存。
+_REQUEST_TIMEOUT = 120.0  # socket timeout (a 43s first request is normal; 30s would kill it spuriously)
+# 429 (rate limit) backoff: millisecond bursts on a reused connection trigger
+# ScoreSaber rate limiting (measured: ~1/3 of by-id requests got 429 under
+# 8-way concurrency). Retry after backoff so each sync does not end up with a
+# fixed batch of failures that never write cache.
 _429_RETRY_DELAYS = (1.0, 2.0, 4.0)
 
 
@@ -67,7 +71,7 @@ def _conn(cfg: Config) -> http.client.HTTPSConnection:
     conn = http.client.HTTPSConnection("scoresaber.com",
                                        timeout=_REQUEST_TIMEOUT)
     if cfg.proxy:
-        # 代理：CONNECT 隧道（保持原有代理支持）
+        # Proxy: CONNECT tunnel (keep the existing proxy support)
         proxy = urllib.parse.urlsplit(cfg.proxy if "://" in cfg.proxy
                                       else f"http://{cfg.proxy}")
         conn.set_tunnel(proxy.hostname, proxy.port or 443)
@@ -97,7 +101,7 @@ def _get(cfg: Config, url: str):
             resp = conn.getresponse()
             body = resp.read()
             if resp.status == 429 and retries < len(_429_RETRY_DELAYS):
-                # 限速：退避后重试（连接本身可继续复用）
+                # Rate limited: back off and retry (the connection itself can keep being reused)
                 time.sleep(_429_RETRY_DELAYS[retries])
                 retries += 1
                 continue
@@ -109,8 +113,9 @@ def _get(cfg: Config, url: str):
         except ScoreSaberError:
             raise
         except (http.client.HTTPException, OSError, ValueError) as e:
-            # 连接失效/超时/解析失败：丢弃本线程连接，下次重建
-            # （新连接首请求会再吃一次 43s，但只发生在真正断连时）
+            # Dead connection / timeout / parse failure: drop this thread's
+            # connection and rebuild next time (a new connection pays the 43s
+            # first request again, but only when it truly disconnected).
             _drop_conn()
             raise ScoreSaberError(f"ScoreSaber API 请求失败: {url}: {e}") from e
 
@@ -121,7 +126,7 @@ def fetch_profile(cfg: Config, player_id: str) -> dict:
 
 def fetch_scores(cfg: Config, player_id: str, limit: int = 100,
                  sort: str = "recent", max_pages: int = 3) -> list[dict]:
-    """拉取最近/最高分成绩列表（自动翻页到 limit）。"""
+    """Fetch the recent/top score list (auto-paginates up to limit)."""
     out: list[dict] = []
     page = 1
     per_page = min(max(1, limit), 100)
@@ -135,7 +140,7 @@ def fetch_scores(cfg: Config, player_id: str, limit: int = 100,
             sc = item.get("score") or {}
             lb = item.get("leaderboard") or {}
             diff = lb.get("difficulty") or {}
-            # difficultyRaw 格式: "_Expert_SoloStandard" -> "Expert"
+            # difficultyRaw format: "_Expert_SoloStandard" -> "Expert"
             diff_raw = diff.get("difficultyRaw") or ""
             diff_name = diff_raw.split("_")[1] if "_" in diff_raw else diff_raw
             out.append({
@@ -171,10 +176,10 @@ def fetch_scores(cfg: Config, player_id: str, limit: int = 100,
 
 def cross_validate(cfg: Config, player_id: str,
                    local_replays: list[dict]) -> dict:
-    """用 ScoreSaber 成绩验证本地解析结果。
+    """Validate local parsing results against ScoreSaber scores.
 
-    对每张 (song_hash, difficulty)：比较 ScoreSaber 分数 vs 本地 replay 分数。
-    返回 {matched: [...], unmatched_local: n, score_diffs: [...]}
+    For each (song_hash, difficulty), compare the ScoreSaber score vs the local
+    replay score. Returns {matched: [...], unmatched_local: n, score_diffs: [...]}
     """
     try:
         ss_scores = fetch_scores(cfg, player_id, limit=100, sort="recent")
@@ -213,9 +218,10 @@ def cross_validate(cfg: Config, player_id: str,
 def fetch_map_difficulties(cfg: Config, map_hash: str) -> list[dict]:
     """GET /api/leaderboard/get-difficulties/{hash}
 
-    按谱面 hash 获取该 Map 的全部难度列表（含 leaderboardId）。
-    实测：该端点速度快、结果正确；字段不含 stars（需 by-id 补齐）。
-    返回 [{"leaderboardId", "difficulty", "gameMode", "difficultyRaw"}, ...]
+    Fetch all difficulties of a map by hash (including leaderboardId).
+    Measured: this endpoint is fast and returns correct results; its fields do
+    not include stars (needs by-id to fill in).
+    Returns [{"leaderboardId", "difficulty", "gameMode", "difficultyRaw"}, ...]
     """
     if not map_hash:
         return []
@@ -226,7 +232,7 @@ def fetch_map_difficulties(cfg: Config, map_hash: str) -> list[dict]:
 def fetch_leaderboard_info(cfg: Config, leaderboard_id: int) -> Optional[dict]:
     """GET /api/leaderboard/by-id/{id}/info
 
-    返回单个 leaderboard 的完整信息（stars/ranked/qualified/loved/maxPP）。
+    Returns full info for a single leaderboard (stars/ranked/qualified/loved/maxPP).
     """
     data = _get(cfg, f"{BASE}/leaderboard/by-id/{leaderboard_id}/info")
     if not isinstance(data, dict):
@@ -264,15 +270,15 @@ def diff_rank_to_name(rank) -> str:
 
 def sync_map_leaderboards(cfg: Config, repo, map_hash: str,
                           force: bool = False) -> dict:
-    """以本地谱面为根，同步该谱面的全部 ScoreSaber leaderboard 元数据。
+    """Sync all ScoreSaber leaderboard metadata for one map, rooted at the local map.
 
-    流程（实测验证的正确路线）：
-      1. get-difficulties/{hash} -> 全部难度的 leaderboardId（快）
-      2. 对每个 leaderboardId：缓存命中且未过期则跳过；
-         否则 by-id/{id}/info 获取 stars/ranked/maxPP（慢，~44s/请求）
+    Flow (the verified-correct route):
+      1. get-difficulties/{hash} -> leaderboardId for all difficulties (fast)
+      2. for each leaderboardId: skip when cache hit and not expired;
+         otherwise by-id/{id}/info fetches stars/ranked/maxPP (slow, ~44s/request)
 
-    缓存到 scoresaber_leaderboards 表（leaderboard_id 主键）。
-    返回 {total, cached, fetched, failed}
+    Cached into the scoresaber_leaderboards table (leaderboard_id primary key).
+    Returns {total, cached, fetched, failed}
     """
     from datetime import datetime, timezone
 
@@ -280,10 +286,10 @@ def sync_map_leaderboards(cfg: Config, repo, map_hash: str,
         diffs = fetch_map_difficulties(cfg, map_hash)
     except ScoreSaberError as e:
         if e.status == 404:
-            # 谱面确实不在 ScoreSaber（自定义未上传图）：合法的“未找到”
+            # The map is truly not on ScoreSaber (custom map not uploaded): a legitimate "not found"
             return {"total": 0, "cached": 0, "fetched": 0, "failed": 0,
                     "map_hash": map_hash, "not_on_scoresaber": True}
-        raise  # 网络/超时/5xx：交给上层计 failed，下次同步重试
+        raise  # network/timeout/5xx: let the caller count it as failed, retried on next sync
     stats = {"total": len(diffs), "cached": 0, "fetched": 0, "failed": 0,
              "map_hash": map_hash}
     if not diffs:
@@ -298,21 +304,21 @@ def sync_map_leaderboards(cfg: Config, repo, map_hash: str,
             continue
         cached = repo.get_ss_leaderboard(lbid)
         if cached and not force and cached.get("last_synced"):
-            # TTL 内直接命中缓存（星级变化缓慢，默认 30 天）
+            # Direct cache hit within TTL (stars change slowly, default 30 days)
             stats["cached"] += 1
             continue
         try:
             info = fetch_leaderboard_info(cfg, lbid)
         except ScoreSaberError as e:
             if e.status == 404:
-                # leaderboard 确实不存在：保存基础条目，避免反复查询
+                # The leaderboard truly does not exist: save a basic entry to avoid repeated queries
                 info = None
             else:
-                # 网络失败：不写缓存（下次同步重试），也不算“未找到”
+                # Network failure: do not write cache (retry on next sync), and do not count it as "not found"
                 stats["failed"] += 1
                 continue
         if info is None:
-            # 无详情：至少保存 get-difficulties 给出的基础条目
+            # No details: at least save the basic entry given by get-difficulties
             diff_raw = d.get("difficultyRaw") or ""
             rank = d.get("difficulty")
             repo.upsert_ss_leaderboard({
@@ -337,20 +343,35 @@ def sync_map_leaderboards(cfg: Config, repo, map_hash: str,
 
 def sync_maps_batch(cfg: Config, repo, map_hashes: list[str],
                     progress_cb=None, force: bool = False,
-                    workers: int = 8) -> dict:
-    """批量同步多个谱面的 leaderboard 元数据（后台任务用）。
+                    workers: int = 8, only_missing: bool = False) -> dict:
+    """Batch-sync leaderboard metadata for multiple maps (for background tasks).
 
-    并发说明：ScoreSaber 对新 TCP 连接的首个请求有 ~43s 的固定延迟，
-    同连接后续请求毫秒级。因此：
-    1. 每个工作线程复用自己的 opener（keep-alive 连接池，见 _opener），
-       首请求吃 43s 后本线程后续请求都是毫秒级；
-    2. 8 个工作线程并行处理不同谱面，把总耗时从“串行 ×43s/请求”
-       压到“请求数 ÷ 8 × ~0.2s + 43s”（全量 1000+ 谱面：数小时 → 分钟级）。
+    Concurrency notes: ScoreSaber adds a fixed ~43s delay to the first request
+    on a new TCP connection; later requests on the same connection are
+    millisecond-fast. Therefore:
+    1. each worker thread reuses its own opener (keep-alive connection pool,
+       see _opener); after the first request eats the 43s, later requests on
+       that thread are millisecond-fast;
+    2. 8 worker threads process different maps in parallel, compressing the
+       total time from "serial ×43s/request" to "requests ÷ 8 × ~0.2s + 43s"
+       (full 1000+ map refresh: hours -> minutes).
 
-    失败重试：每轮结束后 failed 的谱面重新入队再同步（限速/瞬时错误恢复后
-    自动补上）；单条累计失败 >=3 次放弃并记入 failed_songs（前端 toast 提示）。
+    Incremental mode (v1.4.1, one-click refresh): with only_missing=True, maps
+    that already have leaderboard cache are skipped (no network) — the essence
+    of one-click refresh is finding new data, stale cloud values are not
+    re-pulled; "refresh cloud data online" uses force=True to force a full
+    re-fetch of cloud values.
+    (Note: a leaderboard-level cache hit only saves the detail request;
+    get-difficulties still costs one request per map; hash-level skipping saves
+    even that. Adding new difficulties to existing maps relies on a forced refresh.)
 
-    统计聚合与进度回调在锁内更新，保证线程安全。
+    Failure retry: after each round, failed maps are re-queued and re-synced
+    (auto-recovered once rate limits / transient errors settle); a single map
+    that fails >=3 times cumulatively is abandoned and recorded in
+    failed_songs (frontend toast).
+
+    Stats aggregation and the progress callback update under a lock, so
+    thread-safety is guaranteed.
     """
     total_stats = {"maps": len(map_hashes), "fetched": 0, "cached": 0,
                    "failed": 0, "network_failed": 0, "not_on_scoresaber": 0,
@@ -360,8 +381,14 @@ def sync_maps_batch(cfg: Config, repo, map_hashes: list[str],
     lock = threading.Lock()
     done = 0
     fail_count: dict[str, int] = {}
-    pending = list(map_hashes)   # 当前轮队列（首轮 = 全部）
-    total_hashes = len(map_hashes)
+    if only_missing:
+        # Incremental: only sync maps that have no leaderboard cache yet (new maps)
+        pending = [mh for mh in map_hashes
+                   if not repo.get_ss_leaderboards_by_hash(mh)]
+        total_stats["cached"] = len(map_hashes) - len(pending)
+    else:
+        pending = list(map_hashes)   # current-round queue (first round = all)
+    total_hashes = len(pending)      # progress counted by actual work (incremental mode = number of new maps)
 
     def sync_one(mh: str):
         nonlocal done
@@ -381,7 +408,7 @@ def sync_maps_batch(cfg: Config, repo, map_hashes: list[str],
         if s.get("failed"):
             with lock:
                 fail_count[mh] = fail_count.get(mh, 0) + 1
-            return mh   # 需要重试
+            return mh   # needs retry
         return None
 
     while pending:
@@ -392,9 +419,9 @@ def sync_maps_batch(cfg: Config, repo, map_hashes: list[str],
             if res is None:
                 continue
             if fail_count[res] < 3:
-                retry.append(res)          # 重新入队（下一轮）
+                retry.append(res)          # re-queue (next round)
             else:
-                row = repo.get_map(res)    # 放弃：记录谱面名供前端提示
+                row = repo.get_map(res)    # give up: record the map name for the frontend toast
                 name = (row or {}).get("song_name") or res[:16]
                 total_stats["failed_songs"].append(name)
         pending = retry
@@ -402,9 +429,9 @@ def sync_maps_batch(cfg: Config, repo, map_hashes: list[str],
 
 
 def build_ranked_index(cfg: Config, player_id: str) -> dict[tuple, dict]:
-    """拉取玩家成绩，构建 (song_hash, difficulty) -> {stars, pp} 索引。
+    """Fetch the player's scores and build a (song_hash, difficulty) -> {stars, pp} index.
 
-    用于批量填充 map_ranked_cache：一次请求覆盖最多 100 首。
+    Used to bulk-fill map_ranked_cache: one request covers up to 100 songs.
     """
     idx: dict[tuple, dict] = {}
     try:

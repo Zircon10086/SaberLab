@@ -1,12 +1,12 @@
-"""桌面集成服务（毛玻璃方案 C 的后端，见 others/毛玻璃方案探索.md）。
+"""Desktop integration service (backend of acrylic scheme C; see the acrylic-scheme exploration doc at others/毛玻璃方案探索.md).
 
-职责：
-1. 获取桌面壁纸文件路径（三级兜底，无需 Pillow/额外依赖）
-2. 按窗口句柄取窗口矩形与所在显示器矩形（多显示器感知）
-3. 生成前端毛玻璃层所需的几何/壁纸信息
+Responsibilities:
+1. Get the desktop wallpaper file path (three-level fallback; no Pillow/extra dependencies needed)
+2. Get the window rect and its monitor rect from the window handle (multi-monitor aware)
+3. Generate the geometry/wallpaper info the frontend acrylic layer needs
 
-全部使用 ctypes 调 Win32 API，跨版本（Win10/11）可用；浏览器模式下这些端点
-无调用方，不产生任何影响。
+Everything calls Win32 APIs via ctypes and works across versions (Win10/11); in browser mode these endpoints
+have no callers and produce no effect.
 """
 from __future__ import annotations
 
@@ -16,12 +16,12 @@ import winreg
 from ctypes import wintypes
 from typing import Optional
 
-# ---------- Win32 常量 ----------
+# ---------- Win32 constants ----------
 SPI_GETDESKWALLPAPER = 0x0073
 SPI_GETDESKBKGND = 0x0074
 MAX_PATH = 260
 
-# GetMonitorInfoW 的 RECT（物理像素，含负坐标的多屏布局）
+# RECT as used by GetMonitorInfoW (physical pixels; supports multi-screen layouts with negative coordinates)
 class RECT(ctypes.Structure):
     _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
                 ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
@@ -39,8 +39,8 @@ MONITOR_DEFAULTTONEAREST = 2
 
 
 def _transcoded_wallpaper() -> Optional[pathlib.Path]:
-    """%APPDATA%\\Microsoft\\Windows\\Themes\\TranscodedWallpaper：
-    系统实际显示的壁纸文件（单显示器时最可靠，恒为 JPEG）。"""
+    """%APPDATA%\\Microsoft\\Windows\\Themes\\TranscodedWallpaper:
+    the wallpaper file actually displayed by the system (most reliable on a single monitor; always JPEG)."""
     import os
     base = os.environ.get("APPDATA")
     if not base:
@@ -50,10 +50,10 @@ def _transcoded_wallpaper() -> Optional[pathlib.Path]:
 
 
 def get_wallpaper_path() -> Optional[pathlib.Path]:
-    """桌面壁纸文件路径。兜底顺序：
-    1. SPI_GETDESKWALLPAPER（当前用户的壁纸文件）
-    2. 注册表 HKCU\\Control Panel\\Desktop\\WallPaper
-    3. TranscodedWallpaper（系统转码缓存，实际渲染用的那份）
+    """Desktop wallpaper file path. Fallback order:
+    1. SPI_GETDESKWALLPAPER (current user's wallpaper file)
+    2. Registry HKCU\\Control Panel\\Desktop\\WallPaper
+    3. TranscodedWallpaper (system transcoded cache — the one actually rendered)
     """
     buf = ctypes.create_unicode_buffer(MAX_PATH)
     if _user32.SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, buf, 0):
@@ -74,7 +74,7 @@ def get_wallpaper_path() -> Optional[pathlib.Path]:
 
 
 def get_desktop_background_color() -> Optional[str]:
-    """纯色桌面背景（无壁纸文件时兜底）。返回 "#RRGGBB"。"""
+    """Solid-color desktop background (fallback when there is no wallpaper file). Returns "#RRGGBB"."""
     color = wintypes.UINT()
     if _user32.SystemParametersInfoW(SPI_GETDESKBKGND, 0, ctypes.byref(color), 0):
         rgb = color.value
@@ -84,7 +84,7 @@ def get_desktop_background_color() -> Optional[str]:
 
 
 def get_window_rect(hwnd: int) -> Optional[dict]:
-    """窗口矩形（物理像素，屏幕坐标）。"""
+    """Window rect (physical pixels, screen coordinates)."""
     rect = RECT()
     if not _user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(rect)):
         return None
@@ -93,7 +93,7 @@ def get_window_rect(hwnd: int) -> Optional[dict]:
 
 
 def get_monitor_rect(hwnd: int) -> Optional[dict]:
-    """窗口所在显示器的矩形（物理像素，屏幕坐标，支持多屏负坐标）。"""
+    """Rect of the monitor containing the window (physical pixels, screen coordinates; supports negative multi-screen coordinates)."""
     info = MONITORINFO()
     info.cbSize = ctypes.sizeof(MONITORINFO)
     monitor = _user32.MonitorFromWindow(wintypes.HWND(hwnd),
@@ -106,9 +106,9 @@ def get_monitor_rect(hwnd: int) -> Optional[dict]:
 
 
 def find_window_by_title(title: str) -> Optional[int]:
-    """按窗口标题找句柄（host.py 在 webview 窗口创建后定位它）。
+    """Find the window handle by title (host.py uses it to locate the webview window after creation).
 
-    优先精确匹配；找不到时返回 None（host 侧另有 pywebview 窗口对象可用）。
+    Prefers an exact match; returns None if not found (the host side also has the pywebview window object available).
     """
     found: list[int] = []
 
@@ -122,18 +122,18 @@ def find_window_by_title(title: str) -> Optional[int]:
             return False
         return True
 
-    # EnumWindows 回调原型
+    # EnumWindows callback prototype
     CALLBACK = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
     _user32.EnumWindows(CALLBACK(enum_cb), 0)
     return found[0] if found else None
 
 
 def backdrop_payload(hwnd: int, wallpaper_url: str) -> dict:
-    """方案 C 的核心数据：窗口/显示器几何 + 壁纸地址。
+    """Core data for scheme C: window/monitor geometry + wallpaper URL.
 
-    前端拿到后：background-image=wallpaper_url，
-    background-size = monitor.w × monitor.h（CSS 逻辑像素需除以 devicePixelRatio），
-    background-position = -(window.x - monitor.x) / dpr 等 → 恰好显示窗口遮盖区域。
+    The frontend then applies: background-image=wallpaper_url,
+    background-size = monitor.w × monitor.h (CSS logical pixels must be divided by devicePixelRatio),
+    background-position = -(window.x - monitor.x) / dpr etc. → exactly displays the window-covered area.
     """
     win = get_window_rect(hwnd)
     mon = get_monitor_rect(hwnd)
@@ -144,7 +144,7 @@ def backdrop_payload(hwnd: int, wallpaper_url: str) -> dict:
         "wallpaper_url": wallpaper_url,
         "window": win,
         "monitor": mon,
-        # 窗口是否完全在显示器内（跨屏/半屏时前端自动裁剪）
+        # whether the window is fully inside the monitor (frontend auto-crops when spanning/half off-screen)
         "fully_visible": (
             win["x"] >= mon["x"] and win["y"] >= mon["y"] and
             win["x"] + win["w"] <= mon["x"] + mon["w"] and

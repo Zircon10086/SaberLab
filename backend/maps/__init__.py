@@ -1,4 +1,4 @@
-"""本地谱面管理：hash 匹配与元数据。"""
+"""Local map management: hash matching & metadata."""
 from .resolver import MapResolver
 
 __all__ = ["MapResolver"]

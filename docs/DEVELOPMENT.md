@@ -45,7 +45,7 @@ cd frontend\chro && pnpm build
 backend/
   bsor/        BSOR v1 解析器（纯函数，零外部耦合）
   maps/        谱面 hash 解析与缓存
-  analysis/    确定性指标（scoring/accuracy/windows/motion/fatigue/compare）
+  analysis/    确定性指标（scoring/accuracy/notes/motion/fatigue/compare）
   ai/          LLM Provider 抽象 + 提示词 + 规则兜底
   config/      ConfigService（config.yaml 唯一事实来源）+ schema（前端动态表单驱动）
   db/          SQLite schema + repository（迁移全部收敛，新库即建全表）
@@ -53,10 +53,11 @@ backend/
   watcher.py   扫描 + 分层分析管线
   scoresaber.py 联网同步（每线程持久连接 + 并发 + 429 退避）
   desktop.py   壁纸/显示器几何（ctypes Win32，毛玻璃方案 C 后端）
-  dialog.py    原生对话框桥（__main__ 与 backend.main 的共享状态）
+  dialog.py    原生对话框桥 + backdrop-ready 标志（__main__ 与 backend.main 的共享状态）
   host.py      独立窗口宿主（端口/单实例/uvicorn 线程/pywebview/毛玻璃）
   main.py      FastAPI 入口（路由组装）
-frontend/      原生仪表盘（index.html + app.js + style.css）
+frontend/      原生仪表盘（index.html + app.js + style.css + i18n.js）
+frontend/i18n/ 语言对照表（zh-CN/en-US/ja-JP.json，含 lang.name 自述名）
 frontend/chro/ ChroViewer 移植子项目（独立 Vite 构建）
 tests/         单元测试（黄金夹具回归 + schema 自举/升级）
 config/        config.yaml
@@ -74,6 +75,9 @@ _tmp/          测试临时区（探针/截图脚本，可随时清空）
 - 路径派生：`game.instance_root` → replay/custom_levels/songcore（`config/service.py` DERIVED_PATHS，
   标准 Beat Saber 相对路径）；`hidden: True` 的项由"游戏路径"卡片接管（原生文件夹对话框 + 自动验证）
 - 原子写回：tmp → flush → os.replace；config.yaml 损坏自动备份 `.corrupt-<ts>`
+- 关键项：`ai.ai_report_enabled`（"使用 AI 生成报告"开关——不勾选时
+  `run_ai_report` 直接短路到规则报告，不调用 LLM）；`analysis.slope_group_notes`
+  （note 分组大小）；`analysis.window_seconds/window_step_seconds`（已弃用，hidden 保留兼容）
 
 ### 5.2 dialog.py 桥（重要）
 `python backend\host.py` 启动时脚本以 `__main__` 运行；main.py 若 `from backend.host import ...`
@@ -84,9 +88,12 @@ _tmp/          测试临时区（探针/截图脚本，可随时清空）
 ```
 backend/desktop.py  壁纸路径三级兜底 + 窗口/显示器几何（ctypes）
 host.py 服务线程    初始推送 + 1s 轮询（壁纸 mtime/size、显示器几何变化 → 推送）
-前端 app.js         rAF 每帧读 screenX/Y 自裁切（零 IPC）+ 壁纸预加载换图
+frontend app.js     rAF 每帧读 screenX/Y 自裁切（零 IPC）+ 壁纸预加载换图
 移动遮盖            moved/resized → __saberlabBackdropMoving(true)；1s 无事件 → false
                     （后端 watchdog + 前端 1.5s 兜底）
+reload 重推         前端加载/reload 后 POST /api/desktop/backdrop-ready（dialog.py
+                    标志桥）→ 服务线程消费并重新推送 payload（否则语言切换等
+                    reload 后毛玻璃永久丢失）
 ```
 前端契约：`window.__saberlabBackdrop(payload)`（mode=wallpaper/backdrop、monitor、wallpaper_url?v=）、
 `window.__saberlabBackdropMoving(bool)`。浏览器模式（无 `?shell=webview`）完全不启用。
@@ -107,6 +114,31 @@ schema 迁移收敛在 `db/models.py`（新库即建全表，`_migrate` 幂等�
 - 图表：`lineChart`（SVG + crosshair 悬停）；详情页等高逻辑 —— `fixDetailLayout()` 进入时
   一次性固定图表高度（不要改回 `height: auto` 实时计算，会触发高度正反馈循环）
 - 毛玻璃层：`#acrylic-backdrop`（fixed inset 0 + blur），移动中 `.moving` class 拉满模糊
+
+### 6.1 多语言（i18n）
+- 机制：`frontend/i18n.js`（`I18N.init/t/renderLangSwitch`）+ `frontend/i18n/{lang}.json`
+  对照表（zh-CN 为基准表，缺失 key 回退中文）；语言偏好存 localStorage（`saberlab.lang`）
+- **语言自动发现**：`GET /api/i18n/langs` 扫描 `frontend/i18n/*.json`（文件名正则
+  `[a-z]{2}(-[A-Z]{2})?`），读各文件 `lang.name` 作按钮名——新增语言只需放一个
+  json 文件，设置页语言卡片自动出现按钮
+- 文本接入：静态文本 `data-i18n` / `data-i18n-placeholder` / `data-i18n-title`
+  （含子元素的标题文本须包 `<span data-i18n>`）；动态文本用 `t(key, params)`；
+  后端错误消息用 `tErr(msg)`（en/ja 表 `err` 段以中文原文为 key，`{param}` 模板正则匹配）
+- 设置项文案：schema 的 label/description 是中文，前端按配置项 key 查
+  `set.{key}.label/.desc` + `set.group.{group}`（缺失回退中文）
+- 图表标签（TL_LABELS/TL_VALUE_FMT）依赖 dict，须在 `I18N.init()` 后经
+  `buildTimelineI18n()` 构建（模块顶层调用 t() 时 dict 尚未加载）
+- Squircle 圆角：`style.css` 末尾 `@supports (corner-shape: squircle) { .surface, .kpi { border-radius: 40px; corner-shape: squircle; } }`
+  （Chrome 139+ 生效，旧浏览器回退 12px；**须放样式表末尾**——放前面会被
+  `.kpi` 自身的 border-radius 覆盖，见 §4.18 踩坑）
+
+### 6.2 AI 报告语言
+- `ai/prompts.py`：`build_system_prompt(lang)` = 英文基础规则 + 强制输出语言指令
+  （MUST/务必/必ず）+ 语言化小节名（## 结论 / ## Conclusion / ## 結論）——提示词
+  主体必须保持英文，否则 LLM 偏向跟随主体语言（§4.16 实测教训）
+- 入口透传：`/api/ai/analyze/{id}?lang=`、批量分析 body `lang`（前端 `I18N.lang`）；
+  规则报告（`ai/fallback.py` `_TEXT` 三语言模板）同样跟随
+- 是否调用 LLM：由 `ai.ai_report_enabled` 配置决定（`run_ai_report` 单点短路）
 
 ## 7. 测试与调试
 

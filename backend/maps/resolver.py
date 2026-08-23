@@ -1,17 +1,19 @@
-"""Map Resolver：把 Replay 的 map_hash 匹配到本地 CustomLevels。
+"""Map Resolver: match a replay's map_hash to local CustomLevels.
 
-hash 算法（权威来源 SongCore Utilities/Hashing.cs，与游戏内一致）：
-    SHA1( info.dat 字节 + 各 beatmap 文件字节（按 info.dat 中
-    _difficultyBeatmapSets 出现顺序拼接） ) -> 大写 HEX
+Hash algorithm (authoritative source: SongCore Utilities/Hashing.cs, matches in-game):
+    SHA1( info.dat bytes + each beatmap file's bytes (concatenated in the order
+    they appear in _difficultyBeatmapSets in info.dat) ) -> uppercase HEX
 
-优先读取游戏自己的缓存 UserData/SongCore/SongHashData.dat（1000+ 谱面
-瞬间完成），缺失/失效时按上述算法自行计算并写入 SQLite 缓存。
+Preferentially reads the game's own cache UserData/SongCore/SongHashData.dat
+(1000+ maps resolve instantly); when missing/stale, computes hashes with the
+algorithm above and writes them into the SQLite cache.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import pathlib
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
@@ -24,7 +26,7 @@ def _now() -> str:
 
 
 def _find_ci(folder: pathlib.Path, name: str) -> Optional[pathlib.Path]:
-    """大小写不敏感地查找文件（Windows 下 info.dat / Info.dat 均可能出现）。"""
+    """Case-insensitive file lookup (both info.dat / Info.dat may occur on Windows)."""
     target = name.lower()
     try:
         for p in folder.iterdir():
@@ -36,7 +38,7 @@ def _find_ci(folder: pathlib.Path, name: str) -> Optional[pathlib.Path]:
 
 
 def read_level_info(folder: pathlib.Path) -> Optional[dict]:
-    """读取 info.dat，兼容 V2（下划线前缀）与 V3 字段。"""
+    """Read info.dat, compatible with V2 (underscore-prefixed) and V3 fields."""
     info_path = _find_ci(folder, "info.dat")
     if info_path is None:
         return None
@@ -69,12 +71,12 @@ def read_level_info(folder: pathlib.Path) -> Optional[dict]:
                 "njs": njs,
             })
     
-    # 估算歌曲长度：从谱面数据的最后一个 note 计算
+    # Estimate song length from the last note in the beatmap data
     song_length = g("_songLength", "songLength", default=0)
     if not song_length and difficulties:
         bpm = g("_beatsPerMinute", "beatsPerMinute", default=0)
         if bpm > 0:
-            # 优先读取 ExpertPlus 或 Expert 难度
+            # Prefer reading the ExpertPlus or Expert difficulty
             for diff_info in reversed(difficulties):
                 fname = diff_info.get("filename")
                 if fname:
@@ -84,9 +86,9 @@ def read_level_info(folder: pathlib.Path) -> Optional[dict]:
                             diff_data = json.loads(diff_path.read_bytes().decode("utf-8-sig"))
                             notes = diff_data.get("_notes") or diff_data.get("notes") or []
                             if notes:
-                                # 找到最后一个 note 的 beat 时间
+                                # Find the beat time of the last note
                                 last_beat = max(n.get("_time", 0) or n.get("time", 0) for n in notes)
-                                # 估算歌曲长度（秒）= (last_beat / bpm) * 60
+                                # Estimate song length (seconds) = (last_beat / bpm) * 60
                                 song_length = (last_beat / bpm) * 60
                                 break
                         except (json.JSONDecodeError, OSError):
@@ -109,12 +111,12 @@ def read_level_info(folder: pathlib.Path) -> Optional[dict]:
 
 
 def compute_level_nps(folder: pathlib.Path, info: Optional[dict] = None) -> dict:
-    """计算谱面每个难度的 NPS（notes/秒，方块密度）。
+    """Compute NPS per difficulty (notes/sec, note density) for a level.
 
-    从各难度 .dat 文件读取 notes 列表：
-      时长 = 最后一个 note 的 beat 时间换算为秒（beat * 60 / BPM）
-      NPS = notes 总数 / 时长
-    返回 {"Standard|Expert": 4.2, "Standard|Hard": 3.1, ...}。
+    Reads the notes list from each difficulty's .dat file:
+      duration = last note's beat time converted to seconds (beat * 60 / BPM)
+      NPS = total notes / duration
+    Returns {"Standard|Expert": 4.2, "Standard|Hard": 3.1, ...}.
     """
     if info is None:
         info = read_level_info(folder)
@@ -137,12 +139,12 @@ def compute_level_nps(folder: pathlib.Path, info: Optional[dict] = None) -> dict
             data = json.loads(bp.read_bytes().decode("utf-8-sig"))
         except (json.JSONDecodeError, OSError):
             continue
-        # v2 字段 _notes / v3 字段 colorNotes + bombNotes
+        # v2 field _notes / v3 fields colorNotes + bombNotes
         notes = (data.get("_notes") or data.get("notes")
                  or data.get("colorNotes") or [])
         if not notes:
             continue
-        # 最后一个 note 的 beat 时间（v2: _time/time；v3: b）
+        # Beat time of the last note (v2: _time/time; v3: b)
         last_beat = 0.0
         for n in notes:
             t = n.get("_time", n.get("time", n.get("b", 0)))
@@ -158,7 +160,7 @@ def compute_level_nps(folder: pathlib.Path, info: Optional[dict] = None) -> dict
 
 
 def compute_level_hash(folder: pathlib.Path, info: Optional[dict] = None) -> Optional[str]:
-    """按 SongCore 算法计算谱面 hash。"""
+    """Compute the level hash using the SongCore algorithm."""
     info_path = _find_ci(folder, "info.dat")
     if info_path is None:
         return None
@@ -190,19 +192,26 @@ class MapResolver:
         self.levels_dir = pathlib.Path(custom_levels_dir)
         self.repo = repo
         self.songcore_cache_path = pathlib.Path(songcore_cache_path) if songcore_cache_path else None
-        self._negative_cache: set[str] = set()   # 扫描后仍找不到的 hash，避免反复 rescan
-        self._last_scan = 0.0                    # scan 防抖时间戳（批量缺失 hash 场景）
+        self._negative_cache: set[str] = set()   # hashes still missing after a scan, to avoid repeated rescans
+        self._last_scan = 0.0                    # scan debounce timestamp (batch missing-hash scenario)
+        # Full-scan mutex (v1.4.1 fix): concurrent triggers from ensure_map_path/resolve
+        # used to run multiple full scans at once (86 orphan cover requests on the history
+        # page, 19.5s per pass x concurrency), saturating the FastAPI thread pool plus the
+        # SQLite write lock -> all APIs froze for minutes.
+        self._scan_lock = threading.Lock()
+        self._scanning = False                   # a scan is in progress (concurrent requests fail fast)
 
     def update_paths(self, custom_levels_dir: str, songcore_cache_path: str = "") -> None:
-        """路径热更新（设置页保存后调用，无需重启）。"""
+        """Hot-update paths (call after saving in the settings page, no restart needed)."""
         self.levels_dir = pathlib.Path(custom_levels_dir or "")
         self.songcore_cache_path = (
             pathlib.Path(songcore_cache_path) if songcore_cache_path else None)
-        self._negative_cache.clear()   # 路径变了，旧否定缓存作废
+        self._negative_cache.clear()   # paths changed, old negative cache is invalid
+        self._last_scan = 0.0          # reset debounce timestamp too (new paths should allow an immediate scan)
 
     # ---------- SongCore cache ----------
     def load_songcore_cache(self) -> dict[str, str]:
-        """返回 {文件夹名: hash}。缓存 key 形如 '.\\Beat Saber_Data\\CustomLevels\\xxx'。"""
+        """Return {folder_name: hash}. Cache keys look like '.\\Beat Saber_Data\\CustomLevels\\xxx'."""
         out: dict[str, str] = {}
         if not self.songcore_cache_path or not self.songcore_cache_path.exists():
             return out
@@ -224,7 +233,7 @@ class MapResolver:
     # ---------- scan ----------
     def scan(self, progress_cb: Optional[Callable[[int, int, str], None]] = None,
              force_recompute: bool = False) -> dict:
-        """扫描 CustomLevels，建立 hash -> 谱面 缓存。"""
+        """Scan CustomLevels and build the hash -> level cache."""
         stats = {"scanned": 0, "from_songcore_cache": 0, "computed": 0,
                  "reused_db": 0, "errors": 0, "duration_sec": 0.0}
         t0 = time.time()
@@ -242,7 +251,7 @@ class MapResolver:
             stats["scanned"] += 1
             try:
                 self._process_folder(folder, sc_cache, stats, force_recompute)
-            except Exception:  # noqa: BLE001 - 单个谱面失败不影响整体
+            except Exception:  # noqa: BLE001 - one failing level must not abort the whole pass
                 stats["errors"] += 1
         stats["duration_sec"] = round(time.time() - t0, 2)
         return stats
@@ -259,7 +268,7 @@ class MapResolver:
             stats["from_songcore_cache"] += 1
             source = "songcore_cache"
         else:
-            # 尝试复用 DB 缓存：文件夹没有变化就不重算
+            # Try to reuse the DB cache: skip recomputation when the folder is unchanged
             existing = self._db_map_by_path(str(folder))
             folder_mtime = self._folder_mtime(folder)
             if (not force_recompute and existing and existing.get("last_scanned")
@@ -313,13 +322,14 @@ class MapResolver:
             return 0.0
 
     def _db_map_by_path(self, path: str) -> Optional[dict]:
-        # 按文件夹路径精确查询（SongCore 缓存未命中时的 DB 复用回退）。
-        # 旧实现加载全表后无条件 return None（P1-3.3），全量重扫时 O(N²)。
+        # Exact lookup by folder path (DB-reuse fallback when the SongCore cache misses).
+        # The old implementation loaded the whole table then returned None unconditionally
+        # (P1-3.3), making full rescans O(N²).
         return self.repo.get_map_by_path(path)
 
     # ---------- resolve ----------
     def resolve(self, map_hash: str) -> Optional[dict]:
-        """按 replay 的 map_hash 查本地谱面。"""
+        """Look up a local level by the replay's map_hash."""
         if not map_hash:
             return None
         key = map_hash.strip().upper()
@@ -328,25 +338,37 @@ class MapResolver:
             return row
         if key in self._negative_cache:
             return None
-        # DB 未命中：触发一次针对性扫描（新下载的谱面）。
-        # 防抖：批量分析大量缺失 hash（含歌名假 hash 如 "CYCLEHIT"）时，
-        # 只对第一个缺失 hash 全量扫描一次，其余直接判负——避免 40 次全量 scan。
-        if time.time() - self._last_scan < 30:
-            self._negative_cache.add(key)
-            return None
-        self.scan()
-        self._last_scan = time.time()
+        # DB miss: trigger one targeted scan (for newly downloaded levels).
+        # Debounce + mutex (v1.4.1): a scan in progress or one run within the last 30s
+        # -> fail fast, never run concurrent/duplicate full scans (86 orphan cover
+        # requests on the history page once triggered multiple concurrent full scans,
+        # saturating the thread pool and freezing all APIs for minutes).
+        with self._scan_lock:
+            if self._scanning or time.time() - self._last_scan < 30:
+                self._negative_cache.add(key)
+                return None
+            self._scanning = True
+        try:
+            self.scan()
+        finally:
+            with self._scan_lock:
+                self._scanning = False
+                self._last_scan = time.time()
         row = self.repo.get_map(key)
         if row is None:
             self._negative_cache.add(key)
         return row
 
     def ensure_map_path(self, map_hash: str) -> Optional[dict]:
-        """封面懒修复：DB 行路径缺失/失效时触发一次针对性扫描。
+        """Cover lazy-fix: trigger one targeted scan when a DB row's path is missing/stale.
 
-        修复打包版首次 ingest 后封面全默认、重启才恢复的问题——
-        ingest 建行时可能未含有效 path，封面请求时补齐。
-        带负缓存与 30s 防抖：假 hash（如歌名 "GHOST"）不会反复全量扫描。
+        v1.4.1 fix: when there is no DB row (hash not in the maps table) this NO LONGER
+        triggers a full scan - covers are a hot read-only path, and 86 orphan hashes on
+        the history page once triggered multiple concurrent full scans (19.5s per pass x
+        concurrency), saturating the FastAPI thread pool and freezing all APIs for minutes.
+        Row creation is owned by the "rescan map library" (map_scan) task; here we only
+        handle the lightweight case of "row exists but path missing/stale", and the mutex
+        plus debounce guarantee at most one scan at any time.
         """
         if not map_hash:
             return None
@@ -354,22 +376,32 @@ class MapResolver:
         row = self.repo.get_map(key)
         if row and row.get("path") and pathlib.Path(row["path"]).exists():
             return row
+        if not row:
+            return None   # no DB row: do not trigger a scan (row creation belongs to map_scan)
         if key in self._negative_cache:
             return None
-        if time.time() - self._last_scan < 30:
-            return None   # 防抖：30s 内已全量扫描过，不重复
-        self.scan()
-        self._last_scan = time.time()
+        with self._scan_lock:
+            if self._scanning or time.time() - self._last_scan < 30:
+                self._negative_cache.add(key)
+                return None   # scanning now / scanned within 30s: don't repeat, don't block
+            self._scanning = True
+        try:
+            self.scan()
+        finally:
+            with self._scan_lock:
+                self._scanning = False
+                self._last_scan = time.time()
         row = self.repo.get_map(key)
         if row is None:
             self._negative_cache.add(key)
         return row
 
     def cover_path(self, map_hash: str) -> Optional[pathlib.Path]:
-        """从本地谱面文件夹读取封面照片。
+        """Read the cover image from the local level folder.
 
-        优先 info.json 里的 cover_filename（info.dat 的 _coverImageFilename）；
-        info_json 缺失时兜底：重新读 Info.dat 或直接找常见封面文件名。
+        Prefers cover_filename in info.json (info.dat's _coverImageFilename);
+        when info_json is missing, falls back to re-reading Info.dat or searching
+        for common cover filenames directly.
         """
         row = self.repo.get_map(map_hash.strip().upper())
         if not row:
@@ -385,7 +417,7 @@ class MapResolver:
         except json.JSONDecodeError:
             pass
         if not cover:
-            # 兜底 1：重新读 Info.dat 的 _coverImageFilename
+            # Fallback 1: re-read _coverImageFilename from Info.dat
             info = read_level_info(folder)
             if info:
                 cover = info.get("cover_filename") or ""
@@ -393,12 +425,12 @@ class MapResolver:
             p = _find_ci(folder, cover)
             if p and p.exists():
                 return p
-        # 兜底 2：常见封面文件名
+        # Fallback 2: common cover filenames
         for name in ("cover.jpg", "cover.png", "cover.jpeg"):
             p = _find_ci(folder, name)
             if p and p.exists():
                 return p
-        # 兜底 3：任意图片文件（优先体积大的）
+        # Fallback 3: any image file (largest first)
         imgs = sorted(
             (f for f in folder.iterdir()
              if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png")),

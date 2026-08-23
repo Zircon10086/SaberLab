@@ -178,8 +178,12 @@ body::before {
   font-size: var(--fs-xs); color: var(--muted);
   letter-spacing: 0.6px; padding: var(--space-2) var(--space-3);
 }
+/* 导航列：flex column 让按钮 stretch 全宽——hover/选中背景统一延展到
+   侧栏右侧，不再随文字长度变化（v1.4.1） */
+#tabs { display: flex; flex-direction: column; }
 .nav-item {
   display: flex; align-items: center; gap: 10px;
+  width: 100%;
   padding: 9px var(--space-3); margin: 2px 0;
   border-radius: var(--radius-md);
   border: 1px solid transparent;
@@ -567,6 +571,30 @@ mark {
 }
 .dpane .ai-report-surface .report { max-width: 1100px; }
 
+/* 总览分页模式切换（按天 / 按数量，与详情 tab 同款 segmented control，v1.4.1） */
+.page-mode {
+  display: inline-flex; gap: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 3px;
+  margin-left: 12px;
+  vertical-align: middle;
+}
+.page-mode .pm-tab {
+  background: transparent; border: 1px solid transparent;
+  color: var(--text-2); padding: 3px 14px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm); cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.page-mode .pm-tab:hover { color: var(--text); }
+.page-mode .pm-tab.active {
+  background: var(--surface-3);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
 /* 3D 回放（ChroViewer）：信息栏尺寸内嵌，不覆盖导航栏；高度 16:9 由 JS 动态设置 */
 #replay-frame-wrap { padding: 2px; }
 #replay-frame {
@@ -937,4 +965,20 @@ body.acrylic #app-shell {
   inset: 0;
   background: rgba(12, 14, 20, 0.42);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+}
+
+/* G2 continuous-curvature corners (squircle) — visual experiment (2026-08).
+   Applied to all large cards: detail panes (Data/AI/Replay), overview KPI +
+   recent-replays panel, compare pickers, ScoreSaber cards, settings cards.
+   Chrome 139+ supports corner-shape natively; older browsers fall back to
+   the plain rounded corners. Placed at the end of the stylesheet so it wins
+   over the earlier .surface/.kpi border-radius rules (same specificity,
+   later source order wins). Replay list items (.replay-item) and the
+   embedded ChroViewer iframe are intentionally NOT affected. */
+@supports (corner-shape: squircle) {
+  .surface,
+  .kpi {
+    border-radius: 40px;
+    corner-shape: squircle;
+  }
 }

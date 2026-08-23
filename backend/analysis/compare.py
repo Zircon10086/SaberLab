@@ -1,6 +1,6 @@
-"""Run A vs Run B 对比（设计文档 §16 Compare）。
+"""Run A vs Run B comparison (design doc §16 Compare).
 
-只对确定性指标做差值；AI 解释在报告层完成。
+Only diffs are computed on deterministic metrics; AI interpretation happens in the report layer.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ KEY_METRICS = [
 
 
 def compare_metrics(metrics_a: dict, metrics_b: dict) -> list[dict]:
-    """返回 [{scope, name, a, b, diff}]。"""
+    """Return [{scope, name, a, b, diff}]."""
     rows = []
     for scope, name in KEY_METRICS:
         va = metrics_a.get(scope, {}).get(name)

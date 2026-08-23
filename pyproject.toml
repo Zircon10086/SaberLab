@@ -1,6 +1,6 @@
 [project]
 name = "saberlab"
-version = "1.4.0"
+version = "1.5.0"
 description = "Beat Saber 本地 Replay 分析实验室（BSOR 解析 + 确定性指标 + AI 解释）"
 requires-python = ">=3.12"
 dependencies = [

@@ -1,4 +1,4 @@
-"""配置加载：config/config.yaml + .env（不依赖 python-dotenv）。"""
+"""Config loading: config/config.yaml + .env (no python-dotenv dependency)."""
 from __future__ import annotations
 
 import os
@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 
 import yaml
 
-# 项目根定位：
-# - 源码运行：backend/config/__init__.py → 三级父目录 = 项目根
-# - PyInstaller 打包：可写数据（data/、config/）必须放在 exe 旁边，
-#   而不是 sys._MEIPASS 临时解包目录（退出即删，数据库会丢）
+# Project root resolution:
+# - Running from source: backend/config/__init__.py -> three parent levels = project root
+# - PyInstaller bundle: writable data (data/, config/) must live next to the exe,
+#   not under the sys._MEIPASS temp extraction dir (removed on exit, DB would be lost)
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
     PROJECT_ROOT = pathlib.Path(sys.executable).resolve().parent
 else:
@@ -19,7 +19,7 @@ else:
 
 
 def load_dotenv(path: pathlib.Path | None = None) -> None:
-    """极简 .env 加载：KEY=VALUE 行，不覆盖已存在的环境变量。"""
+    """Minimal .env loader: KEY=VALUE lines, never overriding existing env vars."""
     path = path or (PROJECT_ROOT / ".env")
     if not path.exists():
         return
@@ -41,8 +41,12 @@ class Config:
     songcore_cache: str = ""
     scoresaber_id: str = ""
     player_name_fallback: str = ""
+    # [Deprecated] window_seconds / window_step_seconds: fixed time windows retired
+    # (2026 decision, see backend/analysis/notes.py); fields kept only for backward
+    # compatibility with leftover values in old config.yaml; no longer read by the engine.
     window_seconds: float = 30.0
     window_step_seconds: float = 10.0
+    slope_group_notes: int = 50   # note group size for fatigue slope / AI summary (added 2026)
     fatigue_edge_seconds: float = 30.0
     host: str = "127.0.0.1"
     port: int = 8787
@@ -52,6 +56,7 @@ class Config:
     ai_api_key_env: str = "DEEPSEEK_API_KEY"
     ai_temperature: float = 0.3
     ai_max_tokens: int = 2500
+    ai_report_enabled: bool = True   # checked: call the LLM for reports; unchecked: deterministic rule report (2026-08)
     proxy: str = ""
     timeout_seconds: float = 30.0
 
@@ -106,6 +111,7 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         player_name_fallback=player.get("player_name_fallback", ""),
         window_seconds=float(analysis.get("window_seconds", 30)),
         window_step_seconds=float(analysis.get("window_step_seconds", 10)),
+        slope_group_notes=int(analysis.get("slope_group_notes", 50)),
         fatigue_edge_seconds=float(analysis.get("fatigue_edge_seconds", 30)),
         host=server.get("host", "127.0.0.1"),
         port=int(server.get("port", 8787)),
@@ -115,6 +121,7 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         ai_api_key_env=ai.get("api_key_env") or "DEEPSEEK_API_KEY",
         ai_temperature=float(ai.get("temperature", 0.3)),
         ai_max_tokens=int(ai.get("max_tokens", 2500)),
+        ai_report_enabled=bool(ai.get("ai_report_enabled", True)),
         proxy=network.get("proxy", "") or "",
         timeout_seconds=float(network.get("timeout_seconds", 30)),
     )

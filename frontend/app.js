@@ -1,4 +1,4 @@
-/* SaberLab 前端逻辑 —— 原生 JS，无外部依赖 */
+/* SaberLab 前端逻辑 —— 原生 JS，无外部依赖（i18n：JSON 对照表，见 i18n.js） */
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
@@ -12,9 +12,24 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).detail || msg; } catch (_) {}
-    throw new Error(`${path} -> ${res.status}: ${msg}`);
+    throw new Error(`${path} -> ${res.status}: ${tErr(msg)}`);
   }
   return res.json();
+}
+
+/* 静态文本（index.html data-i18n / data-i18n-placeholder / data-i18n-title）。
+   语言切换按钮由 i18n.js renderLangSwitch 动态渲染（自动发现语言文件）。 */
+function applyStaticI18n() {
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    el.textContent = t(el.dataset.i18n);
+  });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+    el.placeholder = t(el.dataset.i18nPlaceholder);
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    el.title = t(el.dataset.i18nTitle);
+  });
+  document.title = t("app.title");
 }
 
 const fmt = {
@@ -23,9 +38,11 @@ const fmt = {
   ts: (unix) => {
     if (!unix) return "-";
     const d = new Date(unix * 1000);
-    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   },
   dur: (s) => s == null ? "-" : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`,
+  dur2: (s) => s == null ? "-"
+    : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}.${String(Math.round((s % 1) * 100)).padStart(2, "0")}`,
 };
 
 /* ---------------- toast（替代原生 alert） ---------------- */
@@ -159,6 +176,12 @@ function initAcrylic() {
       layer.classList.remove("moving");
     }
   };
+
+  // 通知宿主"毛玻璃层已就绪"：页面加载与语言切换 reload 后都会执行到
+  // 这里——host 壁纸服务线程据此重新推送 backdrop payload。否则 reload
+  // 后壁纸/显示器未变化，服务线程不会重推，毛玻璃背景永久丢失
+  // （2026-08 修复：切换语言破坏毛玻璃）。
+  fetch("/api/desktop/backdrop-ready", { method: "POST" }).catch(() => {});
 }
 
 const SHELL_WEBVIEW = new URLSearchParams(location.search).get("shell") === "webview";
@@ -186,7 +209,7 @@ function lineChart(container, series, opts = {}) {
   const pad = { l: 42, r: 10, t: 10, b: 22 };
   let allX = [], allY = [];
   series.forEach((s) => s.points.forEach((p) => { allX.push(p.x); allY.push(p.y); }));
-  if (!allX.length) { container.innerHTML = '<div class="empty">无数据</div>'; return; }
+  if (!allX.length) { container.innerHTML = `<div class="empty">${t("chart.no_data")}</div>`; return; }
 
   // 原始数据备份（tooltip 显示真实值，不受归一化影响）
   const rawSeries = series.map((s) => ({ ...s, points: s.points.map((p) => ({ ...p })) }));
@@ -205,7 +228,8 @@ function lineChart(container, series, opts = {}) {
     opts.yMin = 0; opts.yMax = 100;
   }
 
-  const xMin = Math.min(...allX), xMax = Math.max(...allX);
+  const xMin = opts.xMin != null ? opts.xMin : Math.min(...allX);
+  const xMax = opts.xMax != null ? opts.xMax : Math.max(...allX);
   let yMin = opts.yMin != null ? opts.yMin : Math.min(...allY);
   let yMax = opts.yMax != null ? opts.yMax : Math.max(...allY);
   if (yMax - yMin < 1e-9) { yMax += 1; yMin -= 1; }
@@ -230,9 +254,53 @@ function lineChart(container, series, opts = {}) {
   }
   series.forEach((s) => {
     if (!s.points.length) return;
-    const d = s.points.map((p, i) => `${i ? "L" : "M"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(" ");
+    // 线段裁剪（v1.4.1）：数据点像素超出 x 轴 [xMin, xMax] 的部分
+    // 必须裁掉（仅裁坐标轴标签不够——负/超宽像素仍在 viewBox 内可见）；
+    // 跨界线段在边界处线性插值截断，保持形状。
+    const segs = [];
+    let prev = null;
+    for (const p of s.points) {
+      if (p.x < xMin || p.x > xMax) {
+        if (prev && prev.x >= xMin && prev.x <= xMax) {
+          const bx = p.x > xMax ? xMax : xMin;
+          const t = (bx - prev.x) / (p.x - prev.x || 1e-9);
+          segs.push({ x: bx, y: prev.y + (p.y - prev.y) * t, move: false });
+        }
+        prev = p;
+        continue;
+      }
+      if (prev && (prev.x < xMin || prev.x > xMax)) {
+        const bx = prev.x < xMin ? xMin : xMax;
+        const t = (p.x - bx) / (p.x - prev.x || 1e-9);
+        segs.push({ x: bx, y: p.y + (prev.y - p.y) * t, move: true });
+      } else if (!prev) {
+        segs.push({ x: p.x, y: p.y, move: true });
+      } else {
+        segs.push({ x: p.x, y: p.y, move: false });
+      }
+      prev = p;
+    }
+    if (!segs.length) return;
+    const d = segs.map((q, i) =>
+      `${q.move ? "M" : "L"}${sx(q.x).toFixed(1)},${sy(q.y).toFixed(1)}`).join(" ");
     // pathLength=1 归一化：CSS 用 dasharray=1 做线条绘制动画，适配任意路径长度
     svg += `<path pathLength="1" d="${d}" fill="none" stroke="${s.color}" stroke-width="1.8" opacity="0.95"/>`;
+    // 标记点（转折点）：miss/bad 累计线的每个失误事件画实心小点；
+    // 事件稀疏（单次 replay ≤ 100 个），点不会连成粗段；范围外不画
+    (s.marked || []).forEach((i) => {
+      const p = s.points[i];
+      if (!p || p.x < xMin || p.x > xMax) return;
+      svg += `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="2.5" fill="${s.color}" opacity="0.95"/>`;
+    });
+  });
+  // 静态标记（失败时间红线等，2026-08）：红色纵向虚线贯穿绘图区 + 底部 ✕，
+  // hover 显示 label。与 crosshair 不同：不吸附鼠标、不参与数值框。
+  (opts.markers || []).forEach((mk) => {
+    const xpx = sx(mk.x);
+    if (xpx < pad.l || xpx > W - pad.r) return;   // 轴外不画
+    svg += `<g class="fail-marker" data-label="${escHtml(mk.label)}">` +
+      `<line x1="${xpx.toFixed(1)}" y1="${pad.t}" x2="${xpx.toFixed(1)}" y2="${(H - pad.b).toFixed(1)}" stroke="#ff3d5a" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.8"/>` +
+      `<text x="${xpx.toFixed(1)}" y="${H - pad.b - 5}" fill="#ff3d5a" font-size="13" font-weight="bold" text-anchor="middle">✕</text></g>`;
   });
   svg += `</svg>`;
   // 图例：归一化模式下附带真实数值范围（如 "刀速 (30.2–41.5 m/s)"）
@@ -246,6 +314,35 @@ function lineChart(container, series, opts = {}) {
   container.innerHTML = `<div class="legend">${legend}</div>${svg}`;
   setupCrosshair(container, {
     series, rawSeries, sx, sy, xMin, xMax, pad, W, H, opts,
+  });
+  setupMarkerTips(container, opts.markers || [], sx, pad, W);
+}
+
+/* 静态标记（失败时间红线等）的 hover tooltip：
+   复用 .chart-tip 样式；与 crosshair 完全独立（红色轴不吸附鼠标）。 */
+function setupMarkerTips(container, markers, sx, pad, W) {
+  const svg = container.querySelector("svg");
+  if (!svg || !markers.length) return;
+  const gs = svg.querySelectorAll(".fail-marker");
+  if (!gs.length) return;
+  const tip = document.createElement("div");
+  tip.className = "chart-tip";
+  tip.style.display = "none";
+  container.appendChild(tip);
+  gs.forEach((g, i) => {
+    const mk = markers[i];
+    g.addEventListener("mouseover", () => {
+      tip.innerHTML = `<div class="tip-time">⚠ ${escHtml(mk.label)}</div>`;
+      const rect = container.getBoundingClientRect();
+      const mx = sx(mk.x);
+      let left = mx + 14;
+      const tw = tip.offsetWidth || 160;
+      if (left + tw > rect.width - 6) left = mx - tw - 14;
+      tip.style.left = Math.max(4, left) + "px";
+      tip.style.top = "8px";
+      tip.style.display = "block";
+    });
+    g.addEventListener("mouseout", () => { tip.style.display = "none"; });
   });
 }
 
@@ -296,16 +393,13 @@ function setupCrosshair(container, ctx) {
   const onMove = (e) => {
     const rect = container.getBoundingClientRect();
     const mx = e.clientX - rect.left;
-    const xVal = xMin + ((mx - pad.l) / (W - pad.l - pad.r || 1)) * (xMax - xMin);
-    // 吸附到最近的公共数据点 x（六条序列共享窗口时间轴）
-    let bestX = null, bestD = Infinity;
-    for (const s of series) {
-      if (!s.points.length) continue;
-      const idx = nearestIdx(s.points, xVal);
-      const d = Math.abs(s.points[idx].x - xVal);
-      if (d < bestD) { bestD = d; bestX = s.points[idx].x; }
-    }
-    if (bestX == null) return hide();
+    // v1.4.1：x 值 clamp 到 [xMin, xMax]——鼠标落在图表面板边距区时
+    // 停在轴边界，不会触发"范围外"的交点对齐逻辑
+    const xVal = Math.max(xMin, Math.min(xMax,
+      xMin + ((mx - pad.l) / (W - pad.l - pad.r || 1)) * (xMax - xMin)));
+    // 去掉自动吸附——crosshair 竖线直接跟随鼠标；
+    // 各序列仍取最近数据点显示数值（数值框不吸附竖线）
+    const bestX = xVal;
     const xpx = sx(bestX);
     vline.setAttribute("x1", xpx);
     vline.setAttribute("x2", xpx);
@@ -316,6 +410,22 @@ function setupCrosshair(container, ctx) {
     let rows = `<div class="tip-time">⏱ ${timeTxt}</div>`;
     series.forEach((s, i) => {
       if (!s.points.length) { dots[i].style.display = "none"; return; }
+      if (s.step) {
+        // 台阶线（miss/bad 累计）：函数值 = "到该时刻为止的累计数"，
+        // 圆点对齐竖线与水平段的交点，水平段任意位置都能识别数值
+        let idx = 0;
+        for (let j = s.points.length - 1; j >= 0; j--) {
+          if (s.points[j].x <= bestX + 1e-9) { idx = j; break; }
+        }
+        const p = s.points[idx];
+        dots[i].setAttribute("cx", sx(bestX));
+        dots[i].setAttribute("cy", sy(p.y));
+        dots[i].style.display = "";
+        const v = rawSeries[i].points[idx].y;
+        const txt = opts.valueFmt ? opts.valueFmt(s, v) : v.toFixed(2);
+        rows += `<div class="tip-row"><span class="tip-swatch" style="background:${s.color}"></span>${s.name}<span class="tip-val">${txt}</span></div>`;
+        return;
+      }
       const idx = nearestIdx(s.points, bestX);
       const p = s.points[idx];
       // 该序列在该时刻无数据点（理论上共享时间轴不会发生）
@@ -383,10 +493,9 @@ function renderMarkdown(md) {
    - 多任务运行中：完成数模式——背景进度=完成任务数/总任务数
      （每个任务完成 +1/N），大字"X/N 任务完成"，小字=运行中任务名 */
 function taskKindLabel(kind) {
-  return kind === "ranked_update" ? "联网更新星级/PP"
-    : kind === "map_scan" ? "谱面扫描"
-    : kind === "nps_update" ? "重算 NPS"
-    : kind === "ingest" ? "快速入库" : "批量分析";
+  return t("task.kind." + kind) === "task.kind." + kind
+    ? kind
+    : t("task.kind." + kind);
 }
 
 function updateTaskKpi(tasks) {
@@ -402,8 +511,8 @@ function updateTaskKpi(tasks) {
   if (!active.length) {
     delete card.dataset.task;
     card.style.removeProperty("--task-pct");
-    big.textContent = "空闲";
-    sub.textContent = "无后台任务";
+    big.textContent = t("task.idle");
+    sub.textContent = t("task.idle_sub");
     return;
   }
   card.dataset.task = "running";
@@ -423,25 +532,25 @@ function updateTaskKpi(tasks) {
     const pct = Math.round((done / total) * 100);
     card.style.setProperty("--task-pct",
       `${Math.min(100, Math.max(0, pct))}%`);
-    big.textContent = `${done}/${total} 任务完成`;
-    sub.textContent = active.map((t) => taskKindLabel(t.kind)).join(" · ");
+    big.textContent = t("task.done", { done, total });
+    sub.textContent = active.map((x) => taskKindLabel(x.kind)).join(" · ");
   }
 }
 
 /* 任务完成 toast 文案（成功/失败）
    任务对象 t 可能携带 results[0].failed_songs（ranked_update 重试后放弃的谱面名） */
-function taskDoneMessage(t) {
-  const kind = t.kind;
-  if (t.error) return `任务失败：${t.error}`;
-  const base = kind === "ranked_update" ? "联网获取数据成功"
-    : kind === "map_scan" ? "✅ 已完成谱面扫描"
-    : kind === "nps_update" ? "✅ 已完成 NPS 重算"
-    : kind === "ingest" ? "✅ 已完成快速扫描入库" : "✅ 已完成批量分析";
+function taskDoneMessage(tk) {
+  const kind = tk.kind;
+  if (tk.error) return t("task.failed", { err: tErr(tk.error) });
+  const base = t("task.done." + kind);
   if (kind !== "ranked_update") return base;
-  const failed = (((t.results || [])[0]) || {}).failed_songs || [];
+  const failed = (((tk.results || [])[0]) || {}).failed_songs || [];
   if (!failed.length) return base;
   const shown = failed.slice(0, 3).join("、");
-  return `${base}，失败项目：${shown}${failed.length > 3 ? " 等" : ""}`;
+  return base + t("task.failed_songs", {
+    names: shown,
+    more: failed.length > 3 ? t("task.failed_songs_more") : "",
+  });
 }
 
 async function loadStatus() {
@@ -454,57 +563,76 @@ async function loadStatus() {
     // Header 状态
     $("#hdr-replays").textContent = fmt.num(s.db.replays);
     $("#hdr-maps").textContent = fmt.num(s.db.maps);
-    $("#hdr-ai").textContent = s.ai.configured ? "DeepSeek ✓" : "规则兜底";
+    $("#hdr-ai").textContent = s.ai.configured ? "DeepSeek ✓" : t("kpi.ai_rule_fallback");
     // KPI 行
     $("#kpi-replays").textContent = fmt.num(s.db.replays);
-    $("#kpi-replays-sub").textContent = rd.exists ? `目录 ${rd.bsor_files} 个 .bsor` : "目录不存在!";
+    $("#kpi-replays-sub").textContent = rd.exists
+      ? t("kpi.replays_sub", { n: rd.bsor_files })
+      : t("kpi.replays_sub_missing");
     $("#kpi-maps").textContent = fmt.num(s.db.maps);
-    $("#kpi-maps-sub").textContent = "本地 CustomLevels";
+    $("#kpi-maps-sub").textContent = t("kpi.maps_sub");
     // 任务状态 KPI（文字+进度背景）+ 按钮可用性同步（页面加载/刷新时恢复正确状态）
     const tasks = s.tasks || [];
-    syncActionButtons(tasks.some((t) => t.running));
+    dbEmpty = !(s.db && s.db.replays > 0);   // 空库判定（后端同款口径：replays 表）
+    syncActionButtons(tasks.some((x) => x.running));
     updateTaskKpi(tasks);
     $("#kpi-ai").textContent = s.ai.provider;
-    $("#kpi-ai-sub").textContent = s.ai.configured ? "✅ 已配置 API key" : "⚠️ 未配置（规则报告兜底）";
+    $("#kpi-ai-sub").textContent = s.ai.configured
+      ? t("kpi.ai_configured")
+      : t("kpi.ai_not_configured");
     // 侧栏服务器状态点
     $("#srv-dot").classList.toggle("offline", !s.ok);
-    $("#srv-text").textContent = s.ok ? "服务器运行中" : "服务器离线";
+    $("#srv-text").textContent = s.ok ? t("footer.status_ok") : t("footer.status_offline");
     return s;
   } catch (e) {
     $("#srv-dot").classList.add("offline");
-    $("#srv-text").textContent = "后端不可达";
-    $("#kpi-ai").textContent = "离线";
+    $("#srv-text").textContent = t("footer.status_down");
+    $("#kpi-ai").textContent = t("kpi.ai_offline");
     $("#kpi-ai-sub").textContent = e.message;
     return null;
   }
 }
 
 let currentPage = 1;
+let pageMode = "day";   // 总览分页模式：day=按天分组 / count=按数量（20 条/页，v1.4.1）
 
 async function loadRecent(page = 1) {
   currentPage = page;
-  const data = await api(`/api/replays?page=${page}`);
+  const data = await api(`/api/replays?page=${page}&mode=${pageMode}`);
+  if (pageMode === "count") {
+    const items = data.replays || [];
+    $("#recent-replays").innerHTML = items.length
+      ? `<div class="replay-list">${items.map((r) => replayItem(r)).join("")}</div>`
+      : `<div class="empty">${t("recent.empty")}</div>`;
+    bindReplayItems();
+    renderPagination(data.total, data.page, data.pages, "count");
+    return;
+  }
   const days = data.days || [];
   const html = days.map((d) => {
-    const dateTitle = `<div class="day-header">${escHtml(d.date)} <span class="day-count">${d.replays.length} 条记录</span></div>`;
-    const items = d.replays.length ? d.replays.map((r) => replayItem(r)).join("") : '<div class="empty">这天没有记录</div>';
+    const dateTitle = `<div class="day-header">${escHtml(d.date)} <span class="day-count">${d.replays.length} ${t("pagination.unit_count")}</span></div>`;
+    const items = d.replays.length ? d.replays.map((r) => replayItem(r)).join("") : `<div class="empty">${t("recent.day_empty")}</div>`;
     return `<div class="day-group">${dateTitle}<div class="replay-list">${items}</div></div>`;
   }).join("");
-  $("#recent-replays").innerHTML = days.length ? html : '<div class="empty">还没有分析过 Replay。点击"开始分析"。</div>';
+  $("#recent-replays").innerHTML = days.length ? html : `<div class="empty">${t("recent.empty")}</div>`;
   bindReplayItems();
-  renderPagination(data.total_days, data.page, data.pages);
+  renderPagination(data.total_days, data.page, data.pages, "day");
 }
 
-function renderPagination(total, page, pages) {
+function renderPagination(total, page, pages, unit = "day") {
   const el = $("#pagination");
   if (pages <= 1) {
     el.innerHTML = "";
     return;
   }
-  let html = `<div class="pagination-info">共 ${total} 天记录，第 ${page}/${pages} 页</div>`;
+  const isCount = unit === "count";
+  const unitLabel = t(isCount ? "pagination.unit_count" : "pagination.unit_day");
+  const prevLabel = t(isCount ? "pagination.prev_count" : "pagination.prev_day");
+  const nextLabel = t(isCount ? "pagination.next_count" : "pagination.next_day");
+  let html = `<div class="pagination-info">${t("pagination.total", { total, unit: unitLabel, page, pages })}</div>`;
   html += `<div class="pagination-controls">`;
   if (page > 1) {
-    html += `<button onclick="loadRecent(${page - 1})">◀ 前一天</button>`;
+    html += `<button onclick="loadRecent(${page - 1})">${prevLabel}</button>`;
   }
   const start = Math.max(1, page - 2);
   const end = Math.min(pages, page + 2);
@@ -524,11 +652,21 @@ function renderPagination(total, page, pages) {
     html += `<button onclick="loadRecent(${pages})">${pages}</button>`;
   }
   if (page < pages) {
-    html += `<button onclick="loadRecent(${page + 1})">后一天 ▶</button>`;
+    html += `<button onclick="loadRecent(${page + 1})">${nextLabel}</button>`;
   }
   html += `</div>`;
   el.innerHTML = html;
 }
+
+/* 分页模式切换：立即刷新（v1.4.1） */
+$$("#page-mode .pm-tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (pageMode === btn.dataset.mode) return;
+    pageMode = btn.dataset.mode;
+    $$("#page-mode .pm-tab").forEach((b) => b.classList.toggle("active", b === btn));
+    loadRecent(1);
+  });
+});
 
 function starColor(stars) {
   if (stars == null) return "";
@@ -552,16 +690,17 @@ function replayItem(r, highlight = "") {
   const ppTxt = r.pp != null ? Number(r.pp).toFixed(1) + "pp" : "–";
   const npsTxt = r.nps != null ? Number(r.nps).toFixed(2) : "–";
   const scoreTxt = r.score_effective != null ? fmt.num(r.score_effective) : fmt.num(r.score);
-  const scoreExtra = r.has_nf ? '<span class="nf-badge" title="Fail 后自动启用 No Fail，有效分减半">NF</span>' : "";
+  const scoreExtra = r.has_nf ? '<span class="nf-badge" title="' + t("replay.nf_badge") + '">NF</span>' : "";
   const pendingBadge = isPending
-    ? '<span class="pill pending" title="已入库元数据快照，点击详情自动分析">待分析</span>' : "";
+    ? `<span class="pill pending" title="${t("replay.pending")}">${t("replay.pending")}</span>` : "";
   // MISS/BAD：未分析时显示"待分析"，不显示 null/null
-  const missBadTxt = isPending ? '<span style="color:var(--muted)">待分析</span>'
+  const missBadTxt = isPending
+    ? `<span style="color:var(--muted)">${t("replay.pending")}</span>`
     : `${r.miss_count}<span style="color:var(--muted)">/${r.bad_count}</span>`;
   return `<div class="replay-item status-${statusClass}" data-id="${r.replay_id}">
-    <img src="${cover}" onerror="this.onerror=null;this.src='/static/default.png'" alt="">
+    <img src="${cover}" loading="lazy" onerror="this.onerror=null;this.src='/static/default.png'" alt="">
     <div>
-      <div class="title">${highlightMatch(r.song_name || "(未知歌曲)", highlight)} ${keyBadge} <span class="completion-icon">${statusIcon}</span></div>
+      <div class="title">${highlightMatch(r.song_name || t("replay.unknown_song"), highlight)} ${keyBadge} <span class="completion-icon">${statusIcon}</span></div>
       <div class="sub">
         <span class="pill diff-${r.difficulty}">${r.difficulty}</span>
         ${pendingBadge}
@@ -571,13 +710,13 @@ function replayItem(r, highlight = "") {
         ${fmt.ts(r.timestamp)} · ${escHtml(r.player_name || "")}
       </div>
     </div>
-    <div class="num"><div class="v">${npsTxt}</div><div class="k">NPS</div></div>
-    <div class="num"><div class="v"><span class="${starColor(r.stars)}">${starsTxt}</span></div><div class="k">STARS</div></div>
-    <div class="num"><div class="v">${ppTxt}</div><div class="k">PP</div></div>
-    <div class="num"><div class="v">${scoreTxt}${scoreExtra}</div><div class="k">SCORE${r.has_nf ? " (×0.5)" : ""}</div></div>
-    <div class="num"><div class="v">${acc}</div><div class="k">ACC</div></div>
-    <div class="num"><div class="v">${missBadTxt}</div><div class="k">MISS/BAD</div></div>
-    <div class="num play"><button class="play-btn" title="查看 3D 回放">▶</button></div>
+    <div class="num"><div class="v">${npsTxt}</div><div class="k">${t("replay.kpi.nps")}</div></div>
+    <div class="num"><div class="v"><span class="${starColor(r.stars)}">${starsTxt}</span></div><div class="k">${t("replay.kpi.stars")}</div></div>
+    <div class="num"><div class="v">${ppTxt}</div><div class="k">${t("replay.kpi.pp")}</div></div>
+    <div class="num"><div class="v">${scoreTxt}${scoreExtra}</div><div class="k">${t("replay.kpi.score")}${r.has_nf ? " (×0.5)" : ""}</div></div>
+    <div class="num"><div class="v">${acc}</div><div class="k">${t("replay.kpi.acc")}</div></div>
+    <div class="num"><div class="v">${missBadTxt}</div><div class="k">${t("replay.kpi.miss_bad")}</div></div>
+    <div class="num play"><button class="play-btn" title="${t("replay.play_title")}">▶</button></div>
   </div>`;
 }
 
@@ -608,7 +747,7 @@ function requirePaths(need) {
   const needReplay = need === "replay" || need === "both";
   const needMaps = need === "maps" || need === "both";
   if ((needReplay && !pathState.replay) || (needMaps && !pathState.maps)) {
-    toast("游戏路径未配置或不可用：请先到「设置 → 游戏路径」选择 Beat Saber 游戏根目录", "error");
+    toast(t("replay.path_required"), "error");
     return false;
   }
   return true;
@@ -616,10 +755,12 @@ function requirePaths(need) {
 
 $("#btn-refresh-all").addEventListener("click", async () => {
   if (!requirePaths("both")) return;
-  const runAi = $("#chk-run-ai").checked;
   try {
+    // Whether reports call the LLM is now a settings toggle
+    // (settings → AI → "Use AI for reports", backend reads ai.ai_report_enabled);
+    // batch analysis always generates reports (rule or AI) accordingly.
     await api("/api/refresh/all", {
-      method: "POST", body: JSON.stringify({ run_ai: runAi }),
+      method: "POST", body: JSON.stringify({ lang: I18N.lang }),
     });
     pollTask();                       // 多任务轮询（KPI 卡片按完成数显示进度）
   } catch (e) { toast(e.message); }
@@ -630,7 +771,7 @@ $("#btn-refresh-online").addEventListener("click", async () => {
   try {
     // ① 联网预检：未联网直接拦截（避免全量同步空跑 + 数分钟后整批失败）
     const net = await api("/api/network/check");
-    if (!net.online) { toast("当前未联网"); return; }
+    if (!net.online) { toast(t("err.offline")); return; }
     await api("/api/refresh/online", { method: "POST" });
     pollTask();
   } catch (e) {
@@ -640,13 +781,20 @@ $("#btn-refresh-online").addEventListener("click", async () => {
 });
 
 let taskTimer = null;
+let dbEmpty = false;   // 数据库为空：仅「⚡ 一键刷新」可用（v1.4.1 空库兜底）
 /* 任务运行期间禁用全部任务按钮（灰显），完成后恢复。
    进度展示完全由任务状态 KPI 卡片承担（单任务=详情进度，多任务=完成数）。 */
 const ACTION_BUTTONS = ["btn-refresh-all", "btn-refresh-online"];
 function syncActionButtons(running) {
   ACTION_BUTTONS.forEach((id) => {
     const b = document.getElementById(id);
-    if (b) b.disabled = !!running;
+    if (!b) return;
+    const isOnline = id === "btn-refresh-online";
+    // 空库时仅放行一键刷新：联网更新依赖已入库的谱面 hash，灰显引导
+    b.disabled = !!running || (isOnline && dbEmpty);
+    if (isOnline) {
+      b.title = dbEmpty ? t("err.db_empty") : "";
+    }
   });
 }
 async function pollTask() {
@@ -682,7 +830,15 @@ async function pollTask() {
 
 /* ---------------- 详情 ---------------- */
 let currentReplay = null;
-let currentWindows = [];
+let currentEvents = { miss: [], bad: [] };   // miss/bad 事件时间戳（事件台阶线）
+let currentNotes = { t: [], acc: [], center_t: [], center: [], speed_t: [], speed: [], density_t: [], density: [] };
+  // per-note 曲线（固定窗口退役，2026）：
+  //   t/acc = 官方口径累计 accuracy（score/maxScore，全部 block note 含惩罚点，
+  //           终点与 replay 记录一致；2026-08 修正）
+  //   center_t/center = good cut 累计 Center 均分（bad/miss 无测量不伪造）
+  //   speed_t/speed = good cut 刀速 ±7 局部均值
+  //   density_t/density = 非 bomb note 局部密度（±5 邻域 + ±2 圆润）
+let currentNoteRange = { first_note: 0, last_note: 0 };  // note 首末时间（时间轴裁剪）
 let currentSeries = null;
 let detailReturnTab = "overview";   // 从哪个页面进入详情，返回按钮回到那里
 let detailReqSeq = 0;               // 详情请求序号：过期响应丢弃（防竞态）
@@ -737,14 +893,16 @@ async function openDetail(id, pane = "data") {
     clearTimeout(skTimer);
     if (seq !== detailReqSeq) return;   // 已有更新的请求，丢弃本次结果
     currentReplay = row;
-    currentWindows = timeline.windows || [];
+    currentEvents = timeline.events || { miss: [], bad: [] };
+    currentNotes = timeline.notes || { t: [], acc: [], center_t: [], center: [], speed_t: [], speed: [], density_t: [], density: [] };
+    currentNoteRange = timeline.note_range || { first_note: 0, last_note: 0 };
     currentSeries = series.motion;
     renderDetail(skeletonShown);
   } catch (e) {
     clearTimeout(skTimer);
     if (seq !== detailReqSeq) return;   // 过期请求的错误不展示
     if (e.name === "AbortError") return; // 主动取消：静默
-    content.innerHTML = `<div class="empty" style="color:var(--red)">加载失败: ${e.message}</div>`;
+    content.innerHTML = `<div class="empty" style="color:var(--red)">${t("detail.load_failed", { err: escHtml(e.message) })}</div>`;
   }
 }
 
@@ -832,22 +990,22 @@ function renderDetailBody(content) {
     img.classList.remove("hidden");
     img.onerror = () => { img.onerror = null; img.src = "/static/default.png"; };
   }
-  $("#d-song").textContent = r.song_name || "(未知歌曲)";
+  $("#d-song").textContent = r.song_name || t("replay.unknown_song");
   const map = r.map || {};
   const starsStr = map.stars ? ` · ${Number(map.stars).toFixed(2)}★` : "";
   const rankedStr = map.ranked_difficulty ? ` · Ranked ${map.ranked_difficulty}` : "";
   $("#d-sub").innerHTML =
     `${escHtml(map.song_author || "")} · mapper: ${escHtml(r.mapper || map.mapper || "-")} · BPM ${map.bpm || "-"} · ` +
-    `${fmt.ts(r.timestamp)} · 时长 ${fmt.dur(r.duration)} · ${r.fps_median || "-"} FPS${starsStr}${rankedStr}` +
-    `<br>重算分 ${fmt.num(r.score_recomputed)}` +
-    (r.score !== r.score_recomputed ? " ⚠️与记录不符" : "（与记录一致）") +
-    (r.has_nf ? ` · NF 有效分 ${fmt.num(r.score_effective)}（×0.5）` : "");
+    `${fmt.ts(r.timestamp)} · ${t("detail.duration")} ${fmt.dur(r.duration)} · ${r.fps_median || "-"} FPS${starsStr}${rankedStr}` +
+    `<br>${t("detail.recompute")} ${fmt.num(r.score_recomputed)}` +
+    (r.score !== r.score_recomputed ? t("detail.recompute_differs") : t("detail.recompute_matches")) +
+    (r.has_nf ? t("detail.nf_effective", { score: fmt.num(r.score_effective) }) : "");
   $("#d-badges").innerHTML =
     `<span class="pill diff-${r.difficulty}">${r.difficulty}</span>` +
     `<span class="pill">${r.mode}</span>` +
-    (r.has_nf ? '<span class="pill nf">NF（Fail 后自动启用）</span>' : "") +
-    (r.full_combo ? '<span class="pill fc">FULL COMBO</span>' : "") +
-    (!r.won ? '<span class="pill fail">FAILED</span>' : "") +
+    (r.has_nf ? `<span class="pill nf">${t("detail.nf_pill")}</span>` : "") +
+    (r.full_combo ? `<span class="pill fc">${t("detail.fc")}</span>` : "") +
+    (!r.won ? `<span class="pill fail">${t("detail.failed_badge")}</span>` : "") +
     (r.modifiers ? `<span class="pill">${escHtml(r.modifiers)}</span>` : "");
   // Hero KPI
   $("#d-score").textContent = fmt.num(r.score_effective != null ? r.score_effective : r.score);
@@ -869,20 +1027,20 @@ function renderDetailBody(content) {
 
   // counts
   $("#d-counts").innerHTML =
-    countBox("good", r.good_count, "GOOD") + countBox("bad", r.bad_count, "BAD CUT") +
-    countBox("miss", r.miss_count, "MISS") + countBox("bomb", r.bomb_count, "BOMB") +
-    countBox("", r.note_count, "总 NOTE");
+    countBox("good", r.good_count, t("hand.good")) + countBox("bad", r.bad_count, t("hand.bad")) +
+    countBox("miss", r.miss_count, t("hand.miss")) + countBox("bomb", r.bomb_count, "BOMB") +
+    countBox("", r.note_count, "NOTE");
   // 设备环境：列表显示（参照其他卡片）
   const envRows = [
-    ["头显", r.hmd || "-"],
-    ["控制器", r.controller || "-"],
-    ["追踪系统", r.tracking_system || "-"],
-    ["游戏版本", r.game_version || "-"],
-    ["BeatLeader mod", r.mod_version || "-"],
-    ["跳跃距离", r.jump_distance?.toFixed?.(1) ?? "-"],
-    ["Saber Profile", r.profile_id || "无 offset 数据"],
-    ["谱面 hash", r.map_hash || "-"],
-    ["Replay sha256", r.replay_id ? r.replay_id.slice(0, 16) + "…" : "-"],
+    [t("detail.env.hmd"), r.hmd || "-"],
+    [t("detail.env.controller"), r.controller || "-"],
+    [t("detail.env.tracking"), r.tracking_system || "-"],
+    [t("detail.env.game_version"), r.game_version || "-"],
+    [t("detail.env.mod_version"), r.mod_version || "-"],
+    [t("detail.env.jump_distance"), r.jump_distance?.toFixed?.(1) ?? "-"],
+    [t("detail.env.profile"), r.profile_id || t("detail.env.no_offset")],
+    [t("detail.env.map_hash"), r.map_hash || "-"],
+    [t("detail.env.replay_sha"), r.replay_id ? r.replay_id.slice(0, 16) + "…" : "-"],
   ];
   $("#d-env").innerHTML = `<table class="metrics-table env-table">` +
     envRows.map(([k, v]) => `<tr><td>${escHtml(k)}</td><td>${v}</td></tr>`).join("") +
@@ -907,19 +1065,19 @@ function renderDetailBody(content) {
   // report
   renderReport(r.report);
   $("#btn-run-ai").onclick = async () => {
-    $("#d-report").innerHTML = '<span class="spinner"></span>AI 分析中…';
+    $("#d-report").innerHTML = `<span class="spinner"></span>${t("detail.analyzing")}`;
     try {
-      await api(`/api/ai/analyze/${r.replay_id}`, { method: "POST" });
+      await api(`/api/ai/analyze/${r.replay_id}?lang=${I18N.lang}`, { method: "POST" });
       const rep = await api(`/api/reports/${r.replay_id}`);
       renderReport(rep);
-    } catch (e) { $("#d-report").innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+    } catch (e) { $("#d-report").innerHTML = `<span style="color:var(--red)">${escHtml(e.message)}</span>`; }
   };
 
-  // same-map history
+  // 同谱历史
   const hist = r.history_same_map || [];
   $("#d-history").innerHTML = hist.length
-    ? `<div class="replay-list">${hist.map((r) => replayItem(r)).join("")}</div>`
-    : '<div class="empty">这是该谱该难度的第一份本地记录。</div>';
+    ? `<div class="replay-list">${hist.map((x) => replayItem(x)).join("")}</div>`
+    : `<div class="empty">${t("detail.history_empty")}</div>`;
   bindReplayItems();
 
   // 数据一览 / AI 分析 滑块切换
@@ -986,44 +1144,44 @@ function buildDetailSkeleton() {
     </div>
   </div>
   <div class="detail-tabs" id="detail-tabs">
-    <button class="dt-tab active" data-pane="data">数据一览</button>
-    <button class="dt-tab" data-pane="ai">AI 分析</button>
-    <button class="dt-tab" data-pane="replay">查看回放</button>
+    <button class="dt-tab active" data-pane="data">${t("detail.tab.data")}</button>
+    <button class="dt-tab" data-pane="ai">${t("detail.tab.ai")}</button>
+    <button class="dt-tab" data-pane="replay">${t("detail.tab.replay")}</button>
   </div>
   <div class="detail-panes">
     <div class="panes-track" id="panes-track">
       <div class="dpane" id="pane-data">
         <div class="detail-grid">
-          <div class="surface"><div class="surface-title">判定统计</div><div id="d-counts" class="counts"></div><div id="d-env" class="env"></div></div>
-          <div class="surface"><div class="surface-title">时间序列</div>
+          <div class="surface"><div class="surface-title">${t("detail.card.judgments")}</div><div id="d-counts" class="counts"></div><div id="d-env" class="env"></div></div>
+          <div class="surface"><div class="surface-title">${t("detail.card.timeline")}</div>
             <div class="chart-controls">
-              <label><input type="checkbox" class="tl-toggle" value="accuracy_local" checked> Accuracy</label>
-              <label><input type="checkbox" class="tl-toggle" value="center_avg" checked> Center</label>
-              <label><input type="checkbox" class="tl-toggle" value="miss_rate" checked> Miss 率</label>
-              <label><input type="checkbox" class="tl-toggle" value="bad_rate"> Bad 率</label>
-              <label><input type="checkbox" class="tl-toggle" value="saber_speed_avg"> 刀速</label>
-              <label><input type="checkbox" class="tl-toggle" value="note_density"> 密度</label>
+              <label><input type="checkbox" class="tl-toggle" value="accuracy_local" checked> ${t("tl.accuracy")}</label>
+              <label><input type="checkbox" class="tl-toggle" value="center_avg" checked> ${t("tl.center")}</label>
+              <label><input type="checkbox" class="tl-toggle" value="miss_cum" checked> ${t("tl.miss_cum")}</label>
+              <label><input type="checkbox" class="tl-toggle" value="bad_cum"> ${t("tl.bad_cum")}</label>
+              <label><input type="checkbox" class="tl-toggle" value="saber_speed_avg"> ${t("tl.speed")}</label>
+              <label><input type="checkbox" class="tl-toggle" value="note_density"> ${t("tl.density")}</label>
             </div>
             <div id="chart-timeline" class="chart"></div></div>
-          <div class="surface"><div class="surface-title">疲劳曲线</div><div id="d-fatigue"></div></div>
-          <div class="surface"><div class="surface-title">切准度（Pre / Center / Post）</div><table class="metrics-table" id="d-hands"></table>
-            <p class="hint">Center=切准分(0–15，越高越好)；Pre 0–70；Post 0–30。cut 距离越小越好。时间偏差为游戏原始 timeDeviation（毫秒）。</p></div>
-          <div class="surface"><div class="surface-title">手部运动</div>
+          <div class="surface"><div class="surface-title">${t("detail.card.fatigue")}</div><div id="d-fatigue"></div></div>
+          <div class="surface"><div class="surface-title">${t("detail.card.accuracy")}</div><table class="metrics-table" id="d-hands"></table>
+            <p class="hint">${t("detail.acc_hint")}</p></div>
+          <div class="surface"><div class="surface-title">${t("detail.card.motion")}</div>
             <div id="chart-speed" class="chart small"></div><div id="chart-ang" class="chart small"></div>
             <table class="metrics-table" id="d-motion"></table></div>
-          <div class="surface"><div class="surface-title">单手连续换向</div><table class="metrics-table" id="d-reversal"></table></div>
+          <div class="surface"><div class="surface-title">${t("detail.card.reversal")}</div><table class="metrics-table" id="d-reversal"></table></div>
         </div>
-        <div class="surface same-map-history"><div class="surface-title">同谱历史</div><div id="d-history"></div></div>
+        <div class="surface same-map-history"><div class="surface-title">${t("detail.card.history")}</div><div id="d-history"></div></div>
       </div>
       <div class="dpane" id="pane-ai">
         <div class="surface ai-report-surface">
-          <div class="surface-title">AI 分析报告 <button id="btn-run-ai" class="mini">重新生成</button></div>
-          <div id="d-report" class="report">暂无报告。</div>
+          <div class="surface-title">${t("detail.tab.ai")} <button id="btn-run-ai" class="mini">${t("detail.report_regenerate")}</button></div>
+          <div id="d-report" class="report">${t("detail.report_none")}</div>
         </div>
       </div>
       <div class="dpane" id="pane-replay">
         <div class="surface">
-          <div class="surface-title">3D 回放 <span class="hint" style="margin:0 0 0 8px">本地渲染 · ChroViewer 引擎</span></div>
+          <div class="surface-title">${t("detail.tab.replay")}</div>
           <div id="replay-frame-wrap"></div>
         </div>
       </div>
@@ -1037,19 +1195,19 @@ function countBox(cls, v, k) {
 
 function handRows(l, r) {
   const rows = [
-    ["Good 切割", l.good, r.good, 0],
-    ["Bad Cut", l.bad, r.bad, 0],
-    ["Miss", l.miss, r.miss, 0],
-    ["前置分均值 (0–70)", l.pre_score_avg, r.pre_score_avg, 2],
-    ["切准分均值 (0–15)", l.center_score_avg, r.center_score_avg, 2],
-    ["后置分均值 (0–30)", l.post_score_avg, r.post_score_avg, 2],
-    ["切割距离 cm ↓", l.cut_distance_cm_avg, r.cut_distance_cm_avg, 2],
-    ["挥刀速度均值", l.saber_speed_avg, r.saber_speed_avg, 1],
-    ["时机偏差 ms", l.time_dev_avg_ms, r.time_dev_avg_ms, 1],
-    ["时机 |偏差| ms", l.time_dev_abs_avg_ms, r.time_dev_abs_avg_ms, 1],
-    ["路径经济性", l.path_economy, r.path_economy, 3],
+    [t("hand.good"), l.good, r.good, 0],
+    [t("hand.bad"), l.bad, r.bad, 0],
+    [t("hand.miss"), l.miss, r.miss, 0],
+    [t("hand.pre"), l.pre_score_avg, r.pre_score_avg, 2],
+    [t("hand.center"), l.center_score_avg, r.center_score_avg, 2],
+    [t("hand.post"), l.post_score_avg, r.post_score_avg, 2],
+    [t("hand.cut_dist"), l.cut_distance_cm_avg, r.cut_distance_cm_avg, 2],
+    [t("hand.saber_speed"), l.saber_speed_avg, r.saber_speed_avg, 1],
+    [t("hand.time_dev"), l.time_dev_avg_ms, r.time_dev_avg_ms, 1],
+    [t("hand.time_dev_abs"), l.time_dev_abs_avg_ms, r.time_dev_abs_avg_ms, 1],
+    [t("hand.economy"), l.path_economy, r.path_economy, 3],
   ];
-  return `<tr><th>指标</th><th style="color:var(--red)">左手</th><th style="color:var(--blue)">右手</th><th>差 (右−左)</th></tr>` +
+  return `<tr><th>${t("hand.th")}</th><th style="color:var(--red)">${t("hand.left")}</th><th style="color:var(--blue)">${t("hand.right")}</th><th>${t("hand.diff")}</th></tr>` +
     rows.map(([name, a, b, d]) => {
       const diff = (a != null && b != null) ? (b - a) : null;
       return `<tr><td>${name}</td><td>${fmt.num(a, d)}</td><td>${fmt.num(b, d)}</td>
@@ -1061,15 +1219,15 @@ function motionRows(m) {
   const rows = [];
   for (const hand of ["left", "right"]) {
     const h = m[hand] || {};
-    const L = hand === "left" ? "左" : "右";
+    const L = t(hand === "left" ? "motion.hand_left" : "motion.hand_right");
     const speedPeak = h.speed_peak_mps != null ? h.speed_peak_mps : (h.speed_p95_mps != null ? h.speed_p95_mps + " (P95)" : "-");
     const angPeak = h.angular_velocity_peak_degps != null ? h.angular_velocity_peak_degps : (h.angular_velocity_p95_degps != null ? h.angular_velocity_p95_degps + " (P95)" : "-");
-    rows.push([`${L}手移动路径长度 m`, h.path_length_m, 1]);
-    rows.push([`${L}手速度 均值/峰值 m/s`, h.speed_avg_mps != null ? `${h.speed_avg_mps} / ${speedPeak}` : "-", -1]);
-    rows.push([`${L}手控制器角速度 均值 °/s`, h.angular_velocity_avg_degps, 0]);
-    rows.push([`${L}手角速度 P95/峰值 °/s`, h.angular_velocity_p95_degps != null ? `${h.angular_velocity_p95_degps} / ${angPeak}` : "-", -1]);
+    rows.push([t("motion.path", { hand: L }), h.path_length_m, 1]);
+    rows.push([t("motion.speed", { hand: L }), h.speed_avg_mps != null ? `${h.speed_avg_mps} / ${speedPeak}` : "-", -1]);
+    rows.push([t("motion.ang_avg", { hand: L }), h.angular_velocity_avg_degps, 0]);
+    rows.push([t("motion.ang_p95", { hand: L }), h.angular_velocity_p95_degps != null ? `${h.angular_velocity_p95_degps} / ${angPeak}` : "-", -1]);
   }
-  return `<tr><th>运动学指标</th><th>值</th></tr>` + rows.map(([k, v, d]) =>
+  return `<tr><th>${t("motion.table_header")}</th><th>${t("motion.table_value")}</th></tr>` + rows.map(([k, v, d]) =>
     `<tr><td>${k}</td><td>${d === -1 ? v : fmt.num(v, d)}</td></tr>`).join("");
 }
 
@@ -1077,30 +1235,32 @@ function reversalRows(m) {
   const rows = [];
   for (const hand of ["left", "right"]) {
     const H = m[hand] || {};
-    const L = hand === "left" ? "左" : "右";
-    rows.push([`${L}手连击间隔均值 ms`, fmt.num(H.hit_interval_avg_ms, 0)]);
-    rows.push([`${L}手高速段占比 (<0.35s)`, H.fast_ratio != null ? (H.fast_ratio * 100).toFixed(1) + "%" : "-"]);
-    rows.push([`${L}手高速段失误率`, H.fast_fail_rate != null ? (H.fast_fail_rate * 100).toFixed(1) + "%" : "-"]);
-    rows.push([`${L}手失误集中度 (高速/整体)`, fmt.num(H.fast_fail_concentration, 2)]);
-    rows.push([`${L}手刀速保持率 (高速/低速)`, fmt.num(H.speed_retention, 2)]);
-    rows.push([`${L}手换向得分`, fmt.num(H.single_hand_reversal_score, 1)]);
+    const L = t(hand === "left" ? "motion.hand_left" : "motion.hand_right");
+    rows.push([t("reversal.interval", { hand: L }), fmt.num(H.hit_interval_avg_ms, 0)]);
+    rows.push([t("reversal.fast_ratio", { hand: L }), H.fast_ratio != null ? (H.fast_ratio * 100).toFixed(1) + "%" : "-"]);
+    rows.push([t("reversal.fast_fail", { hand: L }), H.fast_fail_rate != null ? (H.fast_fail_rate * 100).toFixed(1) + "%" : "-"]);
+    rows.push([t("reversal.concentration", { hand: L }), fmt.num(H.fast_fail_concentration, 2)]);
+    rows.push([t("reversal.retention", { hand: L }), fmt.num(H.speed_retention, 2)]);
+    rows.push([t("reversal.score", { hand: L }), fmt.num(H.single_hand_reversal_score, 1)]);
   }
-  return `<tr><th>高速连续切割指标</th><th>值</th></tr>` +
+  return `<tr><th>${t("reversal.header")}</th><th>${t("motion.table_value")}</th></tr>` +
     rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("") +
-    `<tr><td colspan="2" class="hint" style="text-align:left">失误集中度 &gt;1 = 失误偏向高速段（'跟不上'信号）；刀速保持率 &lt;1 = 高速段挥刀变慢。</td></tr>`;
+    `<tr><td colspan="2" class="hint" style="text-align:left">${t("reversal.hint")}</td></tr>`;
 }
 
 function renderFatigue(f) {
   const el = $("#d-fatigue");
   const entries = Object.entries(f).filter(([k]) => k.startsWith("delta_"));
-  if (!entries.length) { el.innerHTML = '<div class="empty">无疲劳数据（歌曲过短）</div>'; return; }
+  if (!entries.length) { el.innerHTML = `<div class="empty">${t("fatigue.empty")}</div>`; return; }
   const label = {
-    delta_accuracy: "Accuracy", delta_center: "Center", delta_pre: "Pre", delta_post: "Post",
-    delta_miss_rate: "Miss 率", delta_bad_rate: "Bad 率", delta_saber_speed: "刀速",
-    delta_left_hand_speed: "左手移动速度", delta_right_hand_speed: "右手移动速度",
-    delta_time_dev_abs_ms: "timing |偏差| ms",
+    delta_accuracy: t("fatigue.label.accuracy"), delta_center: t("fatigue.label.center"),
+    delta_pre: t("fatigue.label.pre"), delta_post: t("fatigue.label.post"),
+    delta_miss_rate: t("fatigue.label.miss_rate"), delta_bad_rate: t("fatigue.label.bad_rate"),
+    delta_saber_speed: t("fatigue.label.saber_speed"),
+    delta_left_hand_speed: t("fatigue.label.left_speed"), delta_right_hand_speed: t("fatigue.label.right_speed"),
+    delta_time_dev_abs_ms: t("fatigue.label.time_dev"),
   };
-  let html = '<table class="metrics-table"><tr><th>前段 vs 后段</th><th>变化</th></tr>';
+  let html = `<table class="metrics-table"><tr><th>${t("fatigue.vs")}</th><th>${t("fatigue.change")}</th></tr>`;
   for (const [k, v] of entries) {
     if (v == null) continue;
     const goodWhenNeg = ["delta_miss_rate", "delta_bad_rate", "delta_time_dev_abs_ms"].includes(k);
@@ -1110,60 +1270,125 @@ function renderFatigue(f) {
   html += "</table>";
   const slopes = Object.entries(f).filter(([k]) => k.endsWith("_slope_per_min"));
   if (slopes.length) {
-    html += '<p class="hint">每分钟斜率：' + slopes.map(([k, v]) => `${k.replace("_slope_per_min", "")} ${v > 0 ? "+" : ""}${v}`).join(" · ") + "</p>";
+    html += '<p class="hint">' + t("fatigue.slopes", {
+      list: slopes.map(([k, v]) => `${k.replace("_slope_per_min", "")} ${v > 0 ? "+" : ""}${v}`).join(" · "),
+    }) + "</p>";
   }
-  html += '<p class="hint">注：疲劳结论均为\'与局部疲劳一致的运动学特征\'，不是医学诊断。</p>';
+  html += `<p class="hint">${t("fatigue.note")}</p>`;
   el.innerHTML = html;
 }
 
 /* ---------------- charts ---------------- */
 const TL_COLORS = {
-  accuracy_local: "#3d9bff", center_avg: "#38d17c", miss_rate: "#ff3d5a",
-  bad_rate: "#f5c542", saber_speed_avg: "#a06bff", note_density: "#8b96ab",
+  accuracy_local: "#3d9bff", center_avg: "#38d17c", miss_cum: "#ff3d5a",
+  bad_cum: "#f5c542", saber_speed_avg: "#a06bff", note_density: "#8b96ab",
 };
-const TL_LABELS = {
-  accuracy_local: "Accuracy", center_avg: "Center", miss_rate: "Miss率",
-  bad_rate: "Bad率", saber_speed_avg: "刀速", note_density: "密度",
-};
-/* 真实值格式化（图例范围 + 悬停数值框共用） */
-const TL_VALUE_FMT = {
-  accuracy_local: (v) => (v * 100).toFixed(1) + "%",
-  center_avg: (v) => v.toFixed(2),
-  miss_rate: (v) => (v * 100).toFixed(1) + "%",
-  bad_rate: (v) => (v * 100).toFixed(1) + "%",
-  saber_speed_avg: (v) => v.toFixed(2) + " m/s",
-  note_density: (v) => v.toFixed(2) + " n/s",
-};
+/* 时间序列图表标签（i18n：dict 异步加载，须在 I18N.init 后构建，见 init） */
+let TL_LABELS = {};
+let TL_VALUE_FMT = {};
+function buildTimelineI18n() {
+  TL_LABELS = {
+    accuracy_local: t("tl.accuracy"), center_avg: t("tl.center"), miss_cum: t("tl.miss_cum"),
+    bad_cum: t("tl.bad_cum"), saber_speed_avg: t("tl.speed"), note_density: t("tl.density"),
+  };
+  /* 真实值格式化（图例范围 + 悬停数值框共用） */
+  TL_VALUE_FMT = {
+    accuracy_local: (v) => (v * 100).toFixed(1) + "%",
+    center_avg: (v) => v.toFixed(2),
+    miss_cum: (v) => String(Math.round(v)),
+    bad_cum: (v) => String(Math.round(v)),
+    saber_speed_avg: (v) => t("tl.speed_unit", { v: v.toFixed(2) }),
+    note_density: (v) => t("tl.density_unit", { v: v.toFixed(2) }),
+  };
+}
 
 function drawTimeline(animate = true) {
   const box = $("#chart-timeline");
   if (!box) return;
   const active = $$(".tl-toggle").filter((c) => c.checked).map((c) => c.value);
+  const nr = currentNoteRange || { first_note: 0, last_note: 0 };
+  const firstNote = Number(nr.first_note) || 0;
+  const lastNote = Number(nr.last_note) || 0;
   const series = [];
   for (const key of active) {
     const pts = [];
-    currentWindows.forEach((w) => {
-      const v = w.metrics[key];
-      if (v != null) pts.push({ x: (w.t_start + w.t_end) / 2, y: v });
-    });
+    const marked = [];
+    if (key === "miss_cum" || key === "bad_cum") {
+      // Miss/Bad 是离散失误事件：水平台阶线。
+      // 事件时间戳来自 notes 表（唯一、精确），无窗口聚合错位。
+      const evs = (currentEvents || {})[key === "miss_cum" ? "miss" : "bad"] || [];
+      let cum = 0;
+      if (evs.length) {
+        // 起点对齐 note 首事件时间（与 acc/center 曲线共享时间轴），
+        // 避免 x=0 把整条曲线压向右侧。
+        pts.push({ x: firstNote, y: 0 });
+        evs.forEach((t) => {
+          cum += 1;
+          pts.push({ x: t, y: cum - 1 });   // 水平段终点（事件前高度）
+          pts.push({ x: t, y: cum });       // 垂直跳变（事件瞬间）
+          marked.push(pts.length - 1);      // 跳变顶端 = 失误位置
+        });
+      }
+    } else if (key === "accuracy_local" || key === "center_avg") {
+      // acc/center 是 note 事件级指标：per-note 累计运行均值。
+      // acc = 官方口径（score/maxScore，含 miss/bad 惩罚——曲线终点与
+      // replay 记录/3D 回放一致；2026-08 修正）；center = good-only
+      // 累计均分（bad/miss 无 center 测量，不伪造）。
+      // 两者时间轴独立：acc 在全部 block note（含惩罚点），center 在 good cut。
+      const isAcc = key === "accuracy_local";
+      const tt = (currentNotes || {})[isAcc ? "t" : "center_t"] || [];
+      const curve = (currentNotes || {})[isAcc ? "acc" : "center"] || [];
+      tt.forEach((t, i) => pts.push({ x: t, y: curve[i] }));
+    } else if (key === "saber_speed_avg") {
+      // 刀速：per-note ±5 good cut 局部均值（固定窗口退役，2026）。
+      // x = good cut 事件时间；miss/bad 无点（折线跨过空隙，不伪造）。
+      const st = (currentNotes || {}).speed_t || [];
+      const sv = (currentNotes || {}).speed || [];
+      st.forEach((t, i) => pts.push({ x: t, y: sv[i] }));
+    } else {
+      // 密度：per-note 局部密度（±5 note 邻域，固定窗口退役，2026）。
+      // 谱面长间隙（如 Hatatagami 中段 >2s 停顿）自然呈现低谷——忠于数据。
+      const dt = (currentNotes || {}).density_t || [];
+      const dv = (currentNotes || {}).density || [];
+      dt.forEach((t, i) => pts.push({ x: t, y: dv[i] }));
+    }
     if (!pts.length) continue;
     // 真实数值范围（归一化图例用）：保留量级参考
     const ys = pts.map((p) => p.y);
     const lo = Math.min(...ys), hi = Math.max(...ys);
     const fmt = TL_VALUE_FMT[key] || ((v) => v.toFixed(2));
     const rangeText = hi - lo < 1e-12
-      ? `= ${fmt(lo)}`                      // 恒定序列：标注常数值
-      : `(${fmt(lo)}–${fmt(hi)})`;
+      ? t("tl.constant", { v: fmt(lo) })                      // 恒定序列：标注常数值
+      : t("tl.range", { lo: fmt(lo), hi: fmt(hi) });
     series.push({
       key, name: TL_LABELS[key], color: TL_COLORS[key],
-      points: pts, rangeText,
+      points: pts, marked, step: key === "miss_cum" || key === "bad_cum",
+      rangeText,
     });
   }
+  // 时间轴裁剪到 note 首末范围：acc/center/miss/bad 是 note 事件级，
+  // 刀速/密度也是 per-note（固定窗口退役，2026），全部落在
+  // [first_note, last_note] 区间内。lineChart 会在边界线性插值裁剪跨界线段。
+  const axisOpts = lastNote > firstNote ? { xMin: firstNote, xMax: lastNote } : {};
+  // ⚠️ 失败时间红轴标记 —— 已暂停（2026-08-23）
+  // 原因：BeatLeader 0.9.33 的 .bsor failTime 字段恒为 0。官方 BSOR 格式标注
+  // failTime = "song fail time (only if failed), seconds"，但本地 326 个 .bsor
+  // 逐字段二进制核对解析无误后仍全部为 0（含 144 个 NF 触发样本如 Sound
+  // Chimera Expert、86 个 exit 中途退出样本如 Mentai Cosmic/JETLAGG）——
+  // 疑为 BeatLeader mod 写入端未实现/未启用该字段。
+  // 功能实现已验证可用（注入 fail_time 后红轴正确渲染、像素位置精确对齐），
+  // 恢复方式：获得含非零 failTime 的 replay 后，把 FAIL_TIME_MARKER_ENABLED 改为 true。
+  const FAIL_TIME_MARKER_ENABLED = false;
+  const markers = [];
+  const r = currentReplay || {};
+  if (FAIL_TIME_MARKER_ENABLED && r.has_nf && Number(r.fail_time) > 0) {
+    markers.push({ x: Number(r.fail_time), label: t("marker.fail_time", { t: fmt.dur2(r.fail_time) }) });
+  }
   lineChart(box, series, {
-    fmtX: (v) => fmt.dur(v), yDec: 0,
+    fmtX: (v) => fmt.dur2(v), yDec: 0,
     normalize: true, fmtY: (v) => v.toFixed(0) + "%",
     valueFmt: (s, v) => (TL_VALUE_FMT[s.key] || ((x) => x.toFixed(2)))(v),
-    animate,
+    animate, markers, ...axisOpts,
   });
   $$(".tl-toggle").forEach((c) => c.onchange = () => drawTimeline(false));
 }
@@ -1194,39 +1419,48 @@ function drawMotionSeries(animate = true) {
   const speedBox = $("#chart-speed"), angBox = $("#chart-ang");
   if (!speedBox || !angBox) return;
   if (!s || !s.t || !s.t.length) {
-    speedBox.innerHTML = '<div class="empty">无帧数据</div>';
+    speedBox.innerHTML = `<div class="empty">${t("chart.no_data")}</div>`;
     angBox.innerHTML = "";
     return;
   }
   const mk = (arr) => s.t.map((t, i) => ({ x: t, y: arr[i] }));
   lineChart(speedBox, [
-    { name: "左手速度 m/s", color: "#ff3d5a", points: mk(s.left_speed) },
-    { name: "右手速度 m/s", color: "#3d9bff", points: mk(s.right_speed) },
-  ], { fmtX: (v) => fmt.dur(v), yMin: 0, animate,
+    { name: t("tl.motion.left_speed"), color: "#ff3d5a", points: mk(s.left_speed) },
+    { name: t("tl.motion.right_speed"), color: "#3d9bff", points: mk(s.right_speed) },
+  ], { fmtX: (v) => fmt.dur2(v), yMin: 0, animate,
       valueFmt: (s2, v) => v.toFixed(1) + " m/s" });
   lineChart(angBox, [
-    { name: "左角速度 °/s", color: "#ff3d5a", points: mk(s.left_ang_deg) },
-    { name: "右角速度 °/s", color: "#3d9bff", points: mk(s.right_ang_deg) },
-  ], { fmtX: (v) => fmt.dur(v), yMin: 0, animate,
+    { name: t("tl.motion.left_ang"), color: "#ff3d5a", points: mk(s.left_ang_deg) },
+    { name: t("tl.motion.right_ang"), color: "#3d9bff", points: mk(s.right_ang_deg) },
+  ], { fmtX: (v) => fmt.dur2(v), yMin: 0, animate,
       valueFmt: (s2, v) => v.toFixed(0) + "°/s" });
 }
 
 function renderReport(rep) {
   const el = $("#d-report");
-  if (!rep) { el.innerHTML = '<div class="empty">暂无报告，点击"重新生成"。</div>'; return; }
+  if (!rep) { el.innerHTML = `<div class="empty">${t("detail.report_none")}</div>`; return; }
   let head = "";
-  if (rep.status === "rule_based") head = '<p class="hint">⚠️ 规则报告（AI 未配置）</p>';
-  if (rep.status === "error") head = `<p class="hint" style="color:var(--red)">LLM 调用失败，已回退规则报告：${escHtml(rep.error || "")}</p>`;
+  if (rep.status === "rule_based") head = `<p class="hint">${t("detail.report_rule_based")}</p>`;
+  if (rep.status === "error") head = `<p class="hint" style="color:var(--red)">${t("detail.report_error", { err: escHtml(rep.error || "") })}</p>`;
   el.innerHTML = head + renderMarkdown(rep.report_md || "*（空报告）*");
 }
 
 /* ---------------- 历史（搜索：歌名 + key，重合度排序，黄色高亮） ---------------- */
 let histTimer = null;
+let histReqSeq = 0;   // 请求竞态序号：快速连续输入时丢弃过期响应（v1.4.1）
 
 async function loadHistory() {
+  const seq = ++histReqSeq;
   const days = $("#hist-days").value;
   const q = $("#hist-filter").value.trim();
-  let list = await api(`/api/history?limit=300${days ? `&days=${days}` : ""}`);
+  let list;
+  try {
+    list = await api(`/api/history?limit=300${days ? `&days=${days}` : ""}`);
+  } catch (e) {
+    if (seq === histReqSeq) toast(t("history.load_failed", { err: e.message }));
+    return;
+  }
+  if (seq !== histReqSeq) return;   // 过期响应丢弃（期间有更新的请求）
   if (q) {
     const tokens = q.toLowerCase().split(/\s+/).filter(Boolean);
     list = list
@@ -1236,11 +1470,11 @@ async function loadHistory() {
       .map((x) => x.r);
     $("#history-list").innerHTML = list.length
       ? list.map((r) => replayItem(r, q)).join("")
-      : '<div class="empty">没有符合「' + escHtml(q) + '」的记录。</div>';
+      : `<div class="empty">${t("history.empty_filter", { q: escHtml(q) })}</div>`;
   } else {
     $("#history-list").innerHTML = list.length
       ? list.map((r) => replayItem(r)).join("")
-      : '<div class="empty">没有符合条件的记录。</div>';
+      : `<div class="empty">${t("history.empty")}</div>`;
   }
   bindReplayItems();
 }
@@ -1313,9 +1547,9 @@ async function loadCompareOptions() {
 
 $("#btn-compare").addEventListener("click", async () => {
   const a = $("#cmp-a").value, b = $("#cmp-b").value;
-  if (!a || !b) return toast("请先选择两个 Replay");
+  if (!a || !b) return toast(t("compare.select_first"));
   const btn = $("#btn-compare");
-  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>分析中…';
+  btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>${t("compare.analyzing")}`;
   try {
     // 与总览详情同款懒分析机制：未分析的 replay 先现场分析（幂等，已分析毫秒级返回）
     await Promise.all([
@@ -1324,8 +1558,8 @@ $("#btn-compare").addEventListener("click", async () => {
     ]);
     const res = await api(`/api/compare?a=${a}&b=${b}`);
   const name = (r) => r ? `${escHtml(r.song_name)} [${r.difficulty}] ${fmt.ts(r.timestamp)}` : "-";
-  let html = `<div class="surface"><div class="surface-title">${name(res.a)} <span style="color:var(--muted)">vs</span> ${name(res.b)}</div>
-    <table class="metrics-table"><tr><th>指标</th><th>Run A</th><th>Run B</th><th>差值 (B−A)</th></tr>`;
+  let html = `<div class="surface"><div class="surface-title">${name(res.a)} <span style="color:var(--muted)">${t("compare.vs")}</span> ${name(res.b)}</div>
+    <table class="metrics-table"><tr><th>${t("compare.metric")}</th><th>${t("compare.value_a")}</th><th>${t("compare.value_b")}</th><th>${t("compare.diff")}</th></tr>`;
   for (const row of res.rows) {
     if (row.a == null && row.b == null) continue;
     const better = row.diff == null ? "" : row.diff > 0 ? "delta-pos" : row.diff < 0 ? "delta-neg" : "delta-flat";
@@ -1334,10 +1568,10 @@ $("#btn-compare").addEventListener("click", async () => {
     html += `<tr><td>${row.scope}/${row.name}</td><td>${fmt.num(row.a, 3)}</td><td>${fmt.num(row.b, 3)}</td>
       <td class="${row.name === "miss_count" || row.name === "bad_count" ? cls : better}">${row.diff == null ? "-" : (row.diff > 0 ? "+" : "") + Number(row.diff).toFixed(3)}</td></tr>`;
   }
-  html += "</table><p class='hint'>注：Center/Pre/Post/accuracy 越高越好；miss/bad/cut 距离越低越好。颜色按'对表现有利'着色。</p></div>";
+  html += `</table><p class='hint'>${t("compare.hint")}</p></div>`;
     $("#compare-result").innerHTML = html;
-  } catch (e) { toast("对比失败: " + e.message); }
-  btn.disabled = false; btn.textContent = "对比 A vs B（B − A）";
+  } catch (e) { toast(t("compare.failed", { err: e.message })); }
+  btn.disabled = false; btn.textContent = t("compare.btn");
 });
 
 /* ---------------- ScoreSaber ---------------- */
@@ -1349,56 +1583,56 @@ async function loadScoreSaber(force = false) {
     renderScoreSaber(data);
     ssLoaded = true;
   } catch (e) {
-    $("#ss-profile").innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+    $("#ss-profile").innerHTML = `<span style="color:var(--red)">${escHtml(e.message)}</span>`;
   }
 }
 
 function renderScoreSaber(data) {
   const p = data.profile || {};
   const stats = p.scoreStats || {};
-  $("#ss-profile").innerHTML = `<h3>ScoreSaber 档案（抓取于 ${data.fetched_at || "-"}）</h3>
+  $("#ss-profile").innerHTML = `<h3>${t("scoresaber.profile_title", { time: data.fetched_at || "-" })}</h3>
     <div class="kv">
-      <span class="k">玩家</span><span>${escHtml(p.name)} (${p.country})</span>
-      <span class="k">全球排名</span><span>#${fmt.num(p.rank)}</span>
-      <span class="k">国家排名</span><span>#${fmt.num(p.countryRank)}</span>
-      <span class="k">PP</span><span>${fmt.num(p.pp, 1)}</span>
-      <span class="k">Ranked 平均 Acc</span><span>${fmt.acc(stats.averageRankedAccuracy != null ? stats.averageRankedAccuracy / 100 : null)}</span>
-      <span class="k">总游玩 / Ranked</span><span>${stats.totalPlayCount} / ${stats.rankedPlayCount}</span>
+      <span class="k">${t("scoresaber.player")}</span><span>${escHtml(p.name)} (${p.country})</span>
+      <span class="k">${t("scoresaber.global_rank")}</span><span>#${fmt.num(p.rank)}</span>
+      <span class="k">${t("scoresaber.country_rank")}</span><span>#${fmt.num(p.countryRank)}</span>
+      <span class="k">${t("scoresaber.pp")}</span><span>${fmt.num(p.pp, 1)}</span>
+      <span class="k">${t("scoresaber.avg_acc")}</span><span>${fmt.acc(stats.averageRankedAccuracy != null ? stats.averageRankedAccuracy / 100 : null)}</span>
+      <span class="k">${t("scoresaber.plays")}</span><span>${stats.totalPlayCount} / ${stats.rankedPlayCount}</span>
     </div>`;
   const scores = data.scores || [];
-  $("#ss-scores").innerHTML = `<h3>最近成绩（${scores.length}）</h3>` +
+  $("#ss-scores").innerHTML = `<h3>${t("scoresaber.recent", { n: scores.length })}</h3>` +
     (scores.length ? `<table class="metrics-table">
-      <tr><th>时间</th><th>歌曲</th><th>难度</th><th>Score</th><th>Acc</th><th>PP</th><th>星</th></tr>
+      <tr><th>${t("scoresaber.time")}</th><th>${t("scoresaber.song")}</th><th>${t("scoresaber.difficulty")}</th><th>${t("scoresaber.score")}</th><th>${t("scoresaber.acc")}</th><th>${t("scoresaber.pp")}</th><th>${t("scoresaber.stars")}</th></tr>
       ${scores.map((s) => `<tr>
         <td>${(s.time_set || "").slice(0, 10)}</td>
         <td style="text-align:left">${escHtml(s.song_name)}</td>
         <td>${s.difficulty}</td><td>${fmt.num(s.score)}</td>
         <td>-</td><td>${s.pp != null ? s.pp.toFixed(1) : "-"}</td>
         <td>${(s.stars != null && s.stars > 0) ? Number(s.stars).toFixed(2) + "★" : "-"}</td></tr>`).join("")}
-    </table>` : '<div class="empty">无</div>');
+    </table>` : `<div class="empty">${t("scoresaber.none")}</div>`);
 }
 
 $("#btn-ss-refresh").addEventListener("click", async () => {
   const btn = $("#btn-ss-refresh");
-  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>拉取中…';
+  btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>${t("scoresaber.fetching")}`;
   try {
     const data = await api("/api/scoresaber/refresh", { method: "POST" });
     renderScoreSaber(data);
     ssLoaded = true;
-  } catch (e) { toast(e.message); }
-  btn.disabled = false; btn.textContent = "拉取 ScoreSaber 数据";
+  } catch (e) { toast(t("scoresaber.failed", { err: e.message })); }
+  btn.disabled = false; btn.textContent = t("scoresaber.refresh_btn");
 });
 
 $("#btn-ss-validate").addEventListener("click", async () => {
   const box = $("#ss-validate");
   box.classList.remove("hidden");
-  box.innerHTML = '<span class="spinner"></span>对比本地解析分数与 ScoreSaber 记录…';
+  box.innerHTML = `<span class="spinner"></span>${t("scoresaber.validating")}`;
   try {
     const res = await api("/api/scoresaber/validate");
-    if (res.error) { box.innerHTML = `<span style="color:var(--red)">${res.error}</span>`; return; }
-    let html = `<h3>交叉验证：命中 ${res.matched_count} 条（本地 vs ScoreSaber）</h3>`;
+    if (res.error) { box.innerHTML = `<span style="color:var(--red)">${escHtml(res.error)}</span>`; return; }
+    let html = `<h3>${t("scoresaber.validate_title", { n: res.matched_count })}</h3>`;
     if (res.matched.length) {
-      html += `<table class="metrics-table"><tr><th>歌曲</th><th>难度</th><th>本地分</th><th>SS 分</th><th>差</th><th>PP</th></tr>` +
+      html += `<table class="metrics-table"><tr><th>${t("scoresaber.song")}</th><th>${t("scoresaber.difficulty")}</th><th>${t("scoresaber.local_score")}</th><th>${t("scoresaber.ss_score")}</th><th>${t("scoresaber.diff")}</th><th>${t("scoresaber.pp")}</th></tr>` +
         res.matched.slice(0, 30).map((r) => {
           const d = r.score_diff;
           const cls = d === 0 ? "delta-flat" : d == null ? "" : "delta-neg";
@@ -1407,16 +1641,20 @@ $("#btn-ss-validate").addEventListener("click", async () => {
             <td class="${cls}">${d == null ? "-" : (d > 0 ? "+" : "") + d}</td>
             <td>${r.scoresaber_pp != null ? r.scoresaber_pp.toFixed(1) : "-"}</td></tr>`;
         }).join("") + "</table>";
-      html += `<p class="hint">差值非 0 的常见原因：ScoreSaber 记录的是历史最佳成绩，而本地 Replay 是某一次具体游玩；或该成绩设置了 modifier。</p>`;
+      html += `<p class="hint">${t("scoresaber.diff_hint")}</p>`;
     } else {
-      html += '<div class="empty">本地 Replay 与 ScoreSaber 最近成绩没有重叠（正常：SS 只保留每谱最佳）。</div>';
+      html += `<div class="empty">${t("scoresaber.no_overlap")}</div>`;
     }
     box.innerHTML = html;
-  } catch (e) { box.innerHTML = `<span style="color:var(--red)">${e.message}</span>`; }
+  } catch (e) { box.innerHTML = `<span style="color:var(--red)">${escHtml(t("scoresaber.validate_failed", { err: e.message }))}</span>`; }
 });
 
 /* ---------------- init ---------------- */
 (async function init() {
+  await I18N.init();            // language tables + dynamic language discovery
+  buildTimelineI18n();          // chart labels (depends on dict)
+  applyStaticI18n();            // index.html static text
+  I18N.renderLangSwitch();      // settings language card buttons (dynamic)
   // loadStatus 内部已拉取 /api/status 并返回（原先这里再拉一次是冗余请求）
   const s = await loadStatus();
   await loadRecent();
@@ -1452,28 +1690,47 @@ async function loadSettings() {
       validateRoot(false);
     }
   } catch (e) {
-    $("#set-form").innerHTML = `<span style="color:var(--red)">读取设置失败: ${e.message}</span>`;
+    $("#set-form").innerHTML = `<span style="color:var(--red)">${escHtml(t("settings.load_failed", { err: e.message }))}</span>`;
   }
 }
 
-/* 控件生成：type -> 输入控件（带 name 属性，满足表单可访问性） */
+/* schema 驱动的设置项文案映射（后端 schema 只有中文 label/description/group，
+   前端按配置项 key 查 i18n 表；缺失回退中文原文） */
+function setLabel(item) {
+  const k = item.key;
+  const v = I18N.dict["set." + k + ".label"] ?? I18N.zhDict["set." + k + ".label"];
+  return v ?? item.label;
+}
+function setDesc(item) {
+  const k = item.key;
+  const v = I18N.dict["set." + k + ".desc"] ?? I18N.zhDict["set." + k + ".desc"];
+  return v ?? item.description ?? "";
+}
+function setGroup(g) {
+  const v = I18N.dict["set.group." + g] ?? I18N.zhDict["set.group." + g];
+  return v ?? g;
+}
+
+/* 控件生成：type -> 输入控件（带 name 属性，满足表单可访问性）
+   注意：局部变量名避开全局 t()（i18n），防止遮蔽——曾用 const t = item.type
+   导致 boolean/secret 分支调用 t("...") 报 "t is not a function"。 */
 function settingsControl(item, key, val) {
   const nameAttr = `name="set-${key}"`;
-  const t = item.type;
-  if (t === "boolean") {
-    return `<label class="chk"><input type="checkbox" ${nameAttr} data-key="${key}" ${val ? "checked" : ""}> 启用</label>`;
+  const typ = item.type;
+  if (typ === "boolean") {
+    return `<label class="chk"><input type="checkbox" ${nameAttr} data-key="${key}" ${val ? "checked" : ""}> ${t("settings.enable")}</label>`;
   }
-  if (t === "enum") {
+  if (typ === "enum") {
     const opts = (item.enum || []).map((o) =>
       `<option value="${escHtml(o)}" ${String(val) === String(o) ? "selected" : ""}>${escHtml(o)}</option>`).join("");
     return `<select ${nameAttr} data-key="${key}">${opts}</select>`;
   }
-  if (t === "secret") {
+  if (typ === "secret") {
     const masked = (val && val.masked) ? val.masked : "";
-    return `<input type="password" ${nameAttr} data-key="${key}" placeholder="${val && val.configured ? masked : '未配置'}" autocomplete="new-password">`;
+    return `<input type="password" ${nameAttr} data-key="${key}" placeholder="${val && val.configured ? masked : t("settings.secret_not_configured")}" autocomplete="new-password">`;
   }
-  if (t === "integer" || t === "float") {
-    return `<input type="number" ${nameAttr} data-key="${key}" value="${val ?? ""}" step="${t === 'float' ? '0.1' : '1'}">`;
+  if (typ === "integer" || typ === "float") {
+    return `<input type="number" ${nameAttr} data-key="${key}" value="${val ?? ""}" step="${typ === 'float' ? '0.1' : '1'}">`;
   }
   // string / directory / file / url
   return `<input type="text" ${nameAttr} data-key="${key}" value="${escHtml(val ?? "")}" placeholder="${escHtml(item.description || '')}">`;
@@ -1490,16 +1747,16 @@ function renderSettingsForm() {
   }
   let html = "";
   for (const g of order) {
-    html += `<div class="surface"><div class="surface-title">${escHtml(g)}</div>`;
+    html += `<div class="surface"><div class="surface-title">${escHtml(setGroup(g))}</div>`;
     html += `<table class="settings-table">`;
     for (const item of groups[g]) {
       const key = item.key;
       const val = settingsValues[key];
       const required = item.required ? ' <span style="color:var(--red)">*</span>' : "";
-      const restart = item.restart_required ? ' <span class="restart-tag">重启</span>' : "";
-      const desc = item.description ? `<div class="settings-desc">${escHtml(item.description)}</div>` : "";
+      const restart = item.restart_required ? ` <span class="restart-tag">${t("settings.restart_tag")}</span>` : "";
+      const desc = setDesc(item) ? `<div class="settings-desc">${escHtml(setDesc(item))}</div>` : "";
       html += `<tr class="settings-item">
-        <td class="settings-label">${escHtml(item.label)}${required}${restart}</td>
+        <td class="settings-label">${escHtml(setLabel(item))}${required}${restart}</td>
         <td class="settings-control" data-ctrl-key="${key}">
           ${settingsControl(item, key, val)}
         </td>
@@ -1540,9 +1797,9 @@ function renderRootChecks(res) {
   const badge = $("#set-root-badge");
   const box = $("#set-result");
   if (res.valid) {
-    badge.innerHTML = '<span class="set-ok">✅ 验证成功</span>';
+    badge.innerHTML = `<span class="set-ok">${t("settings.game.ok")}</span>`;
   } else {
-    badge.innerHTML = '<span class="set-bad">❌ 验证失败</span>';
+    badge.innerHTML = `<span class="set-bad">${t("settings.game.bad")}</span>`;
   }
   box.innerHTML = `<div class="settings-checks">` +
     res.results.map((r) => {
@@ -1554,7 +1811,7 @@ function renderRootChecks(res) {
     }).join("") + `</div>`;
   if (!res.valid) {
     box.insertAdjacentHTML("beforeend",
-      `<p class="hint" style="color:var(--red);margin-top:8px">该目录不符合 Beat Saber 游戏结构（需要游戏根目录，且包含谱面目录），请重新选择。</p>`);
+      `<p class="hint" style="color:var(--red);margin-top:8px">${t("settings.game.invalid_structure")}</p>`);
   }
 }
 
@@ -1579,15 +1836,15 @@ async function validateRoot(saveOnSuccess) {
         method: "POST", body: JSON.stringify({ instance_root: root }),
       });
       if (sv.saved) {
-        badge.innerHTML = '<span class="set-ok">✅ 验证成功（已保存，重启生效）</span>';
+        badge.innerHTML = `<span class="set-ok">${t("settings.game.saved")}</span>`;
       } else {
         box.insertAdjacentHTML("beforeend",
-          `<p class="hint" style="color:var(--red);margin-top:8px">保存失败：${escHtml(sv.error || "")}</p>`);
+          `<p class="hint" style="color:var(--red);margin-top:8px">${t("settings.game.save_failed", { err: escHtml(sv.error || "") })}</p>`);
       }
     }
   } catch (e) {
     badge.innerHTML = "";
-    box.innerHTML = `<span style="color:var(--red)">验证失败: ${escHtml(e.message)}</span>`;
+    box.innerHTML = `<span style="color:var(--red)">${escHtml(t("settings.load_failed", { err: e.message }))}</span>`;
   }
 }
 
@@ -1600,11 +1857,11 @@ $("#btn-set-browse").addEventListener("click", async () => {
       $("#set-root-input").value = res.selected;
       await validateRoot(true);   // 原生选择 → 验证成功即自动保存
     } else if (res.unavailable) {
-      toast("当前为浏览器模式，无法弹出原生文件夹窗口；请手动输入游戏根目录", "error");
+      toast(t("settings.game.browser_mode"), "error");
     }
     // cancelled → 无操作
   } catch (e) {
-    toast("选择文件夹失败: " + e.message, "error");
+    toast(t("settings.game.folder_failed", { err: e.message }), "error");
   } finally {
     btn.disabled = false;
   }
@@ -1619,20 +1876,20 @@ $("#set-root-input").addEventListener("input", () => {
 $("#btn-set-save").addEventListener("click", async () => {
   const values = collectSettings();
   if (!Object.keys(values).length) {
-    $("#set-save-msg").textContent = "没有可保存的修改";
+    $("#set-save-msg").textContent = t("settings.no_changes");
     return;
   }
   const msg = $("#set-save-msg");
-  msg.innerHTML = '<span class="spinner"></span>保存中…';
+  msg.innerHTML = `<span class="spinner"></span>${t("settings.saving")}`;
   try {
     const res = await api("/api/settings", {
       method: "POST", body: JSON.stringify({ values }),
     });
     if (res.saved) {
-      msg.textContent = "✅ " + (res.message || "已保存");
+      msg.textContent = t("settings.saved", { msg: res.message || "" });
       await loadSettings();
     } else {
-      msg.textContent = "保存失败: " + (res.error || "");
+      msg.textContent = t("settings.save_failed", { err: res.error || "" });
     }
   } catch (e) {
     msg.textContent = e.message;
@@ -1644,19 +1901,19 @@ $("#btn-set-save").addEventListener("click", async () => {
 $("#btn-set-restart").addEventListener("click", async () => {
   const btn = $("#btn-set-restart");
   btn.disabled = true;
-  btn.textContent = "正在重启…";
+  btn.textContent = t("settings.restarting");
   try {
     const res = await api("/api/restart", { method: "POST" });
     if (!res.ok) {
-      toast("重启失败: " + (res.error || "当前模式不支持"), "error");
+      toast(t("settings.restart_failed", { err: res.error || t("settings.restart_title") }), "error");
       btn.disabled = false;
-      btn.textContent = "重启 SABER LAB";
+      btn.textContent = t("settings.restart");
     }
     // 成功：服务即将重启，页面会断开；不恢复按钮
   } catch (e) {
-    toast("重启失败: " + e.message, "error");
+    toast(t("settings.restart_failed", { err: e.message }), "error");
     btn.disabled = false;
-    btn.textContent = "重启 SABER LAB";
+    btn.textContent = t("settings.restart");
   }
 });
 
@@ -1674,21 +1931,21 @@ $("#btn-clear-cache").addEventListener("click", () => {
     // 第一次点击：武装确认态
     clearConfirmArmed = true;
     const btn = $("#btn-clear-cache");
-    btn.textContent = "取消";
+    btn.textContent = t("settings.storage.cancel");
     btn.classList.remove("danger");
     btn.classList.add("danger-armed");
     const confirmBtn = document.createElement("button");
     confirmBtn.id = "btn-clear-confirm";
     confirmBtn.className = "danger";
-    confirmBtn.textContent = "确定？删除";
+    confirmBtn.textContent = t("settings.storage.confirm");
     confirmBtn.style.marginLeft = "10px";
     btn.parentNode.appendChild(confirmBtn);
     confirmBtn.addEventListener("click", async () => {
       const box = $("#clear-result");
-      box.innerHTML = '<span class="spinner"></span>正在清空缓存…';
+      box.innerHTML = `<span class="spinner"></span>${t("settings.storage.clearing")}`;
       try {
         const res = await api("/api/settings/clear-cache", { method: "POST" });
-        box.innerHTML = `<span style="color:var(--green)">✅ ${escHtml(res.message || "已清空")}</span>`;
+        box.innerHTML = `<span style="color:var(--green)">${t("settings.storage.cleared", { msg: escHtml(res.message || "") })}</span>`;
         // 清缓存即刻生效：刷新所有页面数据（不刷新整个网页，避免闪烁）
         ssLoaded = false;   // ScoreSaber 页下次切入时重新加载（读保留的联网缓存）
         await Promise.allSettled([
@@ -1696,7 +1953,7 @@ $("#btn-clear-cache").addEventListener("click", () => {
           loadHistory(), loadCompareOptions(),
         ]);
       } catch (e) {
-        box.innerHTML = `<span style="color:var(--red)">${e.message}</span>`;
+        box.innerHTML = `<span style="color:var(--red)">${escHtml(t("settings.storage.clear_failed", { err: e.message }))}</span>`;
       }
       disarmClearConfirm();
     });
@@ -1710,7 +1967,7 @@ function disarmClearConfirm() {
   clearConfirmArmed = false;
   const btn = $("#btn-clear-cache");
   if (!btn) return;
-  btn.textContent = "删除缓存";
+  btn.textContent = t("settings.storage.clear");
   btn.classList.remove("danger-armed");
   btn.classList.add("danger");
   const c = $("#btn-clear-confirm");

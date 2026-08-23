@@ -1,12 +1,12 @@
-"""Motion Analyzer（设计文档 §11/§12）。
+"""Motion Analyzer (design doc §11/§12).
 
-重要约束（§11.2）：BSOR 记录的是 controller pose，不是手腕关节。
-本模块输出 controller angular velocity / hand motion proxy，
-绝不将其命名为“腕关节角速度”。
+Important constraint (§11.2): BSOR records controller pose, not wrist joints.
+This module outputs controller angular velocity / hand motion proxies and must
+never name them "wrist joint angular velocity".
 
-数据源：
-- frames（120Hz pose 序列）：手位置速度、路径长度、controller 角速度
-- note cut info：saber 方向、切割点 → 单手连续换向分析
+Data sources:
+- frames (120Hz pose series): hand position velocity, path length, controller angular velocity
+- note cut info: saber direction, cut points → single-hand consecutive reversal analysis
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import numpy as np
 
 from ..bsor.models import Replay, GOOD, BAD, MISS
 
-# pose 布局：head=pos[0:3],rot[3:7]; left=pos[7:10],rot[10:14]; right=pos[14:17],rot[17:21]
+# pose layout: head=pos[0:3],rot[3:7]; left=pos[7:10],rot[10:14]; right=pos[14:17],rot[17:21]
 LEFT_POS = slice(7, 10)
 LEFT_ROT = slice(10, 14)
 RIGHT_POS = slice(14, 17)
@@ -25,7 +25,7 @@ HEAD_POS = slice(0, 3)
 
 
 def _quat_angles(q: np.ndarray) -> np.ndarray:
-    """相邻四元数之间的旋转角（弧度）。q: (N,4)"""
+    """Rotation angle between adjacent quaternions (radians). q: (N,4)"""
     if len(q) < 2:
         return np.zeros(0, dtype=np.float64)
     a = q[:-1]
@@ -37,14 +37,17 @@ def _quat_angles(q: np.ndarray) -> np.ndarray:
 
 def analyze_motion(replay: Replay, max_series_points: int = 600,
                    warmup_sec: float = 1.0, max_speed: float = 15.0) -> dict:
-    """对单个 Replay 做手部运动学分析。
+    """Run hand kinematic analysis on a single Replay.
 
-    数据清洗（§11.2 工程约束）：
-    - warmup_sec：丢弃开头 N 秒。BSOR 首帧 pose 是设备的初始默认位置
-      （不是真实手位），首帧→真实位置的跳变会产生几十~上百 m/s 的假速度；
-      同时开头若干帧时间戳重复（都为 0），进一步放大该假值。
-    - max_speed：物理上限。速度超过该值（m/s）的帧视为异常/追踪丢失，
-      统计时排除，序列中插值平滑，避免污染均值/P95/峰值与图表。
+    Data cleaning (§11.2 engineering constraints):
+    - warmup_sec: drop the first N seconds. The first BSOR frame pose is the device's
+      initial default position (not the real hand position); the jump from the first
+      frame to the real position produces fake speeds of tens to hundreds of m/s;
+      also the first few frames have duplicated timestamps (all 0), further amplifying
+      that fake value.
+    - max_speed: physical cap. Frames whose speed exceeds this value (m/s) are treated
+      as anomalies/tracking loss, excluded from stats, and interpolated smoothly in the
+      series to avoid polluting the mean/P95/peak and the charts.
     """
     result: dict = {"available": replay.frame_count > 1}
     if replay.frame_count < 2:
@@ -54,10 +57,10 @@ def analyze_motion(replay: Replay, max_series_points: int = 600,
     t = frames["time"].astype(np.float64)
     pose = frames["pose"].astype(np.float64)
 
-    # ---- 预热裁切：丢弃开头 warmup 秒（含首帧初始化跳变）----
+    # ---- Warmup trim: drop the first warmup seconds (includes the first-frame initialization jump) ----
     keep = t >= warmup_sec
     if not np.any(keep):
-        # 兜底：至少丢弃首帧（它必然是初始化垃圾帧）
+        # Fallback: drop at least the first frame (it is necessarily an initialization garbage frame)
         keep = np.arange(len(t)) >= 1
     t = t[keep]
     pose = pose[keep]
@@ -65,7 +68,7 @@ def analyze_motion(replay: Replay, max_series_points: int = 600,
         return {"available": False, "reason": "warmup 裁切后帧数不足"}
 
     dt = np.diff(t)
-    # 重复/异常时间戳保护
+    # Protection against duplicate/anomalous timestamps
     median_dt = float(np.median(dt[dt > 0])) if np.any(dt > 0) else 1 / 120
     dt_safe = np.where(dt > 1e-6, dt, median_dt)
 
@@ -78,7 +81,7 @@ def analyze_motion(replay: Replay, max_series_points: int = 600,
         speed = dist / dt_safe                      # m/s
         ang = _quat_angles(rot) / dt_safe           # rad/s
 
-        # ---- 物理上限过滤：异常帧统计排除 + 序列插值平滑 ----
+        # ---- Physical-cap filtering: anomalous frames excluded from stats + interpolated in the series ----
         valid = speed <= max_speed
         speed_clean = speed
         if not np.all(valid):
@@ -104,7 +107,7 @@ def analyze_motion(replay: Replay, max_series_points: int = 600,
         }
         series[name] = {"speed": speed_clean, "ang_deg": np.degrees(ang)}
 
-    # 头部位移（身体运动代理）
+    # Head displacement (body movement proxy)
     head = pose[:, HEAD_POS]
     head_dist = np.linalg.norm(np.diff(head, axis=0), axis=1)
     head_speed = head_dist / dt_safe
@@ -115,13 +118,13 @@ def analyze_motion(replay: Replay, max_series_points: int = 600,
                                     if np.any(head_valid) else 0.0), 3),
     }
 
-    # ---- 单手连续换向分析（§12）----
+    # ---- Single-hand consecutive reversal analysis (§12) ----
     result["reversal"] = _reversal_analysis(replay)
 
-    # ---- 每刀路径效率（直线距离 / 实际路径）----
+    # ---- Per-cut path efficiency (straight-line distance / actual path) ----
     result["economy"] = _path_economy(replay, t, pose, dt_safe)
 
-    # ---- 降采样序列（前端图表）----
+    # ---- Downsampled series (frontend charts) ----
     n = len(t) - 1
     if n > max_series_points:
         idx = np.linspace(0, n - 1, max_series_points).astype(int)
@@ -150,21 +153,22 @@ def _vec_angle_deg(a: tuple, b: tuple) -> float:
 
 
 def _hand_of(note) -> str | None:
-    """该 note 归属哪只手：good/bad 用实际 saberType，miss 用颜色。"""
+    """Which hand a note belongs to: good/bad use the actual saberType, miss uses the color."""
     if note.cut is not None:
         return note.cut.saber
     return note.params.saber
 
 
 def _reversal_analysis(replay: Replay, fast_dt: float = 0.35) -> dict:
-    """单手高速连续切割（stream/换向）能力分析 —— 设计文档 §12。
+    """Single-hand high-speed consecutive cutting (stream/reversal) capability analysis — design doc §12.
 
-    不用“相邻刀方向夹角”当换向信号（连续切割方向本来就不同，无区分度）。
-    改为以“同手相邻 note 间隔 < fast_dt 秒”定义【高速段】，回答：
-      - 玩家在多少比例的时间里处于该手的高速连续段？
-      - 高速段内的失误（bad/miss）是否显著集中？——“跟不上”的直接证据
-      - 高速段内刀速是否保持得住？（高速段刀速 / 低速段刀速）
-    全部来自 Replay 实际数据；single_hand_reversal_score 为内部指标。
+    Does not use the "angle between adjacent saber directions" as the reversal signal
+    (consecutive cut directions naturally differ, so it has no discriminative power).
+    Instead, a "fast segment" is defined by "same-hand adjacent note interval < fast_dt seconds", answering:
+      - What proportion of the time is the player in this hand's high-speed consecutive segments?
+      - Are failures (bad/miss) within fast segments notably concentrated? — direct evidence of "can't keep up"
+      - Is saber speed maintained within fast segments? (fast-segment speed / slow-segment speed)
+    All derived from actual Replay data; single_hand_reversal_score is an internal metric.
     """
     out = {}
     notes = sorted(replay.notes, key=lambda n: n.event_time)
@@ -172,10 +176,10 @@ def _reversal_analysis(replay: Replay, fast_dt: float = 0.35) -> dict:
     for hand in ("left", "right"):
         hn = [n for n in notes if _hand_of(n) == hand]
         intervals = []
-        fast_notes = 0          # 落在高速段内的 note 数
-        fast_fails = 0          # 高速段内的 bad/miss
-        fast_speeds = []        # 高速段内 good cut 的刀速
-        slow_speeds = []        # 非高速段 good cut 的刀速
+        fast_notes = 0          # number of notes within fast segments
+        fast_fails = 0          # bad/miss within fast segments
+        fast_speeds = []        # saber speeds of good cuts within fast segments
+        slow_speeds = []        # saber speeds of good cuts outside fast segments
         fails_total = 0
         for prev, cur in zip(hn, hn[1:]):
             dt = cur.event_time - prev.event_time
@@ -214,14 +218,14 @@ def _reversal_analysis(replay: Replay, fast_dt: float = 0.35) -> dict:
             "fast_ratio": round(fast_ratio, 4),
             "fast_fail_rate": round(fast_fail_rate, 4),
             "overall_fail_rate": round(overall_fail_rate, 4),
-            # 高速段失误集中度：>1 表示失误偏向高速段（跟不上的信号）
+            # Fast-segment failure concentration: >1 means failures skew toward fast segments (a sign of not keeping up)
             "fast_fail_concentration": (round(fast_fail_rate / overall_fail_rate, 3)
                                          if overall_fail_rate > 1e-9 else None),
             "fast_saber_speed_avg": round(fs, 2),
             "slow_saber_speed_avg": round(ss, 2),
             "speed_retention": (round(speed_retention, 3)
                                  if speed_retention is not None else None),
-            # 内部指标：高速段占比 × 高速段刀速保持率（越高=高速连续能力越强）
+            # Internal metric: fast-segment ratio × fast-segment speed retention (higher = stronger high-speed continuity)
             "single_hand_reversal_score": (round(fast_ratio * (speed_retention or 0.0) * 100, 2)
                                             if speed_retention is not None else None),
         }
@@ -231,15 +235,15 @@ def _reversal_analysis(replay: Replay, fast_dt: float = 0.35) -> dict:
 
 def _path_economy(replay: Replay, t: np.ndarray, pose: np.ndarray,
                   dt_safe: np.ndarray) -> dict:
-    """相邻同手切割之间：直线路径 vs 实际手部路径 → 运动经济性（≤1）。
+    """Between adjacent same-hand cuts: straight-line path vs actual hand path → motion economy (≤1).
 
-    用每只手的累积路径长度数组做 O(1) 区间查询，避免逐对切片。
+    Uses a cumulative path-length array per hand for O(1) range queries, avoiding per-pair slicing.
     """
     out = {}
     good = [n for n in replay.notes if n.event_type == GOOD and n.cut is not None]
     good.sort(key=lambda n: n.event_time)
 
-    # 每手累积路径长度 cum[i] = 从帧0到帧i 的路径长
+    # Per-hand cumulative path length cum[i] = path length from frame 0 to frame i
     cum_by_hand = {}
     for hand, ps in (("left", LEFT_POS), ("right", RIGHT_POS)):
         pos = pose[:, ps]

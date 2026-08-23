@@ -1,9 +1,16 @@
-"""疲劳曲线（设计文档 §10.3）。
+"""Fatigue curves (design doc §10.3).
 
-核心问题：“时间越长，动作质量是否系统性下降？”
+Core question: "does action quality degrade systematically the longer a run goes?"
 
-措辞约束：输出的是“与局部疲劳一致的运动学特征”（kinematic proxy），
-不是医学诊断（Rule 8）。
+Wording constraint: the output is a "kinematic feature consistent with local fatigue"
+(kinematic proxy), not a medical diagnosis (Rule 8).
+
+Timeline (2026 decision, fixed windows retired): early/late segments and slopes are all
+anchored to note events —
+- Early/late: edge seconds of [first_note, last_note] (v1.4.1 fix, see §4.8)
+- Slopes: every N notes form a group (analysis/notes.py build_note_groups),
+  x = in-group median note time — free of empty-window / mixed-window /
+  small-sample-endpoint pollution (the three main distortion sources of fixed windows)
 """
 from __future__ import annotations
 
@@ -11,19 +18,32 @@ from ..bsor.models import Replay, GOOD, BAD, MISS
 from .scoring import cut_scores
 
 
-def analyze_fatigue(replay: Replay, windows: list[dict],
+def analyze_fatigue(replay: Replay, note_groups: list[dict],
                     motion: dict, edge_seconds: float = 30.0) -> dict:
-    duration = float(replay.frames["time"][-1]) if replay.frame_count else 0.0
-    if duration < 2 * edge_seconds:
-        # 太短的歌不做前后对比，只给斜率
-        edge_seconds = max(10.0, duration / 3.0)
-        if duration < 20:
+    # Note span (v1.4.1 fix): early/late anchored to [first_note, last_note],
+    # no longer [0, duration] — long intro/outro silence would make [0,edge] contain
+    # only sparse opening notes and [dur-edge,dur] fall entirely in the outro
+    # (Hatatagami measured: duration=447s, first note 21.6s, last note 408.4s; the old
+    # late=[417,447] had zero notes → all deltas=None, fatigue analysis silently
+    # failed). The span convention matches the detail-page timeline trim boundary
+    # (repository.get_note_time_range): MIN/MAX over all note events (including
+    # miss/bad; bombs naturally fall within the note span).
+    note_times = [n.event_time for n in replay.notes]
+    if not note_times:
+        return {"available": False, "reason": "无 note 事件，无法做前后段对比"}
+    first_note = min(note_times)
+    last_note = max(note_times)
+    note_span = last_note - first_note
+    if note_span < 2 * edge_seconds:
+        # Note span too short: shrink the comparison window, only provide slopes
+        edge_seconds = max(10.0, note_span / 3.0)
+        if note_span < 20:
             return {"available": False,
-                    "reason": f"歌曲过短（{duration:.0f}s），无法做前后段对比"}
+                    "reason": f"note 跨度过短（{note_span:.0f}s），无法做前后段对比"}
 
     notes = sorted(replay.notes, key=lambda n: n.event_time)
-    early = _segment_stats(notes, 0.0, edge_seconds)
-    late = _segment_stats(notes, duration - edge_seconds, duration)
+    early = _segment_stats(notes, first_note, first_note + edge_seconds)
+    late = _segment_stats(notes, last_note - edge_seconds, last_note)
 
     def delta(key, scale=1.0):
         e, l = early.get(key), late.get(key)
@@ -51,20 +71,28 @@ def analyze_fatigue(replay: Replay, windows: list[dict],
             "后段 Center/刀速下降、miss/bad 率上升；不构成医学诊断。"),
     }
 
-    # 窗口级斜率（accuracy / center 随时间线性拟合）
-    slopes = _window_slopes(windows)
+    # Group-level slopes (linear fit of accuracy / center / saber speed / miss_rate over time)
+    # Fixed windows retired (2026): x = in-group median note time, each group has a fixed N notes —
+    # eliminates the leverage of empty/mixed windows and small-sample endpoints on the fit
+    # (Hatatagami's saber-speed slope was once distorted 4.4x, and the accuracy slope
+    # direction flipped across 16 songs).
+    slopes = _group_slopes(note_groups)
     result["slopes"] = slopes
 
-    # 手速/角速度的前后对比（来自 motion 序列）
+    # Early/late comparison of hand speed / angular velocity (from the motion series):
+    # also anchored to the note span; otherwise intro/outro silence (zero movement)
+    # would dilute the early/late hand-speed means — Hatatagami's old algorithm had
+    # late frames ≥417s entirely in the outro → hand speed ≈0 → deltas systematically
+    # negative-biased (the illusion of "player slowed down a lot", actually silence pollution).
     series = motion.get("series") if isinstance(motion, dict) else None
     if series and series.get("t"):
         ts = series["t"]
-        t_cut_early = edge_seconds
-        t_cut_late = duration - edge_seconds
+        t_cut_early = first_note + edge_seconds
+        t_cut_late = last_note - edge_seconds
         for hand in ("left", "right"):
             sp = series[f"{hand}_speed"]
-            e_sp = _mean_where(sp, ts, lambda x: x < t_cut_early)
-            l_sp = _mean_where(sp, ts, lambda x: x >= t_cut_late)
+            e_sp = _mean_where(sp, ts, lambda x: first_note <= x < t_cut_early)
+            l_sp = _mean_where(sp, ts, lambda x: t_cut_late <= x <= last_note)
             result["deltas"][f"{hand}_hand_speed"] = (
                 round(l_sp - e_sp, 3) if e_sp is not None and l_sp is not None else None)
     return result
@@ -108,9 +136,15 @@ def _segment_stats(notes, t0: float, t1: float) -> dict:
     return out
 
 
-def _window_slopes(windows: list[dict]) -> dict:
+def _group_slopes(note_groups: list[dict]) -> dict:
+    """Group-level slope fitting (replacement after fixed windows retired, see module docstring).
+
+    x = median note event time in the group (t_ref, always present, no legacy-data
+    fallback issue); each group has a fixed group_notes notes (constant sample size),
+    empty groups do not exist. Fewer than 3 groups → slope None (keeps the old guard).
+    """
     import numpy as np
-    pts = [( (w["t_start"] + w["t_end"]) / 2.0, w["metrics"]) for w in windows]
+    pts = [(g["t_ref"], g["metrics"]) for g in note_groups]
     slopes = {}
     for key in ("accuracy_local", "center_avg", "saber_speed_avg", "miss_rate"):
         xs = [t for t, m in pts if key in m]

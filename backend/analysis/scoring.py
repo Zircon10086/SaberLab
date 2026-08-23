@@ -1,14 +1,14 @@
-"""官方计分口径移植（权威来源：BeatLeader ReplayDecoder 的
-ScoreCalculator.cs 与 ReplayStatisticUtils.cs）。
+"""Port of the official scoring convention (authoritative source: BeatLeader
+ReplayDecoder's ScoreCalculator.cs and ReplayStatisticUtils.cs).
 
-每刀满分 115 = Pre(70) + Center(15) + Post(30)：
-- before = clamp(round(70 * beforeCutRating), 0, 70)；SliderTail 固定 70；
-  BurstSliderElement 没有 Pre。
-- after  = clamp(round(30 * afterCutRating), 0, 30)；SliderHead 固定 30；
-  BurstSliderHead 固定 0；BurstSliderElement 没有 Post。
-- center = round(15 * (1 - clamp(cutDistanceToCenter / 0.3)))；
-  BurstSliderElement 固定 20（计入 maxScore 时同样按 20）。
-惩罚：bad=-2, miss=-3, bomb=-4, wall=-5（影响倍率与连击）。
+Each cut scores up to 115 = Pre(70) + Center(15) + Post(30):
+- before = clamp(round(70 * beforeCutRating), 0, 70); SliderTail fixed at 70;
+  BurstSliderElement has no Pre.
+- after  = clamp(round(30 * afterCutRating), 0, 30); SliderHead fixed at 30;
+  BurstSliderHead fixed at 0; BurstSliderElement has no Post.
+- center = round(15 * (1 - clamp(cutDistanceToCenter / 0.3)));
+  BurstSliderElement fixed at 20 (also counted as 20 in maxScore).
+Penalties: bad=-2, miss=-3, bomb=-4, wall=-5 (affect multiplier and combo).
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 
 def cut_scores(note: NoteEvent) -> tuple[int, int, int]:
-    """返回 (before, center, after)。官方 CutScoresForNote 移植。"""
+    """Return (before, center, after). Port of the official CutScoresForNote."""
     st = note.params.scoring_type
     c = note.cut
     before = after = center = 0
@@ -52,7 +52,7 @@ def cut_scores(note: NoteEvent) -> tuple[int, int, int]:
 
 
 def score_for_note(note: NoteEvent) -> int:
-    """官方 ScoreForNote 移植。"""
+    """Port of the official ScoreForNote."""
     if note.event_type == GOOD:
         b, c, a = cut_scores(note)
         return b + c + a
@@ -66,7 +66,7 @@ def score_for_note(note: NoteEvent) -> int:
 
 
 class MultiplierCounter:
-    """官方 MultiplierCounter 移植（x1→x8，2 连递增一级）。"""
+    """Port of the official MultiplierCounter (x1→x8, one level up per 2 consecutive)."""
 
     def __init__(self):
         self.multiplier = 1
@@ -94,16 +94,18 @@ class MultiplierCounter:
 @dataclass
 class ScoreResult:
     total_score: int
-    accuracy: float          # BeatLeader 口径累计 accuracy（最后一个 block note 处）
+    accuracy: float          # BeatLeader-convention cumulative accuracy (at the last block note)
     max_combo: int
-    score_graph: list[float]  # 每秒 accuracy 曲线（官方 ScoreGraph 口径）
+    score_graph: list[float]  # per-second accuracy curve (official ScoreGraph convention)
+    block_accuracy: list[tuple]  # (event time, official running_accuracy), one point per block note
+    # (2026-08: per-note curve data source — same convention as replay records / 3D playback)
 
 
 def compute_score(replay) -> ScoreResult:
-    """官方 Accuracy()/ScoreGraph() 合并移植。
+    """Combined port of the official Accuracy()/ScoreGraph().
 
-    事件按时间排序（notes + walls 作为 score=-5 的惩罚事件），
-    倍率随 good 递增、随 bad/miss/bomb/wall 递减。
+    Events sorted by time (notes + walls as penalty events with score=-5);
+    the multiplier increases on good and decreases on bad/miss/bomb/wall.
     """
     structs = []
     for note in replay.notes:
@@ -127,6 +129,7 @@ def compute_score(replay) -> ScoreResult:
     normal_counter = MultiplierCounter()
     last_accuracy = 0.0
     prev_accuracy = 0.0
+    block_accuracy: list[tuple] = []
 
     for i, s in enumerate(structs):
         score_for_max = 20 if s["scoring_type"] == SCORING_BURST_SLIDER_ELEMENT else 115
@@ -144,16 +147,17 @@ def compute_score(replay) -> ScoreResult:
             score += multiplier * s["score"]
         if combo > max_combo:
             max_combo = combo
-        # 官方口径：block note 记录 totalScore/maxScore；其余沿用前值
+        # Official convention: block notes record totalScore/maxScore; others carry the previous value
         if s["is_block"]:
             prev_accuracy = (score / max_score) if max_score > 0 else 0.0
+            block_accuracy.append((s["time"], prev_accuracy))
         elif i == 0:
             prev_accuracy = 0.0
         s["running_accuracy"] = prev_accuracy
         if s["is_block"]:
             last_accuracy = prev_accuracy
 
-    # ScoreGraph：每秒平均 running-accuracy（官方 ScoreGraph 移植）
+    # ScoreGraph: per-second average running-accuracy (official ScoreGraph port)
     graph: list[float] = []
     if structs:
         end_time = int(structs[-1]["time"])
@@ -171,4 +175,5 @@ def compute_score(replay) -> ScoreResult:
             graph.append(val)
 
     return ScoreResult(total_score=score, accuracy=last_accuracy,
-                       max_combo=max_combo, score_graph=graph)
+                       max_combo=max_combo, score_graph=graph,
+                       block_accuracy=block_accuracy)
