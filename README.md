@@ -169,7 +169,7 @@ SaberLab itself is released under **[GPL-3.0-or-later](LICENSE)**.
 
 ## AI Use Disclosure
 
-This project is developed with the assistance of **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)**. We maintain full transparency regarding the integration of AI tools in our workflow.
+This project is developed with the assistance of **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)**.
 
 ### What AI Did
 * **Code Implementation**: Used DeepSeek Harness for boilerplate generation, localized code writing, and routine implementation tasks based on the provided architecture.
