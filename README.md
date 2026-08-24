@@ -67,9 +67,9 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 | --- | --- |
 | **Local-first** | Reads local BeatLeader `.bsor` replays and local maps; every metric is computed deterministically in Python, and raw replays are always read-only |
 | **Official algorithm** | Faithful port of the official BSOR decoder/scorer — recomputed totals match the recorded score **note for note** (accuracy curve uses the same formula) |
-| **Note-anchored analysis** | Timeline/fatigue/summaries are anchored to real note events (fixed time windows retired); mid-song density dips faithfully reflect the map layout |
-| **Multilingual** | 简体中文 / English / 日本語 UI switching (language files auto-discovered in Settings); AI reports follow the UI language |
-| **Standalone window** | Built-in WebView2 window with an acrylic (frosted-glass) background and G2 squircle card corners; auto-relocates the port if occupied |
+| **Note-anchored analysis** | Timeline/fatigue/summaries are anchored to real note events; mid-song density dips faithfully reflect the map layout |
+| **Multilingual** | 简体中文 / English / 日本語 UI switching (language files auto-discovered in Settings) |
+| **Standalone window** | Built-in WebView2 window with an acrylic (frosted-glass) background; auto-relocates the port if occupied |
 | **3D replay** | A ChroViewer port rendering maps/replays/environments fully locally, from local data only |
 | **AI coach** | Structured metrics interpreted by an LLM for personalized guidance; can be disabled for rule-based reports (Settings → AI) |
 | **Online sync** | ScoreSaber star/PP cache rooted at local maps, with 429 rate-limit backoff and retry |
@@ -156,8 +156,6 @@ Run tests:
 ## License
 
 SaberLab itself is released under **[GPL-3.0-or-later](LICENSE)**.
-
-`frontend/chro/` (the ChroViewer port) is a separate aggregated program that follows the upstream [GPL-2.0](frontend/chro/LICENSE); the modification list is in [MODIFICATIONS.md](frontend/chro/MODIFICATIONS.en.md).
 
 ## Acknowledgments
 
