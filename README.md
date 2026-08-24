@@ -174,7 +174,20 @@ SaberLab 本体以 **[GPL-3.0-or-later](LICENSE)**  发布。
 - [BS-Open-Replay](https://github.com/BeatLeader/BS-Open-Replay)（BeatLeader）—— 官方 BSOR 解码器与计分逻辑移植来源
 - [ScoreSaber API](https://docs.scoresaber.com/)（ScoreSaber）—— ScoreSaber 官方 API 文档
 - [SongCore](https://github.com/Goobwabber/SongCore) —— 谱面 hash 算法参考
-- Beat Saber 社区 —— 让这一切有意义
+
+
+## AI 使用声明
+
+本项目在开发过程中使用了 **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** 智能代理进行辅助。
+
+### AI 负责的部分
+* **代码编写**：利用 DeepSeek Harness 辅助生成基础样板代码、常规功能实现以及局部代码编写。
+* **多语言翻译**：辅助完成项目文档及国际化（i18n）的多语言版本翻译工作。
+
+### 人类开发者负责的部分
+* **架构设计**：项目的整体框架、技术选型与系统设计由人类开发者独立完成。
+* **代码审查**：AI 生成的所有代码均经过人工审查与重构。
+* **测试与 Debug**：所有的漏洞修复（Debugging）、单元测试及最终的质量把关均由人类完成。
 
 
 <!-- 占位标题，暂时隐藏：## Contributors -->
