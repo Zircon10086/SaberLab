@@ -79,7 +79,7 @@
   />
 </svg>
 
-        <span data-i18n="nav.scoresaber">ScoreSaber</span>
+        <span data-i18n="nav.cloud">云端数据</span>
       </button>
       <button class="nav-item" data-tab="settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -116,18 +116,24 @@
       </div>
 
       <div class="surface">
-        <div class="surface-title"><span data-i18n="recent.title">最近 Replay</span>
-          <span class="page-mode" id="page-mode">
-            <button class="pm-tab active" data-mode="day" data-i18n="recent.mode_day">按天</button>
-            <button class="pm-tab" data-mode="count" data-i18n="recent.mode_count">按数量</button>
-          </span>
-          <button id="btn-goto-search" class="mini icon-btn" style="margin-left:10px">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            <span data-i18n="btn.search">搜索</span>
-          </button>
+        <div class="surface-title">
+          <div class="title-left">
+            <span data-i18n="recent.title">最近 Replay</span>
+            <span class="page-mode" id="page-mode">
+              <button class="pm-tab active" data-mode="day" data-i18n="recent.mode_day">按天</button>
+              <button class="pm-tab" data-mode="count" data-i18n="recent.mode_count">按数量</button>
+            </span>
+            <button id="btn-goto-search" class="mini icon-btn" style="margin-left:10px">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+              <span data-i18n="btn.search">搜索</span>
+            </button>
+          </div>
+          <!-- 分页控件（v1.6.0：从列表底部移到顶部行；grid 三栏对称布局，
+               左栏=标题/模式/搜索，中栏=分页，右栏=空占位 → 分页严格水平居中，
+               不同数量 replay 不再影响分页位置） -->
+          <div id="pagination" class="pagination"></div>
         </div>
         <div id="recent-replays" class="day-groups">加载中…</div>
-        <div id="pagination" class="pagination"></div>
       </div>
     </section>
 
@@ -175,10 +181,10 @@
 
     <!-- ====== ScoreSaber ====== -->
     <section id="tab-scoresaber" class="tabpane">
-      <h1 class="page-title" data-i18n="scoresaber.title">ScoreSaber</h1>
-      <p class="page-desc" data-i18n="scoresaber.desc">玩家档案与成绩交叉验证</p>
+      <h1 class="page-title" data-i18n="scoresaber.title">云端数据</h1>
+      <p class="page-desc" data-i18n="scoresaber.desc">玩家档案 · 云端成绩 · 能力分级（数据源见设置 → 玩家）</p>
       <div class="actions">
-        <button id="btn-ss-refresh" class="primary" data-i18n="scoresaber.refresh_btn">拉取 ScoreSaber 数据</button>
+        <button id="btn-ss-refresh" class="primary" data-i18n="scoresaber.refresh_btn">拉取数据并计算动态水平</button>
         <button id="btn-ss-validate" data-i18n="scoresaber.validate_btn">交叉验证本地 Replay</button>
       </div>
       <div id="ss-profile" class="surface"></div>
@@ -197,6 +203,15 @@
         <div class="page-mode" id="lang-switch" style="margin-left:0">
           <!-- language buttons are rendered dynamically by i18n.js
                (discovered from /api/i18n/langs; adding a file enables it) -->
+        </div>
+      </div>
+
+      <div class="surface">
+        <div class="surface-title" data-i18n="settings.datasource.title">云端数据源</div>
+        <p class="hint" style="margin-bottom:12px" data-i18n="settings.datasource.desc">选择云端成绩与星级的数据来源。玩家 ID 两平台通用（从 Replay 自动解析）；切换后另一平台已缓存的数据保留不动，可随时切回。</p>
+        <div class="page-mode" id="datasource-switch" style="margin-left:0">
+          <button class="pm-tab" data-platform="scoresaber">ScoreSaber</button>
+          <button class="pm-tab" data-platform="beatleader">BeatLeader</button>
         </div>
       </div>
 

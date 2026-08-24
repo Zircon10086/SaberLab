@@ -41,6 +41,8 @@ class Config:
     songcore_cache: str = ""
     scoresaber_id: str = ""
     player_name_fallback: str = ""
+    star_palette: str = "community"   # star rating color scheme (schema player.star_palette)
+    data_source: str = "scoresaber"   # cloud data source: scoresaber | beatleader (2026-08)
     # [Deprecated] window_seconds / window_step_seconds: fixed time windows retired
     # (2026 decision, see backend/analysis/notes.py); fields kept only for backward
     # compatibility with leftover values in old config.yaml; no longer read by the engine.
@@ -49,7 +51,7 @@ class Config:
     slope_group_notes: int = 50   # note group size for fatigue slope / AI summary (added 2026)
     fatigue_edge_seconds: float = 30.0
     host: str = "127.0.0.1"
-    port: int = 8787
+    port: int = 6980
     ai_provider: str = "deepseek"
     ai_base_url: str = ""
     ai_model: str = "deepseek-chat"
@@ -109,12 +111,14 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         songcore_cache=game.get("songcore_cache", ""),
         scoresaber_id=str(player.get("scoresaber_id", "")),
         player_name_fallback=player.get("player_name_fallback", ""),
+        star_palette=str(player.get("star_palette", "community")),
+        data_source=str(player.get("data_source", "scoresaber")).lower(),
         window_seconds=float(analysis.get("window_seconds", 30)),
         window_step_seconds=float(analysis.get("window_step_seconds", 10)),
         slope_group_notes=int(analysis.get("slope_group_notes", 50)),
         fatigue_edge_seconds=float(analysis.get("fatigue_edge_seconds", 30)),
         host=server.get("host", "127.0.0.1"),
-        port=int(server.get("port", 8787)),
+        port=int(server.get("port", 6980)),
         ai_provider=provider,
         ai_base_url=ai.get("base_url") or DEFAULT_AI_BASE_URLS.get(provider, ""),
         ai_model=ai.get("model") or DEFAULT_AI_MODELS.get(provider, ""),

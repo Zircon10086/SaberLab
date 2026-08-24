@@ -1,7 +1,7 @@
 """SaberLab FastAPI entry point.
 
 Start:  .venv\\Scripts\\python.exe backend\\main.py
-Panel:  http://127.0.0.1:8787
+Panel:  http://127.0.0.1:6980
 """
 from __future__ import annotations
 
@@ -25,7 +25,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend.config import Config, load_config, PROJECT_ROOT
+from backend.config.schema import STAR_PALETTES, get_star_palette
 from backend.config.service import ConfigService, check_paths
+from backend.analysis.player_palette import build_tiers, classify_player
+import backend.beatleader as beatleader
 from backend.db.repository import Repository
 from backend.maps.resolver import MapResolver
 from backend.services.enrichment import EnrichmentService
@@ -56,13 +59,18 @@ def reload_runtime_config() -> None:
 
 def _scoresaber_id() -> str:
     """Resolve the ScoreSaber player ID (key finding: ScoreSaber ID = Steam ID,
-    BSOR replays carry a 17-digit platform ID): prefer the historical manual
-    config (config fallback); otherwise take the most recent play's player
-    ("current player" intuition in multi-player libraries, not the mode)."""
-    cfg_id = (cfg.scoresaber_id or "").strip()
-    if cfg_id:
-        return cfg_id
+    BSOR replays carry a 17-digit platform ID). The manual config setting is
+    DEPRECATED (2026 decision): the ID is parsed from BSOR replays only —
+    the most recent play's player ("current player" intuition in multi-player
+    libraries, not the mode). Returns "" when no replay is ingested yet."""
     return repo.latest_player_id()
+
+
+def _active_platform() -> str:
+    """Current cloud data source (player.data_source): scoresaber | beatleader.
+    Unknown values fall back to scoresaber (backward compatible)."""
+    src = (cfg.data_source or "scoresaber").lower()
+    return src if src in ("scoresaber", "beatleader") else "scoresaber"
 
 
 def _path_ok(p: str) -> bool:
@@ -211,17 +219,18 @@ def _run_batch(limit: int, run_ai: bool, lang: str = "zh-CN"):
 
 
 def _run_ranked_update(only_missing: bool = False):
-    """Background sync: rooted at local maps, batch-fetch ScoreSaber leaderboard
-    metadata.
+    """Background sync: rooted at local maps, batch-fetch the ACTIVE platform's
+    leaderboard metadata (scoresaber | beatleader, player.data_source).
 
     1. Collect hashes of maps with replay records (deduplicated)
-    2. get-difficulties + by-id info -> scoresaber_leaderboards (stars cache, map attributes)
+    2. leaderboard sync -> scoresaber_leaderboards (stars cache, map attributes)
     3. player score index -> map_ranked_cache (pp cache, personal play history)
 
-    only_missing (v1.4.1, one-click refresh): skip cached maps, only sync new
-    ones - one-click refresh finds new data, cloud old values are not
-    re-fetched; only "Re-update data online" (force) refreshes cloud values.
+    Each platform keeps its own rows: switching data sources never touches the
+    other platform's cache. only_missing (v1.4.1, one-click refresh): skip
+    cached maps, only sync new ones.
     """
+    platform = _active_platform()
     try:
         _wait_ingest_done("ranked_update")   # wait for ingest before collecting map hashes (post-clear one-click refresh scenario)
         replays = repo.list_replays(limit=100000)
@@ -230,21 +239,27 @@ def _run_ranked_update(only_missing: bool = False):
 
         def cb(i, n, name):
             _set_task("ranked_update", done=i, total=n, current=f"谱面同步:{name}")
-        stats = scoresaber.sync_maps_batch(cfg, repo, hashes, progress_cb=cb,
-                                           only_missing=only_missing)
-        stats["leaderboards_total"] = repo.count_ss_leaderboards()
+        if platform == "beatleader":
+            stats = beatleader.sync_maps_batch(cfg, repo, hashes, progress_cb=cb,
+                                               only_missing=only_missing)
+            build_index = beatleader.build_ranked_index
+        else:
+            stats = scoresaber.sync_maps_batch(cfg, repo, hashes, progress_cb=cb,
+                                               only_missing=only_missing)
+            build_index = scoresaber.build_ranked_index
+        stats["leaderboards_total"] = repo.count_ss_leaderboards(platform=platform)
 
-        # pp filling: player score index ((hash, difficulty) -> pp), ID auto-resolved from BSOR;
-        # skip pp when there is no Replay in the DB and no config fallback (avoid ScoreSaber empty-ID 404)
+        # pp filling: player score index ((hash, difficulty) -> pp), ID auto-resolved from BSOR
         pid = _scoresaber_id()
-        idx = scoresaber.build_ranked_index(cfg, pid) if pid else {}
+        idx = build_index(cfg, pid) if pid else {}
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
         for r in replays:
             mh = (r.get("map_hash") or "").upper()
             df = r.get("difficulty") or ""
             info = idx.get((mh, df))
             if info:
-                repo.upsert_ranked_cache(mh, df, None, info.get("pp"), now)
+                repo.upsert_ranked_cache(mh, df, info.get("stars"),
+                                         info.get("pp"), now, platform=platform)
         stats["pp_indexed"] = len(idx)
 
         _set_task("ranked_update", running=False, current="",
@@ -354,8 +369,11 @@ def api_status():
     with _task_lock:
         tasks = [dict(t) for t in _tasks.values()]
     maps_dir = {"exists": _path_ok(cfg.custom_levels_dir)}
+    platform = _active_platform()
+    personal = _personal_palette_entry(platform)
     return {
         "ok": True,
+        "platform": platform,   # active cloud data source: scoresaber | beatleader
         "config": {
             "replay_dir": cfg.replay_dir,
             "custom_levels_dir": cfg.custom_levels_dir,
@@ -374,6 +392,15 @@ def api_status():
             "provider": cfg.ai_provider,
             "model": cfg.ai_model,
             "configured": llm.configured,
+        },
+        "chro": {"available": CHRO_AVAILABLE},
+        # Star rating color scheme: current selection + full palette definitions
+        # (single source for the frontend's starColor tiers). "personal" is
+        # computed from the current player's records on the ACTIVE platform
+        # (cached; absent offline -> the active id falls back to "community").
+        "ui": {
+            "star_palette": _active_palette_id(personal),
+            "star_palettes": STAR_PALETTES + ([personal] if personal else []),
         },
     }
 
@@ -493,7 +520,7 @@ def api_replays(page: int = Query(1, ge=1),
     """
     if flat:
         replays = repo.list_replays(limit=limit, map_hash=map_hash, days=days)
-        enrichment.enrich_flat(replays)
+        enrichment.enrich_flat(replays, _active_platform())
         return replays
     if mode == "count":
         page_size = 20
@@ -502,12 +529,12 @@ def api_replays(page: int = Query(1, ge=1),
         pages = max(1, math.ceil(total / page_size)) if total else 0
         page = max(1, min(page, pages)) if pages else 1
         chunk = replays[(page - 1) * page_size: page * page_size]
-        enrichment.enrich_flat(chunk)
+        enrichment.enrich_flat(chunk, _active_platform())
         return {"replays": chunk, "total": total, "page": page,
                 "pages": pages, "mode": "count"}
     data = repo.list_replays_by_day(page=page, map_hash=map_hash, days=days)
     # attach beatmap_key + ranked stars + pp (services/enrichment.py, cached)
-    enrichment.enrich(data.get("days", []))
+    enrichment.enrich(data.get("days", []), _active_platform())
     return data
 
 
@@ -527,9 +554,9 @@ def api_replay_detail(replay_id: str):
     # history entries also carry beatmap_key / stars / pp / nps
     hist = row["history_same_map"]
     if hist:
-        enrichment.enrich_flat(hist)
+        enrichment.enrich_flat(hist, _active_platform())
     # the current replay itself carries nps / stars / pp
-    enrichment.enrich_flat([row])
+    enrichment.enrich_flat([row], _active_platform())
     return row
 
 
@@ -584,12 +611,40 @@ def api_replay_series(replay_id: str):
     return {"motion": series}
 
 
+@app.get("/api/replays/{replay_id}/slice-details")
+def api_replay_slice_details(replay_id: str):
+    """SliceDetails (v1.6.0, ported from the SliceDetails mod, qqrz997/ckosmic):
+    per-grid-position average cut scores and angles — 12 tiles (4x3 note grid) x
+    18 cells (2 colors x 9 directions).
+
+    Computed live from the original .bsor: the notes table has no cut normal,
+    which the cut-angle average requires. Parsing is deterministic and cheap
+    (pure function over the read-only replay file).
+    """
+    from backend.bsor.parser import parse_file, BsorError
+    from backend.analysis.slicedetails import analyze_slice_details
+    row = repo.get_replay(replay_id)
+    if not row:
+        raise HTTPException(404, "replay 不存在")
+    path = row.get("file_path")
+    if not path or not pathlib.Path(path).exists():
+        raise HTTPException(404, "replay 文件不存在（已移动或删除）")
+    try:
+        replay = parse_file(path)
+    except BsorError as e:
+        raise HTTPException(422, f"replay 解析失败: {e}")
+    except Exception as e:  # unexpected parse failure must not fake success
+        raise HTTPException(500, f"slice-details 计算失败: {e}")
+    return analyze_slice_details(replay.notes, height=replay.info.height,
+                                 left_handed=replay.info.left_handed)
+
+
 @app.get("/api/history")
 def api_history(map_hash: Optional[str] = None, days: Optional[int] = None,
                 limit: int = Query(200, le=2000)):
     replays = repo.list_replays(limit=limit, map_hash=map_hash, days=days)
     # attach beatmap_key / nps / stars / pp (the history list's highlight search needs the key)
-    enrichment.enrich_flat(replays)
+    enrichment.enrich_flat(replays, _active_platform())
     return replays
 
 
@@ -770,35 +825,124 @@ def api_report(replay_id: str):
     return rep
 
 
-# ---------- ScoreSaber ----------
+# ---------- dynamic star palette (personal, 2026 spec) ----------
+def _personal_palette_entry(platform: str | None = None) -> dict | None:
+    """Build the "personal" palette preset for the ACTIVE platform from its
+    per-player cache (offline-capable after one successful fetch); None when
+    unavailable."""
+    platform = platform or _active_platform()
+    pid = _scoresaber_id()
+    if not pid:
+        return None
+    cached = repo.get_player_palette(platform, pid)
+    if not cached or cached.get("yellow_stars") is None:
+        return None
+    return {
+        "id": "personal",
+        "tiers": build_tiers(cached["yellow_stars"]),
+        "meta": {
+            "yellow_stars": cached["yellow_stars"],
+            "stage": cached["stage"],
+            "max_single_pp": cached["max_single_pp"],
+            "sample_count": cached["sample_count"],
+            "method": cached["method"],
+            "computed_at": cached["computed_at"],
+        },
+    }
+
+
+def _active_palette_id(personal: dict | None) -> str:
+    """Selected palette id with safe fallback: unknown ids -> community;
+    "personal" needs a computed cache entry, else falls back to community."""
+    want = cfg.star_palette
+    if want == "personal":
+        return "personal" if personal else "community"
+    return want if get_star_palette(want) else "community"
+
+
+def _palette_result(platform: str, pid: str) -> dict | None:
+    """/api payload of the cached personal palette for a player/platform."""
+    cached = repo.get_player_palette(platform, pid)
+    if not cached or cached.get("yellow_stars") is None:
+        return None
+    return {"status": "known",
+            "yellow_stars": cached["yellow_stars"],
+            "stage": cached["stage"],
+            "max_single_pp": cached["max_single_pp"],
+            "sample_count": cached["sample_count"],
+            "method": cached["method"],
+            "computed_at": cached["computed_at"]}
+
+
+def _compute_and_cache_palette(platform: str, pid: str, scores: list) -> dict:
+    """classify_player() over freshly fetched scores, persist, return payload."""
+    result = classify_player(scores)
+    repo.save_player_palette(platform, pid, result)
+    if result["status"] == "unknown":
+        return {"status": "unknown"}
+    return {**result, "computed_at": datetime.now(timezone.utc).isoformat()}
+
+
+# ---------- cloud data page (platform-scoped: /api/scoresaber | /api/beatleader) ----------
+def _cloud_page_get(platform: str):
+    """Shared GET logic: serve the cached profile/scores (+ personal palette)
+    for a platform, or fetch on first visit."""
+    pid = _scoresaber_id()   # auto-resolved from BSOR (= Steam ID); the config setting is deprecated
+    cached = repo.get_player_cache(platform, pid)
+    if cached:
+        return {**cached, "palette": _palette_result(platform, pid)}
+    return _cloud_page_refresh(platform)
+
+
+def _cloud_page_refresh(platform: str):
+    """Shared POST logic: fetch profile + scores for the platform, compute and
+    cache the personal palette in one step ("拉取数据并计算动态水平")."""
+    pid = _scoresaber_id()
+    if not pid:
+        raise HTTPException(400, "库中无 Replay 数据，无法解析玩家 ID")
+    if platform == "beatleader":
+        try:
+            profile = beatleader.fetch_profile(cfg, pid)
+            scores = beatleader.fetch_scores(cfg, pid, limit=100)
+        except beatleader.BeatLeaderError as e:
+            raise HTTPException(502, str(e))
+    else:
+        try:
+            profile = scoresaber.fetch_profile(cfg, pid)
+            scores = scoresaber.fetch_scores(cfg, pid, limit=100,
+                                             sort="recent", max_pages=2)
+        except scoresaber.ScoreSaberError as e:
+            raise HTTPException(502, str(e))
+    repo.save_player_cache(platform, pid, profile, scores)
+    palette = _compute_and_cache_palette(platform, pid, scores)
+    return {"fetched_at": datetime.now(timezone.utc).isoformat(),
+            "profile": profile, "scores": scores, "palette": palette}
+
+
 @app.get("/api/scoresaber")
 def api_scoresaber():
-    pid = _scoresaber_id()   # auto-resolved from BSOR (= Steam ID), config is only a fallback
-    cached = repo.get_scoresaber(pid)
-    if cached:
-        return cached
-    return refresh_scoresaber()
+    return _cloud_page_get("scoresaber")
 
 
 @app.post("/api/scoresaber/refresh")
 def refresh_scoresaber():
-    pid = _scoresaber_id()
-    if not pid:
-        raise HTTPException(400, "库中无 Replay 数据，无法解析玩家 ID")
-    try:
-        profile = scoresaber.fetch_profile(cfg, pid)
-        scores = scoresaber.fetch_scores(cfg, pid, limit=100,
-                                         sort="recent", max_pages=2)
-    except scoresaber.ScoreSaberError as e:
-        raise HTTPException(502, str(e))
-    repo.save_scoresaber(pid, profile, scores)
-    return {"fetched_at": datetime.now(timezone.utc).isoformat(),
-            "profile": profile, "scores": scores}
+    return _cloud_page_refresh("scoresaber")
+
+
+@app.get("/api/beatleader")
+def api_beatleader():
+    return _cloud_page_get("beatleader")
+
+
+@app.post("/api/beatleader/refresh")
+def refresh_beatleader():
+    return _cloud_page_refresh("beatleader")
 
 
 @app.get("/api/scoresaber/validate")
 def api_scoresaber_validate():
-    """Cross-validation: locally parsed scores vs ScoreSaber recorded scores."""
+    """Cross-validation (ScoreSaber-only): locally parsed scores vs ScoreSaber
+    recorded scores."""
     local = repo.list_replays(limit=500)
     result = scoresaber.cross_validate(cfg, _scoresaber_id(), local)
     return result
@@ -806,7 +950,8 @@ def api_scoresaber_validate():
 
 @app.post("/api/scoresaber/update-ranked")
 def api_scoresaber_update_ranked():
-    """Background fill of the (map_hash, difficulty) -> stars/pp cache (cloud data, local files untouched)."""
+    """Background fill of the (map_hash, difficulty) -> stars/pp cache for the
+    ACTIVE platform (cloud data, local files untouched)."""
     _require_db_populated()   # empty-DB guard (stars sync: use "One-click Refresh")
     _require_maps_dir()   # sync rooted at local maps; reject if the maps dir is unavailable
     _start_task("ranked_update", _run_ranked_update)
@@ -1073,10 +1218,18 @@ def index():
 
 app.mount("/static", NoCacheStaticFiles(directory=FRONTEND_DIR), name="static")
 
-# 3D replay viewer (ChroViewer port, phase 2): build output mounted at /chro/
-_CHRO_DIST = FRONTEND_DIR / "chro" / "dist"
-if _CHRO_DIST.exists():
+# 3D replay viewer: external GPL-2.0 plugin (Local-ChroViewer, independent
+# project). SaberLab does not ship the viewer source; the plugin's build output
+# must be present under the first-party plugin directory plugins/chro/ (which
+# also covers the packaged layout, since frozen PROJECT_ROOT == <exe dir>).
+# When present it is mounted at /chro/ and reported in /api/status (the UI
+# shows an install hint otherwise). No fallback paths: removing the plugin
+# directory must disable the viewer.
+_CHRO_PLUGIN_DIR = PROJECT_ROOT / "plugins" / "chro"
+_CHRO_DIST = _CHRO_PLUGIN_DIR if (_CHRO_PLUGIN_DIR / "index.html").exists() else None
+if _CHRO_DIST is not None:
     app.mount("/chro", NoCacheStaticFiles(directory=_CHRO_DIST, html=True), name="chro")
+CHRO_AVAILABLE = _CHRO_DIST is not None
 
 
 def main():

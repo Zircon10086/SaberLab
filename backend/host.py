@@ -1,7 +1,7 @@
 """SaberLab standalone window host (Phase 3, architecture review §6.2).
 
 Responsibilities:
-1. Port probing: default 8787; if occupied, increment 8787+1..+19 (eliminates startup failure from port conflicts)
+1. Port probing: default 6980; if occupied, increment 6980+1..+19 (eliminates startup failure from port conflicts)
 2. Single instance: if an instance is already running, notify and exit (browser mode has no window control; simplified)
 3. uvicorn runs in a daemon thread; window close → should_exit → process exits
 4. Dual modes:
@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from ctypes import wintypes
 
 import pathlib
@@ -37,18 +38,47 @@ import uvicorn
 
 from backend.config import load_config, PROJECT_ROOT
 from backend import desktop
+
+
+def _setup_stdio() -> None:
+    """Console-less startup support (pythonw.exe / frozen --windowed):
+    sys.stdout/stderr are None there, so any print() would crash; redirect
+    them to data/logs/saberlab.log (append) to keep the logs inspectable.
+    Console mode (plain `python backend\\host.py`) is untouched.
+    """
+    if sys.stdout is not None:
+        return
+    log_dir = PROJECT_ROOT / "data" / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "saberlab.log"
+        f = open(log_path, "a", encoding="utf-8", buffering=1)
+        sys.stdout = f
+        sys.stderr = f
+        print(f"--- SaberLab start {time.strftime('%Y-%m-%d %H:%M:%S')} "
+              f"(console hidden, log: {log_path}) ---", flush=True)
+    except OSError:
+        # No console and no writable log dir: silence prints instead of crashing
+        class _Null:
+            def write(self, *a, **k):  # noqa: D102
+                pass
+            def flush(self, *a, **k):  # noqa: D102
+                pass
+        sys.stdout = sys.stderr = _Null()
+
+
 # Pass the app object directly (instead of the "backend.main:app" import string):
 # PyInstaller static analysis collects modules via imports; import strings are invisible,
 # and in a frozen environment uvicorn would report "Could not import module backend.main"
 from backend.main import app
 
 WINDOW_TITLE = "SaberLab — Beat Saber 本地分析实验室"
-PORT_RANGE = 20  # 8787..8806
+PORT_RANGE = 20  # 6980..6999
 
 
 def find_free_port(cfg) -> int:
     """Probe for the first free port starting from the configured port."""
-    start = int(getattr(cfg, "port", 8787) or 8787)
+    start = int(getattr(cfg, "port", 6980) or 6980)
     for port in range(start, start + PORT_RANGE):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
@@ -60,18 +90,30 @@ def find_free_port(cfg) -> int:
 
 
 def find_existing_instance(cfg, own_port: int) -> str | None:
-    """Check whether a SaberLab instance is already running (sends /api/status to candidate ports)."""
-    start = int(getattr(cfg, "port", 8787) or 8787)
-    for port in range(start, start + PORT_RANGE):
-        if port == own_port:
-            continue
+    """Check whether a SaberLab instance is already running (sends /api/status to candidate ports).
+
+    Parallel probe (2026-08 startup optimization): the serial loop waited up to
+    0.5s per occupied-but-not-SaberLab port (worst case ~9.5s); now all
+    candidates are probed concurrently with a shorter timeout, so startup is
+    fast even when the fallback range is partially occupied.
+    """
+    start = int(getattr(cfg, "port", 6980) or 6980)
+    candidates = [p for p in range(start, start + PORT_RANGE) if p != own_port]
+
+    def probe(port: int) -> str | None:
         try:
             with urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/api/status", timeout=0.5) as r:
+                    f"http://127.0.0.1:{port}/api/status", timeout=0.4) as r:
                 if r.status == 200:
                     return f"http://127.0.0.1:{port}"
         except OSError:
-            continue
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for found in pool.map(probe, candidates):
+            if found:
+                return found
     return None
 
 
@@ -218,6 +260,11 @@ class WebviewShell:
         return None
 
     def _on_shown(self):
+        # Startup timing (2026-08 optimization tracking): window visible ≈
+        # webview.start() returned control to the GUI loop.
+        if getattr(self, "_t_start", None) is not None:
+            print(f"[host] webview window shown in "
+                  f"{time.perf_counter() - self._t_start:.2f}s", flush=True)
         # Acrylic scheme decision (2026-08 measured conclusions):
         # - auto goes straight to scheme C (wallpaper push): measured pywebview 6.2.1 transparent mode
         #   does not produce real window transparency (the client area is always covered by the WinForms
@@ -385,6 +432,7 @@ class WebviewShell:
         # backdrop/acrylic (experimental) enable the transparent window — note that measured pywebview transparent windows
         # show the form BackColor gray in the client area, and the DWM backdrop is only visible on the title bar.
         transparent = self._acrylic_mode in ("backdrop", "acrylic")
+        self._t_start = time.perf_counter()
         self._window = webview.create_window(
             WINDOW_TITLE, self._url, width=1440, height=900,
             min_size=(1024, 640), confirm_close=True, transparent=transparent)
@@ -397,6 +445,7 @@ class WebviewShell:
 
 
 def main():
+    _setup_stdio()   # console-less startup (pythonw / frozen windowed): redirect prints to data/logs/saberlab.log
     parser = argparse.ArgumentParser(description="SaberLab host")
     parser.add_argument("--browser", action="store_true",
                         help="弹系统浏览器（不启动 webview 窗口）")
@@ -412,6 +461,7 @@ def main():
                              "Acrylic(3)（失焦消失）；wallpaper=强制壁纸推送方案 C；"
                              "off=不启用毛玻璃（对照外观）")
     args = parser.parse_args()
+    t0 = time.perf_counter()
 
     cfg = load_config()
     port = find_free_port(cfg)
@@ -432,6 +482,22 @@ def main():
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
 
+    # Startup optimization (2026-08): pywebview loads the .NET runtime + WebView2
+    # only inside start(); preload them in parallel while the server warms up,
+    # so the window appears ~immediately after readiness (window mode only).
+    webview_preload = threading.Event()
+
+    def _preload_webview():
+        try:
+            from webview.platforms import winforms  # noqa: F401  # loads clr/.NET runtime
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            webview_preload.set()
+
+    if not args.browser:
+        threading.Thread(target=_preload_webview, daemon=True).start()
+
     # wait for the server to be ready (up to 15s)
     ready = False
     for _ in range(150):
@@ -446,6 +512,7 @@ def main():
         return 1
 
     print(f"SaberLab: {url}  (replay dir: {cfg.replay_dir})")
+    print(f"[host] ready in {time.perf_counter() - t0:.2f}s (server up)", flush=True)
 
     shell = None   # window shell (not created in browser mode; the _restart_app closure reference must be initialized first)
 
@@ -483,6 +550,10 @@ def main():
     shell._last_root = cfg.instance_root or ""
     dialog.register(shell)   # so /api/settings/folder-dialog can open the native folder dialog
     try:
+        # Wait for the parallel webview preload (bounded; it runs while the
+        # server warms up, so this is normally already done).
+        webview_preload.wait(timeout=5)
+        t_win = time.perf_counter()
         shell.start()
     except Exception as e:  # pywebview unavailable (e.g. missing WebView2) → browser fallback
         print(f"[host] webview window failed to start ({e}), falling back to browser mode")

@@ -178,11 +178,35 @@ CREATE TABLE IF NOT EXISTS ai_reports (
     error       TEXT
 );
 
+-- Cloud-data cache with a platform dimension (2026-08, dual-source):
+-- platform = 'scoresaber' | 'beatleader'; each platform keeps its own rows so
+-- switching the active data source never touches the other platform's data.
 CREATE TABLE IF NOT EXISTS scoresaber_cache (
-    player_id   TEXT PRIMARY KEY,
+    platform    TEXT NOT NULL DEFAULT 'scoresaber',
+    player_id   TEXT NOT NULL,
     fetched_at  TEXT,
     profile_json TEXT,
-    scores_json  TEXT
+    scores_json  TEXT,
+    PRIMARY KEY (platform, player_id)
+);
+
+-- Per-player dynamic star palette (yellow baseline etc., 2026 spec):
+-- computed from the player's own records on the ACTIVE platform (top-20 by pp),
+-- stored so the palette works offline after one successful fetch. See
+-- backend/analysis/player_palette.py.
+CREATE TABLE IF NOT EXISTS player_palette_cache (
+    platform      TEXT NOT NULL DEFAULT 'scoresaber',
+    player_id     TEXT NOT NULL,   -- ScoreSaber ID (= Steam ID, parsed from BSOR; shared by both platforms)
+    computed_at   TEXT,            -- last computation time (UTC)
+    stage         TEXT,            -- 初级/休闲 | 进阶/高阶 | 竞技向
+    max_single_pp REAL,
+    fallback_stars REAL,
+    yellow_stars  REAL,            -- the yellow baseline (star rating)
+    sample_count  INTEGER,         -- records used (top-20 by pp, capped)
+    method        TEXT,            -- top20 | blend8-19 | fallback | unknown
+    valid_count   INTEGER,
+    nf_excluded   INTEGER,
+    PRIMARY KEY (platform, player_id)
 );
 
 CREATE TABLE IF NOT EXISTS scan_state (
@@ -190,21 +214,26 @@ CREATE TABLE IF NOT EXISTS scan_state (
     value TEXT                     -- JSON
 );
 
--- (map_hash, difficulty) -> player-score stars/pp index (originally _tools/migrate_db_v2)
+-- (platform, map_hash, difficulty) -> player-score stars/pp index
+-- (originally _tools/migrate_db_v2; platform added 2026-08)
 CREATE TABLE IF NOT EXISTS map_ranked_cache (
+    platform    TEXT NOT NULL DEFAULT 'scoresaber',
     map_hash    TEXT NOT NULL,
     difficulty  TEXT NOT NULL,
     stars       REAL,
     pp          REAL,
     ranked      INTEGER DEFAULT 0,
     fetched_at  TEXT,
-    PRIMARY KEY (map_hash, difficulty)
+    PRIMARY KEY (platform, map_hash, difficulty)
 );
 
--- Map-rooted ScoreSaber leaderboard cache: one map_hash maps to multiple difficulties/modes
--- (originally _tools/migrate_db_v4; enumerated via get-difficulties/{hash} + star ratings filled in by-id)
+-- Map-rooted leaderboard cache: one map_hash maps to multiple difficulties/modes;
+-- platform-scoped (ScoreSaber and BeatLeader keep separate star ratings).
+-- leaderboard_id is TEXT: ScoreSaber ids are integers, BeatLeader ids are
+-- short strings ("1232e71").
 CREATE TABLE IF NOT EXISTS scoresaber_leaderboards (
-    leaderboard_id  INTEGER PRIMARY KEY,
+    platform       TEXT NOT NULL DEFAULT 'scoresaber',
+    leaderboard_id TEXT NOT NULL,
     map_hash       TEXT NOT NULL,
     difficulty_rank INTEGER,       -- 1/3/5/7/9
     difficulty_name TEXT,          -- Easy/Normal/Hard/Expert/ExpertPlus
@@ -218,9 +247,12 @@ CREATE TABLE IF NOT EXISTS scoresaber_leaderboards (
     loved          INTEGER,
     max_pp         REAL,
     plays          INTEGER,
-    last_synced    TEXT
+    last_synced    TEXT,
+    PRIMARY KEY (platform, leaderboard_id)
 );
 CREATE INDEX IF NOT EXISTS idx_ssl_hash ON scoresaber_leaderboards(map_hash);
 CREATE INDEX IF NOT EXISTS idx_ssl_hash_diff
     ON scoresaber_leaderboards(map_hash, difficulty_name);
+-- idx_ssl_platform is created in repository._migrate: it depends on the
+-- platform column, which pre-platform legacy DBs lack until rebuild.
 """

@@ -232,6 +232,8 @@ class ConfigService:
             mapping = {
                 "scoresaber_id": cfg.scoresaber_id,
                 "player_name_fallback": cfg.player_name_fallback,
+                "star_palette": cfg.star_palette,
+                "data_source": cfg.data_source,
             }
             cur = mapping.get(parts[1], "")
         elif parts[0] == "analysis":

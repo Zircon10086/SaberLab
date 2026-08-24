@@ -245,7 +245,12 @@ function lineChart(container, series, opts = {}) {
     const y = pad.t + i * (H - pad.t - pad.b) / 4;
     const val = yMax - i * (yMax - yMin) / 4;
     svg += `<line class="grid-line" x1="${pad.l}" y1="${y}" x2="${W - pad.r}" y2="${y}"/>`;
-    svg += `<text x="${pad.l - 6}" y="${y + 4}" fill="#8b96ab" font-size="10" text-anchor="end">${opts.fmtY ? opts.fmtY(val) : val.toFixed(opts.yDec != null ? opts.yDec : 2)}</text>`;
+    // hideYLabels（v1.6.0）：隐藏 y 轴刻度数字，网格线保留。
+    // 归一化图表轴固定 0-100 而数据按 min/max 动态缩放，固定标记与
+    // 实际数据观感割裂——隐藏数字后曲线/网格/图例真实范围照常呈现。
+    if (!opts.hideYLabels) {
+      svg += `<text x="${pad.l - 6}" y="${y + 4}" fill="#8b96ab" font-size="10" text-anchor="end">${opts.fmtY ? opts.fmtY(val) : val.toFixed(opts.yDec != null ? opts.yDec : 2)}</text>`;
+    }
   }
   for (let i = 0; i <= 4; i++) {
     const x = pad.l + i * (W - pad.l - pad.r) / 4;
@@ -560,6 +565,15 @@ async function loadStatus() {
     // 路径可用性缓存（任务按钮拦截判定用）
     pathState.replay = !!rd.exists;
     pathState.maps = !!(s.maps_dir && s.maps_dir.exists);
+    // 3D 回放组件（Local-ChroViewer，外部 GPL-2.0 项目）可用性（v1.6.0）
+    window.chroAvailable = !!(s.chro && s.chro.available);
+    // 当前云端数据源（scoresaber | beatleader）：云端页接口与个人色谱随平台
+    window.__platform = s.platform === "beatleader" ? "beatleader" : "scoresaber";
+    // 星级色谱（player.star_palette）：按 id 取当前 palette 定义供 starColor 分档
+    const ui = s.ui || {};
+    const palId = ui.star_palette || "community";
+    window.__starPalette =
+      (ui.star_palettes || []).find((p) => p.id === palId) || null;
     // Header 状态
     $("#hdr-replays").textContent = fmt.num(s.db.replays);
     $("#hdr-maps").textContent = fmt.num(s.db.maps);
@@ -605,6 +619,7 @@ async function loadRecent(page = 1) {
       ? `<div class="replay-list">${items.map((r) => replayItem(r)).join("")}</div>`
       : `<div class="empty">${t("recent.empty")}</div>`;
     bindReplayItems();
+    animateReplayItems();
     renderPagination(data.total, data.page, data.pages, "count");
     return;
   }
@@ -616,7 +631,18 @@ async function loadRecent(page = 1) {
   }).join("");
   $("#recent-replays").innerHTML = days.length ? html : `<div class="empty">${t("recent.empty")}</div>`;
   bindReplayItems();
+  animateReplayItems();
   renderPagination(data.total_days, data.page, data.pages, "day");
+}
+
+/* 分页刷新动画（v1.6.0）：新渲染的 replay 条目迅速逐条淡化出现。
+   animation-delay 按 DOM 顺序递增（跨 day-group 连续），上限 40 条防极端大页。
+   时长 0.2s + 间隔 12ms（2026 微调：较初版 0.4s/25ms 整体快约 50%）。 */
+function animateReplayItems() {
+  $$("#recent-replays .replay-item").forEach((el, i) => {
+    el.classList.add("item-in");
+    el.style.animationDelay = Math.min(i, 40) * 12 + "ms";
+  });
 }
 
 function renderPagination(total, page, pages, unit = "day") {
@@ -670,6 +696,15 @@ $$("#page-mode .pm-tab").forEach((btn) => {
 
 function starColor(stars) {
   if (stars == null) return "";
+  // 星级色谱（player.star_palette 设置）：定义由后端 /api/status 下发
+  // （ui.star_palettes），前端只做纯分档；后端未下发时回退旧 4 档逻辑。
+  const pal = window.__starPalette;
+  if (pal && Array.isArray(pal.tiers)) {
+    for (const tier of pal.tiers) {
+      if (tier.max == null || stars < tier.max) return tier.cls;
+    }
+    return "";
+  }
   if (stars < 7) return "star-green";
   if (stars < 8.5) return "star-yellow";
   if (stars < 10) return "star-red";
@@ -686,7 +721,13 @@ function replayItem(r, highlight = "") {
   const keyBadge = r.beatmap_key
     ? `<span class="map-key">${highlightMatch(r.beatmap_key, highlight)}</span>` : "";
   // 0.00 星兜底：stars 为 0/None = unranked，一律显示 "-"（与后端 enrichment 一致）
-  const starsTxt = (r.stars != null && r.stars > 0) ? Number(r.stars).toFixed(2) + "★" : "–";
+  const hasStars = r.stars != null && r.stars > 0;
+  const starsTxt = hasStars ? Number(r.stars).toFixed(2) + "★" : "–";
+  // BeatLeader 星级算法公开：unranked 歌曲也可能带 stars（status != 3）——
+  // 有星但不是 ranked 时加黄色背景 + hover 提示（该歌曲尚未认证，无 pp 得分）
+  const starsHtml = (hasStars && r.ranked === false)
+    ? `<span class="${starColor(r.stars)} star-unranked" title="${t("replay.stars_unranked")}">${Number(r.stars).toFixed(2)}★</span>`
+    : `<span class="${starColor(r.stars)}">${starsTxt}</span>`;
   const ppTxt = r.pp != null ? Number(r.pp).toFixed(1) + "pp" : "–";
   const npsTxt = r.nps != null ? Number(r.nps).toFixed(2) : "–";
   const scoreTxt = r.score_effective != null ? fmt.num(r.score_effective) : fmt.num(r.score);
@@ -711,7 +752,7 @@ function replayItem(r, highlight = "") {
       </div>
     </div>
     <div class="num"><div class="v">${npsTxt}</div><div class="k">${t("replay.kpi.nps")}</div></div>
-    <div class="num"><div class="v"><span class="${starColor(r.stars)}">${starsTxt}</span></div><div class="k">${t("replay.kpi.stars")}</div></div>
+    <div class="num"><div class="v">${starsHtml}</div><div class="k">${t("replay.kpi.stars")}</div></div>
     <div class="num"><div class="v">${ppTxt}</div><div class="k">${t("replay.kpi.pp")}</div></div>
     <div class="num"><div class="v">${scoreTxt}${scoreExtra}</div><div class="k">${t("replay.kpi.score")}${r.has_nf ? " (×0.5)" : ""}</div></div>
     <div class="num"><div class="v">${acc}</div><div class="k">${t("replay.kpi.acc")}</div></div>
@@ -840,6 +881,7 @@ let currentNotes = { t: [], acc: [], center_t: [], center: [], speed_t: [], spee
   //   density_t/density = 非 bomb note 局部密度（±5 邻域 + ±2 圆润）
 let currentNoteRange = { first_note: 0, last_note: 0 };  // note 首末时间（时间轴裁剪）
 let currentSeries = null;
+let currentSlice = null;    // SliceDetails 聚合（12 tile x 18 cell，v1.6.0）
 let detailReturnTab = "overview";   // 从哪个页面进入详情，返回按钮回到那里
 let detailReqSeq = 0;               // 详情请求序号：过期响应丢弃（防竞态）
 let detailAbort = null;             // 当前详情请求的 AbortController
@@ -885,10 +927,12 @@ async function openDetail(id, pane = "data") {
     // 分层分析：pending 条目（元数据快照）先触发懒分析（幂等，已分析毫秒级返回）
     await api(`/api/replays/${id}/analyze`, { method: "POST", signal: abort.signal })
       .catch(() => null);   // 失败不阻断详情展示（metrics 可能为空）
-    const [row, timeline, series] = await Promise.all([
+    const [row, timeline, series, sliceDetails] = await Promise.all([
       api(`/api/replays/${id}`, { signal: abort.signal }),
       api(`/api/replays/${id}/timeline`, { signal: abort.signal }),
       api(`/api/replays/${id}/series`, { signal: abort.signal }).catch(() => ({ motion: null })),
+      // slice-details 实时解析 .bsor，失败不阻塞详情主体
+      api(`/api/replays/${id}/slice-details`, { signal: abort.signal }).catch(() => null),
     ]);
     clearTimeout(skTimer);
     if (seq !== detailReqSeq) return;   // 已有更新的请求，丢弃本次结果
@@ -897,6 +941,7 @@ async function openDetail(id, pane = "data") {
     currentNotes = timeline.notes || { t: [], acc: [], center_t: [], center: [], speed_t: [], speed: [], density_t: [], density: [] };
     currentNoteRange = timeline.note_range || { first_note: 0, last_note: 0 };
     currentSeries = series.motion;
+    currentSlice = sliceDetails;
     renderDetail(skeletonShown);
   } catch (e) {
     clearTimeout(skTimer);
@@ -1011,40 +1056,34 @@ function renderDetailBody(content) {
   $("#d-score").textContent = fmt.num(r.score_effective != null ? r.score_effective : r.score);
   $("#d-acc").textContent = fmt.acc(r.accuracy);
   $("#d-combo").textContent = fmt.num(r.max_combo);
-  // STARS：ranked 显示数值（按星级着色），未认证显示 UNRANKED + "-"
+  // STARS：有星即显示数值（按星级着色）；有星但非 ranked（BeatLeader
+  // unranked 图也可能有星）→ 黄色背景 + hover 提示；无星显示 UNRANKED + "-"
   const starsEl = $("#d-stars"), starsLabel = $("#d-stars-label");
-  if (r.ranked && r.stars != null && r.stars > 0) {
+  if (r.stars != null && r.stars > 0) {
     starsEl.textContent = Number(r.stars).toFixed(2) + "★";
-    starsEl.className = "v " + starColor(r.stars);
+    starsEl.className = "v " + starColor(r.stars)
+      + (r.ranked === false ? " star-unranked" : "");
+    starsEl.title = r.ranked === false ? t("replay.stars_unranked") : "";
     starsLabel.textContent = "STARS";
   } else {
     starsEl.textContent = "–";
     starsEl.className = "v";
+    starsEl.title = "";
     starsLabel.textContent = "UNRANKED";
   }
   // NPS：方块密度
   $("#d-nps").textContent = r.nps != null ? Number(r.nps).toFixed(2) : "–";
+  // 切割计数（v1.6.0：原「判定统计」卡片迁入顶栏；BOMB 前端隐藏不显示）
+  $("#d-good").textContent = r.good_count != null ? fmt.num(r.good_count) : "–";
+  // MISS/BAD 一起显示，照搬总览页 replay 条目逻辑（bad 弱化）；未分析显示待分析
+  $("#d-miss-bad").innerHTML = r.analysis_status === "analyzed"
+    ? `${fmt.num(r.miss_count)}<span style="color:var(--muted)">/${fmt.num(r.bad_count)}</span>`
+    : `<span style="color:var(--muted)">${t("replay.pending")}</span>`;
+  $("#d-note").textContent = r.note_count != null ? fmt.num(r.note_count) : "–";
 
-  // counts
-  $("#d-counts").innerHTML =
-    countBox("good", r.good_count, t("hand.good")) + countBox("bad", r.bad_count, t("hand.bad")) +
-    countBox("miss", r.miss_count, t("hand.miss")) + countBox("bomb", r.bomb_count, "BOMB") +
-    countBox("", r.note_count, "NOTE");
-  // 设备环境：列表显示（参照其他卡片）
-  const envRows = [
-    [t("detail.env.hmd"), r.hmd || "-"],
-    [t("detail.env.controller"), r.controller || "-"],
-    [t("detail.env.tracking"), r.tracking_system || "-"],
-    [t("detail.env.game_version"), r.game_version || "-"],
-    [t("detail.env.mod_version"), r.mod_version || "-"],
-    [t("detail.env.jump_distance"), r.jump_distance?.toFixed?.(1) ?? "-"],
-    [t("detail.env.profile"), r.profile_id || t("detail.env.no_offset")],
-    [t("detail.env.map_hash"), r.map_hash || "-"],
-    [t("detail.env.replay_sha"), r.replay_id ? r.replay_id.slice(0, 16) + "…" : "-"],
-  ];
-  $("#d-env").innerHTML = `<table class="metrics-table env-table">` +
-    envRows.map(([k, v]) => `<tr><td>${escHtml(k)}</td><td>${v}</td></tr>`).join("") +
-    `</table>`;
+  // counts/env 已从前端隐藏（v1.6.0）：判定统计卡片清空，等新分析内容引入。
+  // 原 5 个数值（good/bad/miss/bomb/note）迁入顶栏 KPI；头显/版本/hash 等
+  // 9 项设备谱面详情不再显示（玩家不需要）。后端数据与 API 保留不动。
 
   // hands table
   const lh = m.left || {}, rh = m.right || {};
@@ -1056,6 +1095,9 @@ function renderDetailBody(content) {
 
   // fatigue
   renderFatigue(m.fatigue || {});
+
+  // SliceDetails（v1.6.0：4x3 网格平均分 + 双 9 宫格切割轨迹）
+  renderSliceDetails(currentSlice);
 
   // charts
   drawTimeline();
@@ -1101,24 +1143,34 @@ function switchDetailPane(name, instant = false) {
   track.style.transform = `translateX(${x})`;
   // 查看回放：首次切入时懒加载 iframe（避免每次进入详情都加载引擎）
   // 走 ChroViewer 原版 replayUrl 机制（loopback 白名单），replay 从 SaberLab raw 接口下载
-  if (name === "replay" && currentReplay && !document.getElementById("replay-frame")) {
+  // v1.6.0：3D 回放组件（Local-ChroViewer，外部 GPL-2.0 项目）自动检测——
+  // 后端未检测到构建产物时显示安装提示（灰字），不创建 iframe
+  if (name === "replay" && currentReplay) {
     const wrap = document.getElementById("replay-frame-wrap");
-    if (wrap) {
-      const iframe = document.createElement("iframe");
-      iframe.id = "replay-frame";
-      const rawUrl = `${window.location.origin}/api/replays/${encodeURIComponent(currentReplay.replay_id)}/raw`;
-      iframe.src = `/chro/?replayUrl=${encodeURIComponent(rawUrl)}`;
-      wrap.appendChild(iframe);
-      // 16:9 动态高度：随容器宽度自适应（信息栏内嵌，不覆盖导航栏）
-      const resizeFrame = () => {
-        const w = wrap.clientWidth;
-        if (w > 0) iframe.style.height = `${Math.round((w * 9) / 16)}px`;
-      };
-      resizeFrame();
-      if (window.ResizeObserver) {
-        new ResizeObserver(resizeFrame).observe(wrap);
+    if (wrap && !wrap.querySelector(".replay-frame-fill")) {
+      if (window.chroAvailable) {
+        const iframe = document.createElement("iframe");
+        iframe.id = "replay-frame";
+        iframe.className = "replay-frame-fill";
+        const rawUrl = `${window.location.origin}/api/replays/${encodeURIComponent(currentReplay.replay_id)}/raw`;
+        iframe.src = `/chro/?replayUrl=${encodeURIComponent(rawUrl)}`;
+        wrap.appendChild(iframe);
+        // 16:9 动态高度：随容器宽度自适应（信息栏内嵌，不覆盖导航栏）
+        const resizeFrame = () => {
+          const w = wrap.clientWidth;
+          if (w > 0) iframe.style.height = `${Math.round((w * 9) / 16)}px`;
+        };
+        resizeFrame();
+        if (window.ResizeObserver) {
+          new ResizeObserver(resizeFrame).observe(wrap);
+        } else {
+          window.addEventListener("resize", resizeFrame);
+        }
       } else {
-        window.addEventListener("resize", resizeFrame);
+        const hint = document.createElement("div");
+        hint.className = "replay-frame-fill chro-missing";
+        hint.innerHTML = `<div class="chro-missing-icon">🎮</div><div>${escHtml(t("replay.chro_missing"))}</div>`;
+        wrap.appendChild(hint);
       }
     }
   }
@@ -1136,6 +1188,12 @@ function buildDetailSkeleton() {
       <div id="d-badges" class="badges"></div>
     </div>
     <div class="hero-kpis">
+      <!-- v1.6.0：顶栏 KPI 扩展——GOOD / MISS-BAD（照搬总览列表逻辑）/ NOTE 迁入；
+           NOTE 与 NPS 之间竖向分割线（区分总体数据与数量统计）；BOMB 前端隐藏 -->
+      <div class="hero-kpi"><div class="v" id="d-good"></div><div class="k">GOOD</div></div>
+      <div class="hero-kpi"><div class="v" id="d-miss-bad"></div><div class="k">${t("replay.kpi.miss_bad")}</div></div>
+      <div class="hero-kpi"><div class="v" id="d-note"></div><div class="k">NOTE</div></div>
+      <div class="hero-kpi-sep"></div>
       <div class="hero-kpi"><div class="v" id="d-nps"></div><div class="k">NPS</div></div>
       <div class="hero-kpi"><div class="v" id="d-stars"></div><div class="k" id="d-stars-label">STARS</div></div>
       <div class="hero-kpi"><div class="v" id="d-score"></div><div class="k">SCORE</div></div>
@@ -1152,7 +1210,9 @@ function buildDetailSkeleton() {
     <div class="panes-track" id="panes-track">
       <div class="dpane" id="pane-data">
         <div class="detail-grid">
-          <div class="surface"><div class="surface-title">${t("detail.card.judgments")}</div><div id="d-counts" class="counts"></div><div id="d-env" class="env"></div></div>
+          <!-- v1.6.0：判定统计 → 切割细节（SliceDetails 移植：4x3 网格平均分，
+               点击方块弹出左右手 9 宫格切割轨迹） -->
+          <div class="surface"><div class="surface-title">${t("detail.card.judgments")}</div><div id="d-slice" class="slice-details"></div></div>
           <div class="surface"><div class="surface-title">${t("detail.card.timeline")}</div>
             <div class="chart-controls">
               <label><input type="checkbox" class="tl-toggle" value="accuracy_local" checked> ${t("tl.accuracy")}</label>
@@ -1187,10 +1247,6 @@ function buildDetailSkeleton() {
       </div>
     </div>
   </div>`;
-}
-
-function countBox(cls, v, k) {
-  return `<div class="count-box ${cls}"><div class="v">${v ?? 0}</div><div class="k">${k}</div></div>`;
 }
 
 function handRows(l, r) {
@@ -1276,6 +1332,188 @@ function renderFatigue(f) {
   }
   html += `<p class="hint">${t("fatigue.note")}</p>`;
   el.innerHTML = html;
+}
+
+/* ---------------- SliceDetails（v1.6.0，移植自 SliceDetails mod，qqrz997/ckosmic） ----------------
+   数据：GET /api/replays/{id}/slice-details → {tiles:[{count, score_avg, cells:[18]}]}
+   tile = 4x3 note 网格位置（layer*4+line）；cell = 颜色(2) x 方向(9)。
+   cell: {count, angle, offset, pre, post, acc, total}；angle = 环形平均切割
+   方向角（C# 世界角，0-360）；offset = 平均无符号切偏（m，BSOR 无 note
+   世界坐标，无法复现原版符号判断）。 */
+
+// 9 宫格 slot 序（UpLeft,Up,UpRight,Left,Any,Right,DownLeft,Down,DownRight）
+// 方向箭头 = slicenote.svg（根目录手绘，默认 arrow 朝下，位于第三行第二列
+// = Down）。CSS 旋转（svg 朝下基准，顺时针）：Down=0 / Up=180 / Left=90 /
+// Right=270；边角 45° 倍：UpLeft=135 / UpRight=225 / DownLeft=45 / DownRight=315。
+const SLICE_DIR_CSS = [135, 180, 225, 90, 0, 270, 45, 0, 315];
+
+/* note 造型（根目录 slicenote.svg / slicenote-any.svg 内联，500x500 viewBox）：
+   主体（圆角方块 + 中心黑点）与方向箭头合成一个 svg，整体按方向旋转——
+   与游戏一致：note 方向跟随 arrow，斜向 note 的方块主体同样倾斜 45°。
+   Any（slicenote-any.svg）无箭头，不旋转。 */
+const SLICE_NOTE_BG =
+  `<rect x="25" y="25" width="450" height="450" rx="95" ry="95" fill="#ffffff" stroke="#000000" stroke-width="12" stroke-linejoin="round"/>` +
+  `<circle cx="250" cy="250" r="16" fill="#000000"/>`;
+const SLICE_NOTE_ARROW =
+  `<polygon points="118,125 382,125 382,150 250,215 118,150" fill="rgba(0,0,0,0.30)" stroke="#000000" stroke-width="12" stroke-linejoin="round" stroke-linecap="round"/>`;
+
+function sliceNoteSvg(rot, any) {
+  const inner = SLICE_NOTE_BG + (any ? "" : SLICE_NOTE_ARROW);
+  return `<svg class="note-svg" viewBox="0 0 500 500" style="transform:rotate(${rot}deg)">${inner}</svg>`;
+}
+
+/* 切割轨迹双线（v1.6.0，用户设计）：
+   - 实线 = 实际切割路径：沿平均切割方向（angle），经过"实际切点位置"
+     （从中心沿法线偏移 offset 处）——玩家实际挥砍经过的路径；
+   - 虚线 = 中心参考线：同方向、经过 note 中心——满分路径；
+   - 两线间距 = 带符号切偏（负 = 从背面切），直观看到挥砍偏离满分路径多少；
+   - 箭头 = 沿实际线指向切割方向。
+   坐标系：viewBox 100x100，格子中心 (50,50)；屏幕角 a（0=上，顺时针）
+   = 270 - angle（世界角 → 屏幕角换算，与既有箭头旋转一致）。
+   线长 half=41（较初版 34 加长 20%），线宽加粗（实 2.6 / 虚 1.8）。 */
+function sliceCutOverlay(angle, offset) {
+  const a = (((270 - angle) % 360) + 360) % 360 * Math.PI / 180;
+  const ux = Math.sin(a), uy = -Math.cos(a);   // 切割方向（屏幕 y 向下）
+  const nx = Math.cos(a), ny = Math.sin(a);    // 垂直方向（法线）
+  const off = Math.max(-32, Math.min(32, offset * 90));  // 0.3m ≈ 27 单位
+  const half = 41;
+  const cx2 = 50 + nx * off, cy2 = 50 + ny * off;
+  const ref = `M ${(50 - ux * half).toFixed(1)} ${(50 - uy * half).toFixed(1)} ` +
+    `L ${(50 + ux * half).toFixed(1)} ${(50 + uy * half).toFixed(1)}`;
+  const cut = `M ${(cx2 - ux * half).toFixed(1)} ${(cy2 - uy * half).toFixed(1)} ` +
+    `L ${(cx2 + ux * half).toFixed(1)} ${(cy2 + uy * half).toFixed(1)}`;
+  const tipX = cx2 + ux * 16, tipY = cy2 + uy * 16;
+  const b1x = cx2 + ux * 6 - nx * 8, b1y = cy2 + uy * 6 - ny * 8;
+  const b2x = cx2 + ux * 6 + nx * 8, b2y = cy2 + uy * 6 + ny * 8;
+  const arrow = `M ${tipX.toFixed(1)} ${tipY.toFixed(1)} L ${b1x.toFixed(1)} ${b1y.toFixed(1)} ` +
+    `L ${b2x.toFixed(1)} ${b2y.toFixed(1)} Z`;
+  return `<svg class="cut-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">` +
+    `<path d="${ref}" stroke="var(--green)" stroke-width="1.8" stroke-dasharray="3.5,3" opacity="0.5" fill="none"/>` +
+    `<path d="${cut}" stroke="var(--green)" stroke-width="2.6" opacity="0.92" fill="none" stroke-linecap="round"/>` +
+    `<path d="${arrow}" fill="var(--green)" opacity="0.95"/>` +
+    `</svg>`;
+}
+
+function sliceCellHtml(c, slot, handClass) {
+  const has = c.count > 0;
+  if (!has) {
+    // 无数据：灰色 note 造型（svg 染灰 + 降透明度），无切割信息
+    return `<div class="slice-cell empty"><div class="note-wrap">${sliceNoteSvg(0, true)}</div></div>`;
+  }
+  const tip = `${t("slice.average_score")}: ${c.total.toFixed(2)} (${c.count} ${c.count === 1 ? t("slice.note") : t("slice.notes")})` +
+    `\n${t("slice.pre")}: ${c.pre.toFixed(2)} | ${t("slice.post")}: ${c.post.toFixed(2)} | ${t("slice.acc")}: ${c.acc.toFixed(2)}` +
+    `\n${t("slice.offset")}: ${c.offset >= 0 ? "+" : ""}${c.offset.toFixed(3)}m`;
+  // 数值行放在 note 下方（避免遮挡箭头；倾斜 note 的角由 pill 背景吸收间隙）：
+  // 只显示 "平均分/note 数"，不加文字
+  return `<div class="slice-cell ${handClass}" title="${escHtml(tip)}">` +
+    `<div class="note-wrap">${sliceNoteSvg(SLICE_DIR_CSS[slot], slot === 4)}${sliceCutOverlay(c.angle, c.offset)}</div>` +
+    `<div class="cell-score">${Number(c.total).toFixed(2)}/${c.count}</div>` +
+    `</div>`;
+}
+
+/* 当前展开的方块（null = 收起）；点击方块 → 网格缩小到顶部、下方就地展开
+   左右手 9 宫格（v1.6.0 交互调整：原版弹窗逻辑，改为卡片内展开） */
+let sliceSelectedTile = null;
+
+function renderSliceDetails(data) {
+  const el = $("#d-slice");
+  if (!el) return;
+  sliceSelectedTile = null;
+  if (!data || !data.tiles || !data.tiles.length) {
+    el.innerHTML = `<div class="empty">${t("slice.no_data")}</div>`;
+    return;
+  }
+  // 视觉行序：Top 层在上、Bottom 层在下（与游戏 note 网格视角一致）
+  const order = [8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3];
+  el.innerHTML = `<div class="slice-grid">` +
+    order.map((ti) => {
+      const tile = data.tiles[ti];
+      const has = tile.count > 0;
+      return `<div class="slice-tile${has ? "" : " empty"}" data-tile="${ti}"${has ? ` title="${escHtml(t("slice.click_hint"))}"` : ""}>` +
+        `<div class="v">${has ? Number(tile.score_avg).toFixed(2) : "–"}</div>` +
+        `<div class="k">${has ? tile.count : ""}</div></div>`;
+    }).join("") +
+    `</div><div class="slice-expand"></div>`;
+  el.querySelectorAll(".slice-tile:not(.empty)").forEach((b) => {
+    b.addEventListener("click", () => toggleSliceTile(data, Number(b.dataset.tile)));
+  });
+}
+
+function toggleSliceTile(data, tileIndex) {
+  const el = $("#d-slice");
+  if (!el) return;
+  if (sliceSelectedTile === tileIndex) {
+    // 再次点击同一方块：收起（九宫格淡出 → 网格放大回满）
+    collapseSlice(data, tileIndex);
+    return;
+  }
+  sliceSelectedTile = tileIndex;
+  el.classList.add("compact");
+  // 选中高亮（v1.6.0）：玩家展开九宫格时仍能认出自己选的方块
+  el.querySelectorAll(".slice-tile.selected").forEach((t) => t.classList.remove("selected"));
+  const tileBtn = el.querySelector(`.slice-tile[data-tile="${tileIndex}"]`);
+  if (tileBtn) tileBtn.classList.add("selected");
+  const tile = data.tiles[tileIndex];
+  const hands = [
+    { label: t("slice.left_hand"), color: "var(--red)", cls: "left", cells: tile.cells.slice(0, 9) },
+    { label: t("slice.right_hand"), color: "var(--blue)", cls: "right", cells: tile.cells.slice(9, 18) },
+  ];
+  const expand = el.querySelector(".slice-expand");
+  expand.innerHTML =
+    `<div class="slice-expand-inner">` +
+    `<div class="slice-expand-title">${escHtml(t("slice.tile_title", { score: Number(tile.score_avg).toFixed(2), count: tile.count }))}</div>` +
+    `<div class="slice-hands">` +
+    hands.map((h) => `<div class="slice-hand">` +
+      `<div class="h-label" style="color:${h.color}">${escHtml(h.label)}</div>` +
+      `<div class="slice-compass">${h.cells.map((c, slot) => sliceCellHtml(c, slot, h.cls)).join("")}</div>` +
+      `</div>`).join("") +
+    `</div>` +
+    `<div class="slice-expand-close"><button class="mini" id="slice-collapse-btn">${escHtml(t("slice.close"))}</button></div>` +
+    `</div>`;
+  document.getElementById("slice-collapse-btn").addEventListener("click", () => collapseSlice(data, tileIndex));
+}
+
+/* 收起：九宫格淡出（170ms）→ 移除 compact（网格 transition 放大回满）→ 清理 */
+function collapseSlice(data, tileIndex) {
+  const el = $("#d-slice");
+  if (!el || sliceSelectedTile === null) return;
+  el.classList.add("closing");
+  setTimeout(() => {
+    sliceSelectedTile = null;
+    el.classList.remove("compact", "closing");
+    el.querySelector(".slice-expand").innerHTML = "";
+    el.querySelectorAll(".slice-tile.selected").forEach((t) => t.classList.remove("selected"));
+  }, 180);
+}
+
+/* 弹窗（保留通用能力，切割细节已改为卡片内展开，不再使用） */
+function openSliceModal(data, tileIndex) {
+  const tile = data.tiles[tileIndex];
+  if (!tile || tile.count <= 0) return;
+  closeSliceModal();
+  const overlay = document.createElement("div");
+  overlay.className = "slice-modal-overlay";
+  const hands = [
+    { label: t("slice.left_hand"), color: "var(--red)", cls: "left", cells: tile.cells.slice(0, 9) },
+    { label: t("slice.right_hand"), color: "var(--blue)", cls: "right", cells: tile.cells.slice(9, 18) },
+  ];
+  overlay.innerHTML = `<div class="slice-modal" role="dialog">` +
+    `<div class="slice-modal-title">${escHtml(t("slice.tile_title", { score: Number(tile.score_avg).toFixed(2), count: tile.count }))}</div>` +
+    `<div class="slice-hands">` +
+    hands.map((h) => `<div class="slice-hand">` +
+      `<div class="h-label" style="color:${h.color}">${escHtml(h.label)}</div>` +
+      `<div class="slice-compass">${h.cells.map((c, slot) => sliceCellHtml(c, slot, h.cls)).join("")}</div>` +
+      `</div>`).join("") +
+    `</div>` +
+    `<div class="slice-modal-close"><button class="mini" id="slice-modal-close-btn">${escHtml(t("slice.close"))}</button></div>` +
+    `</div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeSliceModal(); });
+  document.getElementById("slice-modal-close-btn").addEventListener("click", closeSliceModal);
+}
+
+function closeSliceModal() {
+  document.querySelectorAll(".slice-modal-overlay").forEach((o) => o.remove());
 }
 
 /* ---------------- charts ---------------- */
@@ -1387,6 +1625,7 @@ function drawTimeline(animate = true) {
   lineChart(box, series, {
     fmtX: (v) => fmt.dur2(v), yDec: 0,
     normalize: true, fmtY: (v) => v.toFixed(0) + "%",
+    hideYLabels: true,   // v1.6.0：隐藏 y 轴 0-100% 固定刻度（数据动态缩放，观感割裂）
     valueFmt: (s, v) => (TL_VALUE_FMT[s.key] || ((x) => x.toFixed(2)))(v),
     animate, markers, ...axisOpts,
   });
@@ -1574,12 +1813,15 @@ $("#btn-compare").addEventListener("click", async () => {
   btn.disabled = false; btn.textContent = t("compare.btn");
 });
 
-/* ---------------- ScoreSaber ---------------- */
+/* ---------------- 云端数据（数据源：scoresaber | beatleader） ---------------- */
 let ssLoaded = false;
+const cloudApiPath = () => (window.__platform === "beatleader" ? "/api/beatleader" : "/api/scoresaber");
+const cloudRefreshPath = () => (window.__platform === "beatleader" ? "/api/beatleader/refresh" : "/api/scoresaber/refresh");
+
 async function loadScoreSaber(force = false) {
   if (ssLoaded && !force) return;
   try {
-    const data = await api("/api/scoresaber");
+    const data = await api(cloudApiPath());
     renderScoreSaber(data);
     ssLoaded = true;
   } catch (e) {
@@ -1587,10 +1829,40 @@ async function loadScoreSaber(force = false) {
   }
 }
 
+/* 动态水平卡片：黄字显示黄色基准（当前平均水平）+ 右侧五色色带（灰绿黄红紫，
+   每段写判定范围）。范围文本从 yellow_stars 推导（与后端 build_tiers 同源语义）。 */
+function paletteLevelHTML(pal) {
+  const y = pal.yellow_stars;
+  const f = (x) => Number(x).toFixed(2);
+  const lo1 = f(y - 1.5), lo2 = f(y - 0.5), hi2 = f(y + 0.5), hi3 = f(y + 1.5);
+  const methodTxt = pal.method === "top20" ? t("scoresaber.level_method_top20")
+    : pal.method === "blend8-19" ? t("scoresaber.level_method_blend", { n: pal.sample_count })
+    : t("scoresaber.level_method_fallback");
+  const updated = (pal.computed_at || "").replace("T", " ").slice(0, 16);
+  return `<div class="ss-level-row">
+    <div class="ss-level-info">
+      <div class="ss-level-line">${t("scoresaber.level_title")}：<span class="ss-yellow">${f(y)}★</span></div>
+      <div class="ss-level-sub">${t("scoresaber.level_stage")}：${escHtml(pal.stage || "-")} · ${t("scoresaber.level_sample")}：${pal.sample_count ?? "-"}（${methodTxt}） · ${t("scoresaber.level_updated", { time: updated })}</div>
+    </div>
+    <div class="ss-bands">
+      <div class="band band-gray">&lt;${lo1}★</div>
+      <div class="band band-green">${lo1}–${lo2}★</div>
+      <div class="band band-yellow">${lo2}–${hi2}★</div>
+      <div class="band band-red">${hi2}–${hi3}★</div>
+      <div class="band band-purple">&gt;${hi3}★</div>
+    </div>
+  </div>`;
+}
+
 function renderScoreSaber(data) {
   const p = data.profile || {};
   const stats = p.scoreStats || {};
-  $("#ss-profile").innerHTML = `<h3>${t("scoresaber.profile_title", { time: data.fetched_at || "-" })}</h3>
+  const pal = data.palette;
+  const palHtml = (pal && pal.status === "known" && pal.yellow_stars != null)
+    ? paletteLevelHTML(pal)
+    : `<div class="ss-level-row"><div class="ss-level-info"><div class="ss-level-sub">${t("scoresaber.level_unknown")}</div></div></div>`;
+  $("#ss-profile").innerHTML = `<h3>${t("scoresaber.profile_title", {
+      platform: t("platform." + window.__platform), time: data.fetched_at || "-" })}</h3>
     <div class="kv">
       <span class="k">${t("scoresaber.player")}</span><span>${escHtml(p.name)} (${p.country})</span>
       <span class="k">${t("scoresaber.global_rank")}</span><span>#${fmt.num(p.rank)}</span>
@@ -1598,7 +1870,8 @@ function renderScoreSaber(data) {
       <span class="k">${t("scoresaber.pp")}</span><span>${fmt.num(p.pp, 1)}</span>
       <span class="k">${t("scoresaber.avg_acc")}</span><span>${fmt.acc(stats.averageRankedAccuracy != null ? stats.averageRankedAccuracy / 100 : null)}</span>
       <span class="k">${t("scoresaber.plays")}</span><span>${stats.totalPlayCount} / ${stats.rankedPlayCount}</span>
-    </div>`;
+    </div>
+    ${palHtml}`;
   const scores = data.scores || [];
   $("#ss-scores").innerHTML = `<h3>${t("scoresaber.recent", { n: scores.length })}</h3>` +
     (scores.length ? `<table class="metrics-table">
@@ -1616,7 +1889,7 @@ $("#btn-ss-refresh").addEventListener("click", async () => {
   const btn = $("#btn-ss-refresh");
   btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>${t("scoresaber.fetching")}`;
   try {
-    const data = await api("/api/scoresaber/refresh", { method: "POST" });
+    const data = await api(cloudRefreshPath(), { method: "POST" });
     renderScoreSaber(data);
     ssLoaded = true;
   } catch (e) { toast(t("scoresaber.failed", { err: e.message })); }
@@ -1655,8 +1928,42 @@ $("#btn-ss-validate").addEventListener("click", async () => {
   buildTimelineI18n();          // chart labels (depends on dict)
   applyStaticI18n();            // index.html static text
   I18N.renderLangSwitch();      // settings language card buttons (dynamic)
+  // 云端数据源切换卡片（设置 → 玩家）：初始状态由 /api/settings 的值驱动，
+  // loadSettings() 时刷新；点击即保存并刷新页面（即时生效）
+  const dsBox = document.querySelector("#datasource-switch");
+  if (dsBox) {
+    dsBox.querySelectorAll(".pm-tab").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        // 已处于该平台（active 由 loadSettings 渲染）→ 忽略
+        if (btn.classList.contains("active")) return;
+        // 设置值可能尚未加载完成（刚进入设置页就点击）：先加载，
+        // 避免 settingsValues 为空时误判（曾导致快速点击静默失败）
+        if (!settingsValues || !Object.keys(settingsValues).length) {
+          try { await loadSettings(); } catch { /* 加载失败仍尝试保存 */ }
+        }
+        if (btn.classList.contains("active")) return;
+        const target = btn.dataset.platform;
+        try {
+          const res = await api("/api/settings", {
+            method: "POST",
+            body: JSON.stringify({ values: { "player.data_source": target } }),
+          });
+          if (res.saved) location.reload();
+          else toast(t("settings.save_failed", { err: res.error || "" }), "error");
+        } catch (e) { toast(t("settings.save_failed", { err: e.message }), "error"); }
+      });
+    });
+  }
   // loadStatus 内部已拉取 /api/status 并返回（原先这里再拉一次是冗余请求）
   const s = await loadStatus();
+  // 导航「云端数据」→ 显示当前平台名（ScoreSaber / BeatLeader），便于确认当前数据源
+  const navCloud = document.querySelector('.nav-item[data-tab="scoresaber"] span');
+  if (navCloud) navCloud.textContent = t("platform." + window.__platform);
+  const cloudTitle = document.querySelector('#tab-scoresaber .page-title');
+  if (cloudTitle) cloudTitle.textContent = t("platform." + window.__platform);
+  // 交叉验证是 ScoreSaber 专属能力：BeatLeader 数据源下隐藏该按钮
+  const validateBtn = $("#btn-ss-validate");
+  if (validateBtn) validateBtn.classList.toggle("hidden", window.__platform !== "scoresaber");
   await loadRecent();
   if (s && s.task && s.task.running) pollTask();
 })();
@@ -1683,6 +1990,13 @@ async function loadSettings() {
     settingsSchema = data.schema || [];
     settingsValues = data.values || {};
     renderSettingsForm();
+    // 云端数据源切换卡片：高亮当前平台
+    const dsBox = document.querySelector("#datasource-switch");
+    if (dsBox) {
+      const cur = settingsValues["player.data_source"] || "scoresaber";
+      dsBox.querySelectorAll(".pm-tab").forEach((b) =>
+        b.classList.toggle("active", b.dataset.platform === cur));
+    }
     // 游戏路径卡片：回填当前根目录并自动验证（显示状态徽章）
     const rootInput = $("#set-root-input");
     if (rootInput) {
@@ -1696,8 +2010,7 @@ async function loadSettings() {
 
 /* schema 驱动的设置项文案映射（后端 schema 只有中文 label/description/group，
    前端按配置项 key 查 i18n 表；缺失回退中文原文） */
-function setLabel(item) {
-  const k = item.key;
+function setLabel(item) {  const k = item.key;
   const v = I18N.dict["set." + k + ".label"] ?? I18N.zhDict["set." + k + ".label"];
   return v ?? item.label;
 }
@@ -1721,8 +2034,13 @@ function settingsControl(item, key, val) {
     return `<label class="chk"><input type="checkbox" ${nameAttr} data-key="${key}" ${val ? "checked" : ""}> ${t("settings.enable")}</label>`;
   }
   if (typ === "enum") {
-    const opts = (item.enum || []).map((o) =>
-      `<option value="${escHtml(o)}" ${String(val) === String(o) ? "selected" : ""}>${escHtml(o)}</option>`).join("");
+    // 选项文案 i18n：查 set.{key}.opt.{value}；缺失（如 ai.provider 无翻译）
+    // 时回退显示原始枚举值，避免显示 key 字符串
+    const opts = (item.enum || []).map((o) => {
+      const lk = `set.${key}.opt.${o}`;
+      const label = t(lk) === lk ? o : t(lk);
+      return `<option value="${escHtml(o)}" ${String(val) === String(o) ? "selected" : ""}>${escHtml(label)}</option>`;
+    }).join("");
     return `<select ${nameAttr} data-key="${key}">${opts}</select>`;
   }
   if (typ === "secret") {
@@ -1888,6 +2206,11 @@ $("#btn-set-save").addEventListener("click", async () => {
     if (res.saved) {
       msg.textContent = t("settings.saved", { msg: res.message || "" });
       await loadSettings();
+      // 星级色谱变更：重新拉取 palette 定义并重绘列表（即时生效，无需重启）
+      if (Object.prototype.hasOwnProperty.call(values, "player.star_palette")) {
+        await loadStatus();
+        await loadRecent(currentPage);
+      }
     } else {
       msg.textContent = t("settings.save_failed", { err: res.error || "" });
     }

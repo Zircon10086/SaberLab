@@ -8,7 +8,7 @@
 |---|---|---|
 | Backend | Python 3.12+ / FastAPI / uvicorn / numpy / pyyaml / pywebview | Monolithic FastAPI, SQLite (WAL) storage; the HTTP API is the only IPC |
 | Frontend | Vanilla HTML/CSS/JS (zero dependencies, app.js ~1500 lines) | Dynamic forms driven by the backend schema; the acrylic layer is only enabled in window mode |
-| 3D replay | `frontend/chro/` (Vite + React + Three.js, ChroViewer port) | Standalone build, served at `/chro/` |
+| 3D replay | **External component** Local-ChroViewer (Vite + React + Three.js, ChroViewer port, independent GPL-2.0 project) | Not in this repo's source; build output auto-detected at runtime and served at `/chro/` |
 | Packaging | PyInstaller onedir (`packaging/saberlab.spec`) | Fully bundled, double-click to run |
 
 Design principles (from the design docs): local-first / deterministic-first; raw replays are read-only; AI only interprets and never generates data; the HTTP API is the only IPC (the frontend never calls pywebview's js_api).
@@ -20,8 +20,11 @@ Design principles (from the design docs): local-first / deterministic-first; raw
 py -3 -m venv --without-pip .venv
 py -3 -m pip --python .venv\Scripts\python.exe install fastapi uvicorn numpy pyyaml pywebview
 
-:: chro subproject (must rebuild after changing chro source, otherwise changes don't take effect)
-cd frontend\chro && pnpm build
+:: (Optional) 3D replay component Local-ChroViewer (independent GPL-2.0
+:: project, not in this repo's source). Clone/build it next to SaberLab; the
+:: backend auto-detects it at startup and mounts /chro/:
+::   git clone <Local-ChroViewer repo> ..\Local-ChroViewer
+::   cd ..\Local-ChroViewer && pnpm install && pnpm build
 ```
 
 Current dependencies: fastapi / uvicorn / numpy / pyyaml / pywebview 6.2.1 / pyinstaller 6.22.2 (watchdog and httpx have been removed).
@@ -35,7 +38,7 @@ Current dependencies: fastapi / uvicorn / numpy / pyyaml / pywebview 6.2.1 / pyi
 | `backend\host.py --acrylic-mode off` | Window without acrylic (visual comparison) |
 | `backend\host.py --acrylic-mode backdrop\|acrylic` | Experimental: DWM backdrop board (known client-area grey limitation) |
 
-- Port 8787, auto-relocates to 8788..8806 if occupied; single instance: prompts and exits if another instance is running
+- Port 6980, auto-relocates to 6981..6999 if occupied; single instance: prompts and exits if another instance is running
 - Closing the window → graceful exit (uvicorn should_exit, no leftover processes)
 
 ## 4. Directory Layout
@@ -57,7 +60,9 @@ backend/
   main.py      FastAPI entry (route assembly)
 frontend/      vanilla dashboard (index.html + app.js + style.css + i18n.js)
 frontend/i18n/ language tables (zh-CN/en-US/ja-JP.json, each with its own lang.name)
-frontend/chro/ ChroViewer port subproject (standalone Vite build)
+(outside repo) Local-ChroViewer/  3D replay external component (independent GPL-2.0
+                        project, Vite build; backend probes candidate paths for its
+                        dist/, see §5.6)
 tests/         unit tests (golden fixture regression + schema bootstrap/upgrade)
 config/        config.yaml
 packaging/     PyInstaller spec + packaging docs
@@ -96,6 +101,25 @@ Frontend contract: `window.__saberlabBackdrop(payload)` (mode=wallpaper/backdrop
 
 ### 5.5 repository
 SQLite opens a new connection per call (WAL, 30s timeout); all SQL lives in `db/repository.py`; schema migrations are consolidated in `db/models.py` (fresh DBs get the full schema; `_migrate` upgrades old DBs idempotently).
+
+### 5.6 Plugin system (v2.0.0: plugins directory detection & loading)
+- The root `plugins/` directory is detected and loaded by convention for
+  first-party plugins: **projects under different licenses or other complete
+  features** are shipped as plugins placed into `plugins/<name>/` and integrated
+  at startup. Current mechanism: a directory with an entry file (`index.html`)
+  is mounted/enabled; **first-party only — no third-party plugin interface or
+  spec** (no dedicated API).
+- The only plugin today = 3D replay (Local-ChroViewer): source lives in the
+  **independent project** `Local-ChroViewer/` (GPL-2.0, ChroViewer port, not in
+  this repo); **single detection path** `<repo>/plugins/chro` (mounted at
+  `/chro/` when `index.html` exists; when frozen `PROJECT_ROOT` == `<exe dir>`,
+  the same path covers the packaged layout) — **no fallback**: removing the
+  plugin directory immediately disables it
+- When present → `/api/status` returns `chro.available=true`; otherwise the
+  detail-page "Replay" pane shows a grey install hint (zh/en/ja, pointing at
+  `plugins/chro/`); the frontend decides iframe vs hint via
+  `window.chroAvailable` (set by loadStatus)
+- Plugin directory conventions: `plugins/README.md`
 
 ## 6. Frontend Notes
 
@@ -144,11 +168,39 @@ SQLite opens a new connection per call (WAL, 30s timeout); all SQL lives in `db/
 - `_tmp/shot.ps1` screenshots by window title; `_tmp/pngstats.py` numpy pixel statistics (for validating the UI without a vision model)
 - Debug notes: window-mode logs go to the run.bat console; `print` to pipes/redirection needs `flush=True`
 
-## 9. Common Pitfalls Quick Reference
+## 9. Build & Release Conventions (2026-08 user decision, mandatory)
+
+> Goal: the dev environment must behave exactly like the user edition so that
+> user-edition-only issues surface during development.
+
+1. **Clean up after building**: after each successful PyInstaller build/export
+   (i.e. once the `GitHub_Build\<version>\` archive exists) the temporary build
+   artifacts **must be deleted** — `build/` (PyInstaller intermediates) and
+   `dist/` (build output). `_tools/export_github_pkg.ps1` already does this at
+   the end; for manual builds follow the same convention. Version archives are
+   the only retained builds; always reference old-version code from
+   `GitHub_Build\<version>\saberlab-src\` — never rely on local `dist/build`
+   (they may be deleted at any time).
+2. **No fallback references to builds**: code/detection logic must not contain
+   "fall back to a local build artifact" paths. Anti-example (fixed): chro used
+   to fall back to `../Local-ChroViewer/dist`, so the dev environment loaded the
+   viewer while the user edition lacked it — detection now uses the single
+   first-party plugin path `plugins/chro/`.
+3. **Dev environment == user behavior**: detection paths, dependency resolution
+   and permissions in the dev environment must match the release. Any
+   "dev-convenience" path that differs from the user edition must be evaluated
+   for behavioral divergence; prefer copying/placing artifacts to the same
+   location the user edition uses over adding dev-only fallbacks.
+
+## 10. Common Pitfalls Quick Reference
 
 1. **venv without pip**: always install with `py -3 -m pip --python .venv\Scripts\python.exe install ...`
 2. **Duplicate module**: main.py must not import backend.host module-level state directly (see §5.2; use dialog.py)
 3. **WebView2 transparency limitation**: pywebview transparent mode has no window-level transparency (client area = window background color), so acrylic schemes A/B are infeasible; the DWM backdrop board is only visible on the title bar
-4. **chro build**: after changing chro source you must `pnpm build`, otherwise the backend serves stale artifacts
+4. **chro independent build**: the 3D replay viewer is the sibling external
+   project Local-ChroViewer; after changing its source you must `pnpm build`,
+   then place the build output into the first-party plugin directory
+   `plugins/chro/` — the **only** detection path, no fallback: without it
+   `/chro/` is not mounted and the detail page shows the install hint
 5. **Packaging**: pass `uvicorn.Config(app=app)` the object, not an import string (unresolvable when frozen); `PROJECT_ROOT` equals the exe directory when frozen
 6. **Console encoding**: Chinese output is fine on a GBK console; when piping/redirecting, confirm the encoding and add flush

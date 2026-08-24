@@ -38,24 +38,29 @@ def _lb_better(a: dict, b: dict) -> bool:
 
 
 class EnrichmentService:
-    """Map metadata snapshot + replay enrichment.
+    """Map metadata snapshot + replay enrichment (platform-scoped cloud values).
 
     snapshot structure:
       key_map: {map_hash: {beatmap_key, nps: dict}}
-      lb_map:  {(map_hash, difficulty_name): leaderboard row}
-      rc:      {(map_hash, difficulty): ranked cache row}
+      lb_map:  {(map_hash, difficulty_name): leaderboard row}   (active platform)
+      rc:      {(map_hash, difficulty): ranked cache row}       (active platform)
+
+    Platform (scoresaber | beatleader) is fixed per snapshot: switching the
+    data source rebuilds the snapshot, so each platform's cached rows stay
+    untouched and the UI just re-reads the active one.
     """
 
     def __init__(self, repo):
         self._repo = repo
+        self._platform: str | None = None
         self._snapshot: tuple[dict, dict, dict] | None = None
 
     def invalidate(self) -> None:
-        """Call after data changes (rescan / ranked sync / NPS update / cache clear)."""
+        """Call after data changes (rescan / ranked sync / NPS update / cache clear / platform switch)."""
         self._snapshot = None
 
-    def _ensure_snapshot(self) -> tuple[dict, dict, dict]:
-        if self._snapshot is not None:
+    def _ensure_snapshot(self, platform: str) -> tuple[dict, dict, dict]:
+        if self._snapshot is not None and self._platform == platform:
             return self._snapshot
         key_map: dict[str, dict] = {}
         for m in self._repo.list_maps(limit=100000):
@@ -68,22 +73,23 @@ class EnrichmentService:
                 "nps": nps if isinstance(nps, dict) else {},
             }
         lb_map: dict[tuple, dict] = {}
-        for lb in self._repo.list_ss_leaderboards():
+        for lb in self._repo.list_ss_leaderboards(platform=platform):
             key = (lb["map_hash"], lb["difficulty_name"] or "")
             cur = lb_map.get(key)
             if cur is None or _lb_better(lb, cur):
                 lb_map[key] = lb
         rc: dict[tuple, dict] = {}
-        for r in self._repo.list_ranked_cache():
+        for r in self._repo.list_ranked_cache(platform=platform):
             rc[(r["map_hash"], r["difficulty"])] = r
         self._snapshot = (key_map, lb_map, rc)
+        self._platform = platform
         return self._snapshot
 
-    def enrich(self, days: list[dict]) -> None:
+    def enrich(self, days: list[dict], platform: str = "scoresaber") -> None:
         """Attach beatmap_key / stars / pp / nps to the per-day grouped replay lists."""
         if not days:
             return
-        key_map, lb_map, rc = self._ensure_snapshot()
+        key_map, lb_map, rc = self._ensure_snapshot(platform)
         for day in days:
             for r in day.get("replays", []):
                 mh = (r.get("map_hash") or "").upper()
@@ -118,7 +124,7 @@ class EnrichmentService:
                     pp = None
                 r["pp"] = pp
 
-    def enrich_flat(self, replays: list[dict]) -> None:
+    def enrich_flat(self, replays: list[dict], platform: str = "scoresaber") -> None:
         """Attach the same enrichment fields to a flat replay list (not grouped by day)."""
         if replays:
-            self.enrich([{"replays": replays}])
+            self.enrich([{"replays": replays}], platform=platform)

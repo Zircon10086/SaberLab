@@ -239,9 +239,24 @@ body::before {
   margin-bottom: var(--space-4);
 }
 .surface-title {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   font-size: var(--fs-md); font-weight: 600; color: var(--text);
   margin: 0 0 var(--space-4);
+}
+
+/* 总览「最近 Replay」标题行（v1.6.0）：grid 三栏对称布局——
+   左栏=标题/模式/搜索（.title-left），中栏=分页，右栏=空占位。
+   左右 1fr 等宽 → 分页严格水平居中于容器（flex margin:auto 只是居中于
+   剩余空间，左侧内容会把它挤偏右，故不用）。仅限总览页：
+   详情页的 .surface-title 含「文本+按钮」多子元素，grid 会重排它们。 */
+#tab-overview .surface-title {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center; gap: 8px;
+}
+#tab-overview .title-left {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  min-width: 0;
 }
 
 /* 兼容遗留 h3（动态渲染函数使用） */
@@ -437,6 +452,18 @@ select, input[type="text"], input:not([type]) {
 .status-incomplete .completion-icon { color: var(--red); }
 .status-pending .completion-icon { color: var(--muted); }
 
+/* 分页刷新动画（v1.6.0）：replay 条目迅速逐条淡化出现。
+   .item-in 由 app.js 在 loadRecent 渲染后追加，animation-delay 按条目序递增；
+   backwards 填充：延迟期间保持透明起始态，动画结束后立即恢复自然状态。
+   注意不能用 both —— 动画结束仍保持 to{transform:none} 帧（animation 填充
+   优先级高于 hover），会压制 .replay-item:hover 的 scale(1.05) 放大动画
+   （历史页无 .item-in 所以正常，总览页因此失效）。 */
+.replay-item.item-in { animation: replayItemIn 0.2s ease backwards; }
+@keyframes replayItemIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
 /* 徽章 */
 .pill {
   display: inline-block; padding: 1px 8px; border-radius: 999px;
@@ -471,18 +498,47 @@ mark {
 }
 
 /* 星级颜色（语义：难度等级） */
+.star-gray { color: var(--muted); }
 .star-green { color: var(--green); }
 .star-yellow { color: var(--yellow); }
 .star-red { color: var(--red); }
 .star-purple { color: var(--purple); }
 
-/* 分页 */
-.pagination { margin-top: var(--space-5); display: flex; flex-direction: column; align-items: center; gap: 10px; }
-.pagination-info { color: var(--muted); font-size: var(--fs-sm); }
+/* BeatLeader unranked star: the song has a star rating but is NOT formally
+   ranked (status != 3; BL's star algorithm is public) — yellow pill + hover
+   hint "该歌曲尚未认证，无 pp 得分" */
+.star-unranked {
+  background: rgba(245, 197, 66, 0.18);
+  border: 1px solid rgba(245, 197, 66, 0.45);
+  border-radius: 7px;
+  padding: 0 6px;
+  cursor: help;
+}
+.hero-kpi .v.star-unranked {
+  background: rgba(245, 197, 66, 0.15);
+  border: 1px solid rgba(245, 197, 66, 0.4);
+  border-radius: 10px;
+  padding: 2px 12px;
+}
+
+/* 分页（v1.6.0：移入 surface-title 行内；grid 三栏中栏布局 → 严格水平居中，
+   不同数量 replay 不改变分页位置；grid 轨道内 margin 无剩余空间可吸收，置 0） */
+.pagination { margin: 0; display: flex; flex-direction: row; align-items: center; gap: 10px; }
+.pagination-info { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; }
 .pagination-controls { display: flex; gap: 6px; align-items: center; }
 .pagination-controls button { padding: 5px 12px; font-size: var(--fs-sm); }
 .pagination-controls button.active { background: var(--blue); border-color: var(--blue); color: #fff; }
 .pagination-controls span { color: var(--muted); padding: 0 4px; }
+
+/* 3D 回放组件缺失提示（v1.6.0：Local-ChroViewer 外部组件自动检测失败时灰字） */
+.chro-missing {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 48px 24px; text-align: center;
+  color: var(--muted); font-size: var(--fs-md); line-height: 1.8;
+  background: var(--surface-2); border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg); min-height: 220px;
+}
+.chro-missing-icon { font-size: 42px; opacity: 0.55; }
 
 /* ============================================================
    详情页
@@ -523,15 +579,19 @@ mark {
 .detail-hero h2 { font-size: var(--fs-xl); margin: 0 0 4px; font-weight: 600; }
 .detail-hero .sub { color: var(--muted); font-size: var(--fs-sm); }
 .detail-hero .badges { margin-top: var(--space-2); }
-.hero-kpis { display: flex; gap: var(--space-6); flex: none; }
+/* v1.6.0：顶栏 KPI 由 5 个扩到 8 个（+GOOD/MISS-BAD/NOTE），间距收紧防溢出 */
+.hero-kpis { display: flex; gap: 20px; flex: none; }
 .hero-kpi { text-align: right; }
 .hero-kpi .v { font-size: var(--fs-2xl); font-weight: 600; font-variant-numeric: tabular-nums; }
 .hero-kpi .v.acc-kpi { color: var(--blue); }
+.hero-kpi .v.star-gray { color: var(--muted); }
 .hero-kpi .v.star-green { color: var(--green); }
 .hero-kpi .v.star-yellow { color: var(--yellow); }
 .hero-kpi .v.star-red { color: var(--red); }
 .hero-kpi .v.star-purple { color: var(--purple); }
 .hero-kpi .k { font-size: var(--fs-xs); color: var(--muted); letter-spacing: 0.4px; }
+/* 顶栏 KPI 竖向分割线（v1.6.0：NOTE 与 NPS 之间，区分总体数据与数量统计） */
+.hero-kpi-sep { width: 1px; align-self: stretch; background: var(--border-strong); opacity: 0.55; }
 
 /* 详情滑块分页（数据一览 / AI 分析） */
 .detail-tabs {
@@ -624,23 +684,108 @@ mark {
 .detail-grid .surface .chart { flex: 1 1 auto; height: 240px; min-height: 150px; }
 .detail-grid .surface .chart.small { height: 160px; min-height: 110px; }
 
-.counts { display: flex; gap: var(--space-2); flex-wrap: wrap; }
-.count-box {
-  background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: var(--radius-md); padding: 6px 12px; text-align: center; min-width: 60px;
-}
-.count-box .v { font-size: var(--fs-lg); font-weight: 600; font-variant-numeric: tabular-nums; }
-.count-box .k { font-size: 10px; color: var(--muted); letter-spacing: 0.3px; }
-.count-box.good .v { color: var(--green); }
-.count-box.bad .v { color: var(--yellow); }
-.count-box.miss .v { color: var(--red); }
-.count-box.bomb .v { color: var(--purple); }
+/* v1.6.0：.counts/.count-box/.env/.env-table 已随「判定统计」卡片内容
+   前端隐藏一并移除（原 GOOD/BAD/MISS/BOMB/NOTE 计数盒 + 设备谱面详情表）。
+   后端数据与 API 保留，新分析内容引入时按需重建样式。 */
 
-.env { margin-top: var(--space-3); color: var(--muted); font-size: var(--fs-xs); line-height: 1.7; }
-/* 环境信息列表（判定统计卡） */
-.env-table { margin-top: var(--space-3); }
-.env-table td { padding: 4px 10px; border-bottom: 1px solid var(--border); font-size: var(--fs-sm); }
-.env-table td:first-child { color: var(--muted); }
+/* SliceDetails（v1.6.0 移植）：4x3 note 网格平均分 + 卡片内展开双 9 宫格。
+   方块尺寸自适应卡片宽度：grid 1fr + aspect-ratio（compact 模式网格收窄，
+   方块随之缩小到顶部，下方让位给切割轨迹）。 */
+.slice-details { display: flex; flex-direction: column; gap: 10px; }
+.slice-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.slice-tile {
+  aspect-ratio: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 2px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-md); cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.slice-tile:hover { border-color: var(--blue); background: var(--surface-3); }
+.slice-tile .v { font-size: var(--fs-md); font-weight: 600; font-variant-numeric: tabular-nums; }
+.slice-tile .k { font-size: 10px; color: var(--muted); }
+.slice-tile.empty { opacity: 0.55; cursor: default; }
+.slice-tile.empty:hover { border-color: var(--border); background: var(--surface-2); }
+/* 选中高亮（v1.6.0）：展开九宫格时标记玩家选中的方块 */
+.slice-tile.selected {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px var(--blue);
+  background: var(--surface-3);
+}
+
+/* 展开态：网格缩小到顶部（限宽居中，方块随宽度变小）。
+   width 过渡驱动网格缩小；九宫格容器用 grid-template-rows 0fr→1fr 与网格
+   同步生长（现代 CSS 高度过渡）——展开全程卡片高度单调变化（无先升后降
+   波动）、九宫格最终紧贴网格（无空隙），内容淡入延迟到动画结束后原地浮现。 */
+.slice-grid { width: 100%; align-self: center; transition: width 0.28s ease, gap 0.28s ease; }
+.slice-details.compact .slice-grid { width: 230px; gap: 6px; }
+.slice-details.compact .slice-tile .v { font-size: var(--fs-sm); }
+.slice-details.compact .slice-tile .k { font-size: 9px; }
+
+/* 九宫格容器高度过渡（0fr→1fr）：展开/收起时与网格动画同步，
+   内容裁剪在容器内，淡入时容器已定型 → 位置静止 */
+.slice-expand { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.28s ease; }
+.slice-expand > .slice-expand-inner { min-height: 0; overflow: hidden; }
+.slice-details.compact .slice-expand { grid-template-rows: 1fr; }
+
+.slice-expand-title { font-size: var(--fs-sm); font-weight: 600; text-align: center; color: var(--text-2); }
+.slice-expand-close { text-align: center; }
+/* 九宫格浮现动画（v1.6.0）：标题/双手/关闭按钮依次淡入；收起时整体淡出。
+   纯 opacity 动画 + 入场延迟对齐网格缩放动画（width 0.28s 过渡）——
+   展开时网格高度同步缩小会推挤下方内容上移，若淡入与网格动画重叠，
+   九宫格看起来就是"从下往上飞入"且高度随动画变化。延迟到网格动画结束后
+   再淡入：淡入期间布局完全静止，原地浮现，不参与高度感知。 */
+.slice-expand-title, .slice-expand .slice-hands, .slice-expand-close { animation: sliceFadeIn 0.3s ease 0.28s both; }
+.slice-expand .slice-hands { animation-delay: 0.33s; }
+.slice-expand-close { animation-delay: 0.38s; }
+.slice-details.closing .slice-expand-title,
+.slice-details.closing .slice-expand .slice-hands,
+.slice-details.closing .slice-expand-close { animation: sliceFadeOut 0.18s ease both; }
+@keyframes sliceFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sliceFadeOut { from { opacity: 1; } to { opacity: 0; } }
+
+/* 双 9 宫格：随卡片宽度自适应（grid 1fr + aspect-ratio）。
+   格子 = note 区域（上，flex:1）+ 数值行（下，.cell-score）。
+   左右手通过染 svg 背景色区分（left=红 / right=蓝）。 */
+.slice-hands { display: flex; gap: var(--space-5); justify-content: center; align-items: flex-start; }
+.slice-hand { display: flex; flex-direction: column; align-items: center; gap: 8px; flex: 1; max-width: 340px; }
+.h-label { font-size: var(--fs-sm); font-weight: 600; letter-spacing: 0.4px; }
+.slice-compass { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; width: 100%; }
+.slice-cell {
+  aspect-ratio: 1; border-radius: var(--radius-md);
+  position: relative; display: flex; flex-direction: column;
+}
+.slice-cell .note-wrap { position: relative; flex: 1; min-height: 0; }
+/* note svg 拉伸到 note 区域并整体随方向旋转（斜向 note 方块同样倾斜，与游戏一致）；
+   旋转后角点伸出，overflow visible + 加大的 gap（14px）吸收，不与相邻格重叠 */
+.slice-cell .note-wrap .note-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.slice-cell .note-wrap .note-svg rect { fill: var(--red); }
+.slice-cell.right .note-wrap .note-svg rect { fill: var(--blue); }
+.slice-cell.empty .note-wrap .note-svg rect { fill: #4a5162; }
+.slice-cell.empty .note-wrap .note-svg circle { fill: #2c313d; }
+.slice-cell.empty { opacity: 0.65; }
+/* 切割轨迹双线 overlay（实线 = 实际切割路径，虚线 = 中心满分参考线） */
+.slice-cell .note-wrap .cut-overlay { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; overflow: visible; }
+/* 数值行（v1.6.0）：note 下方显示 "平均分/note 数"，pill 背景吸收倾斜 note 角的间隙 */
+.slice-cell .cell-score {
+  flex: none; height: 15px; margin: 3px 3px 0; z-index: 3; position: relative;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: #e9edf5; font-variant-numeric: tabular-nums;
+  background: rgba(8, 10, 16, 0.55); border-radius: 5px;
+}
+
+/* 弹窗（通用能力保留，切割细节已改卡片内展开，不再使用） */
+.slice-modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+}
+.slice-modal {
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg); padding: var(--space-5);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.slice-modal-title { font-size: var(--fs-md); font-weight: 600; margin-bottom: var(--space-4); text-align: center; }
+.slice-modal-close { margin-top: var(--space-4); text-align: center; }
 /* 同谱历史与上方卡片间距 */
 .same-map-history { margin-top: var(--space-4); }
 
@@ -982,3 +1127,52 @@ body.acrylic #app-shell {
     corner-shape: squircle;
   }
 }
+
+/* ---------- ScoreSaber 动态水平卡片（个人星级色谱，2026 spec） ---------- */
+.ss-level-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.ss-level-info { flex: none; max-width: 46%; }
+.ss-level-line {
+  font-size: 14px;
+  color: var(--text-2);
+  margin-bottom: 4px;
+}
+.ss-yellow {
+  color: var(--yellow);
+  font-weight: 700;
+  font-size: 18px;
+  letter-spacing: 0.5px;
+}
+.ss-level-sub {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.ss-bands {
+  flex: 1;
+  display: flex;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  min-width: 0;
+}
+.ss-bands .band {
+  flex: 1;
+  text-align: center;
+  padding: 8px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.band-gray   { background: var(--muted);  color: #0e1117; }
+.band-green  { background: var(--green);  color: #0e1117; }
+.band-yellow { background: var(--yellow); color: #0e1117; }
+.band-red    { background: var(--red);    color: #fff; }
+.band-purple { background: var(--purple); color: #fff; }

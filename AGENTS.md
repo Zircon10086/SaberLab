@@ -228,10 +228,17 @@ frontend/
 └── Main SaberLab UI
 
 
+plugins/
 
-frontend/chro/
+└── First-party plugins (detected & loaded at startup by convention;
+    no third-party plugin interface)
 
-└── Independent ChroViewer 3D replay application
+
+(仓库外) Local-ChroViewer/
+
+└── First plugin instance: independent 3D replay application (external
+    GPL-2.0 project, NOT part of this repository; build output loaded
+    from plugins/chro/)
 
 ```
 
@@ -471,11 +478,17 @@ Rules:
 
 
 
-## ChroViewer
+## Plugins (first-party plugin system)
 
 
 
-`frontend/chro/` is an independent 3D replay application.
+The root `plugins/` directory is the first-party plugin location: projects
+under different licenses or other complete features are shipped as plugins,
+detected and loaded at startup by convention (a directory with an entry file
+is mounted/enabled). **First-party only — no third-party plugin interface or
+specification.** The current plugin is the 3D replay viewer (Local-ChroViewer),
+developed as an independent external GPL-2.0 project whose build output is
+loaded from `plugins/chro/` (single detection path, no fallback).
 
 
 
@@ -487,11 +500,12 @@ Rules:
 
 
 
-* Do not casually merge ChroViewer architecture into the main frontend.
-* Do not add SaberLab business logic directly into ChroViewer unless the feature explicitly belongs there.
-* Preserve its independent build process.
-* Communicate through stable interfaces/contracts.
-* Do not perform broad refactors of ChroViewer when implementing unrelated SaberLab features.
+* Do not casually merge a plugin's architecture into the main frontend.
+* Do not add SaberLab business logic directly into a plugin unless the feature explicitly belongs there.
+* Preserve each plugin's independent build process.
+* Communicate through stable interfaces/contracts (HTTP mounts + iframe + query parameters).
+* Do not copy a plugin's GPL-2.0-only source into the GPL-3.0-or-later repository.
+* Never add a fallback path to local build artifacts (the dev environment must behave exactly like the user edition).
 
 
 
@@ -1225,7 +1239,7 @@ The following invariants are considered architectural guardrails:
 
 6. Configuration remains schema-driven.
 
-7. ChroViewer remains independently buildable.
+7. Plugins remain independently buildable and loadable (no fallback to local build artifacts).
 
 8. External services remain optional for core local functionality.
 
@@ -1331,7 +1345,7 @@ Before considering a task complete, verify:
 
 \\\\\\\\\\\\\\\[ ] Database/config conventions remain intact.
 
-\\\\\\\\\\\\\\\[ ] ChroViewer boundaries remain intact.
+\\\\\\\\\\\\\\\[ ] Plugin boundaries remain intact.
 
 \\\\\\\\\\\\\\\[ ] Relevant tests/checks pass.
 

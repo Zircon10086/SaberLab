@@ -12,8 +12,6 @@ data/logs/
 reports/
 __pycache__/
 *.pyc
-frontend/chro/node_modules/
-frontend/chro/dist/
 *.corrupt-*
 build/
 dist/
@@ -25,3 +23,7 @@ config/
 packaging/
 tests/
 docs/HANDOFF.md
+# 第一方插件产物（chro = 外部 GPL-2.0 插件，构建产物不入源码仓库；
+# 保留 plugins/ 目录结构与 README。release 用户版打包会自动包含整个
+# chro 文件夹内置该插件——发布描述需声明内置 GPL-2.0 组件）
+plugins/chro/

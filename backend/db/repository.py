@@ -72,7 +72,25 @@ class Repository:
             self._migrate(c)
 
     @staticmethod
-    def _migrate(c: sqlite3.Connection) -> None:
+    def _rebuild_with_platform(c: sqlite3.Connection, table: str,
+                               create_sql: str, select_sql: str,
+                               index_sql: list[str] | None = None) -> None:
+        """Rebuild a cache table adding the platform dimension.
+
+        Old rows are copied as platform='scoresaber' (the only source before
+        2026-08); indexes are recreated AFTER the rename (DROP TABLE removed
+        them, and a _new-suffixed table cannot carry the final index names).
+        """
+        new = f"{table}_new"
+        c.execute(f"DROP TABLE IF EXISTS {new}")
+        c.execute(create_sql)
+        c.execute(f"INSERT INTO {new} {select_sql}")
+        c.execute(f"DROP TABLE {table}")
+        c.execute(f"ALTER TABLE {new} RENAME TO {table}")
+        for sql in index_sql or []:
+            c.execute(sql)
+
+    def _migrate(self, c: sqlite3.Connection) -> None:
         """Lightweight column migration: add new columns to existing tables with ALTER TABLE (IF NOT EXISTS only applies at CREATE TABLE time).
 
         Principle (developrules §23 backward compatibility): never drop data, only add columns/backfill.
@@ -108,8 +126,80 @@ class Repository:
         cols = {row["name"] for row in c.execute("PRAGMA table_info(windows)")}
         if "t_ref" not in cols:
             c.execute("ALTER TABLE windows ADD COLUMN t_ref REAL")
+
+        # --- platform dimension (2026-08, dual data source: scoresaber | beatleader) ---
+        # Cloud caches are split per platform; old rows belong to 'scoresaber'.
+        # Rebuild (PK changes) while preserving all existing data.
+        cols = {row["name"] for row in c.execute("PRAGMA table_info(scoresaber_cache)")}
+        if "platform" not in cols:
+            self._rebuild_with_platform(
+                c, "scoresaber_cache",
+                """CREATE TABLE scoresaber_cache_new (
+                       platform TEXT NOT NULL DEFAULT 'scoresaber',
+                       player_id TEXT NOT NULL,
+                       fetched_at TEXT,
+                       profile_json TEXT,
+                       scores_json TEXT,
+                       PRIMARY KEY (platform, player_id))""",
+                "SELECT 'scoresaber', player_id, fetched_at, profile_json, scores_json"
+                " FROM scoresaber_cache")
+        cols = {row["name"] for row in c.execute("PRAGMA table_info(player_palette_cache)")}
+        if "platform" not in cols:
+            self._rebuild_with_platform(
+                c, "player_palette_cache",
+                """CREATE TABLE player_palette_cache_new (
+                       platform TEXT NOT NULL DEFAULT 'scoresaber',
+                       player_id TEXT NOT NULL,
+                       computed_at TEXT, stage TEXT, max_single_pp REAL,
+                       fallback_stars REAL, yellow_stars REAL,
+                       sample_count INTEGER, method TEXT,
+                       valid_count INTEGER, nf_excluded INTEGER,
+                       PRIMARY KEY (platform, player_id))""",
+                "SELECT 'scoresaber', player_id, computed_at, stage, max_single_pp,"
+                " fallback_stars, yellow_stars, sample_count, method, valid_count,"
+                " nf_excluded FROM player_palette_cache")
+        cols = {row["name"] for row in c.execute("PRAGMA table_info(map_ranked_cache)")}
+        if "platform" not in cols:
+            self._rebuild_with_platform(
+                c, "map_ranked_cache",
+                """CREATE TABLE map_ranked_cache_new (
+                       platform TEXT NOT NULL DEFAULT 'scoresaber',
+                       map_hash TEXT NOT NULL, difficulty TEXT NOT NULL,
+                       stars REAL, pp REAL, ranked INTEGER DEFAULT 0,
+                       fetched_at TEXT,
+                       PRIMARY KEY (platform, map_hash, difficulty))""",
+                "SELECT 'scoresaber', map_hash, difficulty, stars, pp, ranked, fetched_at"
+                " FROM map_ranked_cache")
+        cols = {row["name"] for row in c.execute("PRAGMA table_info(scoresaber_leaderboards)")}
+        if "platform" not in cols:
+            self._rebuild_with_platform(
+                c, "scoresaber_leaderboards",
+                """CREATE TABLE scoresaber_leaderboards_new (
+                       platform TEXT NOT NULL DEFAULT 'scoresaber',
+                       leaderboard_id TEXT NOT NULL,
+                       map_hash TEXT NOT NULL, difficulty_rank INTEGER,
+                       difficulty_name TEXT, game_mode TEXT, difficulty_raw TEXT,
+                       song_name TEXT, level_author TEXT, stars REAL,
+                       ranked INTEGER, qualified INTEGER, loved INTEGER,
+                       max_pp REAL, plays INTEGER, last_synced TEXT,
+                       PRIMARY KEY (platform, leaderboard_id))""",
+                "SELECT 'scoresaber', leaderboard_id, map_hash, difficulty_rank,"
+                " difficulty_name, game_mode, difficulty_raw, song_name, level_author,"
+                " stars, ranked, qualified, loved, max_pp, plays, last_synced"
+                " FROM scoresaber_leaderboards",
+                ["CREATE INDEX IF NOT EXISTS idx_ssl_hash"
+                 " ON scoresaber_leaderboards(map_hash)",
+                 "CREATE INDEX IF NOT EXISTS idx_ssl_hash_diff"
+                 " ON scoresaber_leaderboards(map_hash, difficulty_name)",
+                 "CREATE INDEX IF NOT EXISTS idx_ssl_platform"
+                 " ON scoresaber_leaderboards(platform, map_hash, difficulty_name)"])
+
         # The map_ranked_cache / scoresaber_leaderboards tables are automatically
         # created (with indexes) by SCHEMA's CREATE TABLE IF NOT EXISTS in executescript.
+        # Platform-scoped lookup index (depends on the platform column; legacy
+        # DBs only get the column after the rebuild above).
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ssl_platform"
+                  " ON scoresaber_leaderboards(platform, map_hash, difficulty_name)")
 
     def _conn(self) -> _ConnCtx:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -319,19 +409,20 @@ class Repository:
             return c.execute("SELECT 1 FROM replays WHERE replay_id=?",
                              (replay_id,)).fetchone() is not None
 
-    # ---------- scoresaber leaderboards (rooted at the map) ----------
-    def upsert_ss_leaderboard(self, lb: dict) -> None:
-        """Insert/update a ScoreSaber leaderboard (keyed by leaderboard_id)."""
+    # ---------- platform-scoped leaderboards (rooted at the map) ----------
+    def upsert_ss_leaderboard(self, lb: dict, platform: str = "scoresaber") -> None:
+        """Insert/update a leaderboard cache row (keyed by platform + leaderboard_id)."""
+        lb = {**lb, "platform": platform}
         with self._conn() as c:
             c.execute("""
                 INSERT INTO scoresaber_leaderboards(
-                    leaderboard_id, map_hash, difficulty_rank, difficulty_name,
+                    platform, leaderboard_id, map_hash, difficulty_rank, difficulty_name,
                     game_mode, difficulty_raw, song_name, level_author,
                     stars, ranked, qualified, loved, max_pp, plays, last_synced)
-                VALUES(:leaderboard_id,:map_hash,:difficulty_rank,:difficulty_name,
+                VALUES(:platform,:leaderboard_id,:map_hash,:difficulty_rank,:difficulty_name,
                        :game_mode,:difficulty_raw,:song_name,:level_author,
                        :stars,:ranked,:qualified,:loved,:max_pp,:plays,:last_synced)
-                ON CONFLICT(leaderboard_id) DO UPDATE SET
+                ON CONFLICT(platform, leaderboard_id) DO UPDATE SET
                     map_hash=excluded.map_hash,
                     difficulty_rank=excluded.difficulty_rank,
                     difficulty_name=excluded.difficulty_name,
@@ -348,59 +439,67 @@ class Repository:
                     last_synced=excluded.last_synced
             """, lb)
 
-    def get_ss_leaderboard(self, leaderboard_id: int) -> Optional[dict]:
+    def get_ss_leaderboard(self, leaderboard_id, platform: str = "scoresaber") -> Optional[dict]:
         with self._conn() as c:
             row = c.execute(
-                "SELECT * FROM scoresaber_leaderboards WHERE leaderboard_id=?",
-                (leaderboard_id,)).fetchone()
+                "SELECT * FROM scoresaber_leaderboards"
+                " WHERE platform=? AND leaderboard_id=?",
+                (platform, leaderboard_id)).fetchone()
             return _row_to_dict(row) if row else None
 
-    def get_ss_leaderboards_by_hash(self, map_hash: str) -> list[dict]:
-        """Get all leaderboards for a map (map-rooted cache)."""
+    def get_ss_leaderboards_by_hash(self, map_hash: str,
+                                    platform: str = "scoresaber") -> list[dict]:
+        """Get all leaderboards for a map on one platform (map-rooted cache)."""
         with self._conn() as c:
             rows = c.execute(
-                "SELECT * FROM scoresaber_leaderboards WHERE map_hash=?"
-                " ORDER BY difficulty_rank", (map_hash.upper(),)).fetchall()
+                "SELECT * FROM scoresaber_leaderboards WHERE platform=? AND map_hash=?"
+                " ORDER BY difficulty_rank", (platform, map_hash.upper())).fetchall()
             return [_row_to_dict(r) for r in rows]
 
-    def list_ss_leaderboards(self, limit: int = 100000) -> list[dict]:
+    def list_ss_leaderboards(self, limit: int = 100000,
+                             platform: str = "scoresaber") -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
                 "SELECT map_hash, difficulty_name, stars, ranked, qualified,"
                 " max_pp, last_synced FROM scoresaber_leaderboards"
-                " LIMIT ?", (limit,)).fetchall()
+                " WHERE platform=? LIMIT ?", (platform, limit)).fetchall()
             return [_row_to_dict(r) for r in rows]
 
-    def count_ss_leaderboards(self) -> int:
+    def count_ss_leaderboards(self, platform: str = "scoresaber") -> int:
         with self._conn() as c:
-            return c.execute("SELECT COUNT(*) FROM scoresaber_leaderboards").fetchone()[0]
+            return c.execute("SELECT COUNT(*) FROM scoresaber_leaderboards"
+                             " WHERE platform=?", (platform,)).fetchone()[0]
 
-    # ---------- map ranked cache ----------
+    # ---------- map ranked cache (platform-scoped) ----------
     def upsert_ranked_cache(self, map_hash: str, difficulty: str,
-                            stars, pp, fetched_at: str) -> None:
+                            stars, pp, fetched_at: str,
+                            platform: str = "scoresaber") -> None:
         with self._conn() as c:
             c.execute("""
-                INSERT INTO map_ranked_cache(map_hash, difficulty, stars, pp, fetched_at)
-                VALUES(?,?,?,?,?)
-                ON CONFLICT(map_hash, difficulty) DO UPDATE SET
+                INSERT INTO map_ranked_cache(platform, map_hash, difficulty, stars, pp, fetched_at)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(platform, map_hash, difficulty) DO UPDATE SET
                     stars=COALESCE(excluded.stars, map_ranked_cache.stars),
                     pp=COALESCE(excluded.pp, map_ranked_cache.pp),
                     fetched_at=excluded.fetched_at
-            """, (map_hash.upper(), difficulty, stars, pp, fetched_at))
+            """, (platform, map_hash.upper(), difficulty, stars, pp, fetched_at))
 
-    def get_ranked_cache(self, map_hash: str, difficulty: str) -> Optional[dict]:
+    def get_ranked_cache(self, map_hash: str, difficulty: str,
+                         platform: str = "scoresaber") -> Optional[dict]:
         with self._conn() as c:
             row = c.execute(
                 "SELECT stars, pp, fetched_at FROM map_ranked_cache"
-                " WHERE map_hash=? AND difficulty=?",
-                (map_hash.upper(), difficulty)).fetchone()
+                " WHERE platform=? AND map_hash=? AND difficulty=?",
+                (platform, map_hash.upper(), difficulty)).fetchone()
             return _row_to_dict(row) if row else None
 
-    def list_ranked_cache(self, limit: int = 100000) -> list[dict]:
+    def list_ranked_cache(self, limit: int = 100000,
+                          platform: str = "scoresaber") -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
                 "SELECT map_hash, difficulty, stars, pp, fetched_at"
-                " FROM map_ranked_cache LIMIT ?", (limit,)).fetchall()
+                " FROM map_ranked_cache WHERE platform=? LIMIT ?",
+                (platform, limit)).fetchall()
             return [_row_to_dict(r) for r in rows]
 
     # ---------- replays by day ----------
@@ -759,23 +858,48 @@ class Repository:
                 " LIMIT 1", (replay_id,)).fetchone()
             return _row_to_dict(row) if row else None
 
-    # ---------- ScoreSaber cache ----------
-    def save_scoresaber(self, player_id: str, profile: dict, scores: list) -> None:
+    # ---------- player cloud cache (platform-scoped: scoresaber | beatleader) ----------
+    def save_player_cache(self, platform: str, player_id: str,
+                          profile: dict, scores: list) -> None:
         with self._conn() as c:
-            c.execute("""INSERT OR REPLACE INTO scoresaber_cache(player_id, fetched_at,
-                profile_json, scores_json) VALUES(?,?,?,?)""",
-                (player_id, _now(), json.dumps(profile, ensure_ascii=False),
+            c.execute("""INSERT OR REPLACE INTO scoresaber_cache(
+                    platform, player_id, fetched_at, profile_json, scores_json)
+                VALUES(?,?,?,?,?)""",
+                (platform, player_id, _now(), json.dumps(profile, ensure_ascii=False),
                  json.dumps(scores, ensure_ascii=False)))
 
-    def get_scoresaber(self, player_id: str) -> Optional[dict]:
+    def get_player_cache(self, platform: str, player_id: str) -> Optional[dict]:
         with self._conn() as c:
-            row = c.execute("SELECT * FROM scoresaber_cache WHERE player_id=?",
-                            (player_id,)).fetchone()
+            row = c.execute("SELECT * FROM scoresaber_cache"
+                            " WHERE platform=? AND player_id=?",
+                            (platform, player_id)).fetchone()
             if not row:
                 return None
             return {"fetched_at": row["fetched_at"],
                     "profile": json.loads(row["profile_json"]),
                     "scores": json.loads(row["scores_json"])}
+
+    # ---------- player palette cache (platform-scoped, 2026 spec) ----------
+    def save_player_palette(self, platform: str, player_id: str, result: dict) -> None:
+        """Persist a classify_player() result per player per platform (offline-capable)."""
+        with self._conn() as c:
+            c.execute("""INSERT OR REPLACE INTO player_palette_cache(
+                    platform, player_id, computed_at, stage, max_single_pp,
+                    fallback_stars, yellow_stars, sample_count, method,
+                    valid_count, nf_excluded)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (platform, player_id, _now(), result.get("stage"),
+                 result.get("max_single_pp"), result.get("fallback_stars"),
+                 result.get("yellow_stars"), result.get("sample_count"),
+                 result.get("method"), result.get("valid_count"),
+                 result.get("nf_excluded")))
+
+    def get_player_palette(self, platform: str, player_id: str) -> Optional[dict]:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM player_palette_cache"
+                            " WHERE platform=? AND player_id=?",
+                            (platform, player_id)).fetchone()
+            return _row_to_dict(row) if row else None
 
     # ---------- scan state ----------
     def set_scan_state(self, key: str, value: dict) -> None:

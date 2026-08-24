@@ -8,7 +8,7 @@
 |---|---|---|
 | 后端 | Python 3.12+ / FastAPI / uvicorn / numpy / pyyaml / pywebview | 单体 FastAPI,SQLite(WAL) 存储,HTTP API 是唯一 IPC |
 | 前端 | 原生 HTML/CSS/JS(零依赖,app.js ~1500 行) | 动态表单由后端 schema 驱动;毛玻璃层仅窗口模式启用 |
-| 3D 回放 | `frontend/chro/`(Vite + React + Three.js,ChroViewer 移植) | 独立构建,产物挂载 `/chro/` |
+| 3D 回放 | **外部组件** Local-ChroViewer（Vite + React + Three.js，ChroViewer 移植，GPL-2.0 独立项目） | 不在本仓库源码内；运行时自动检测构建产物并挂载 `/chro/` |
 | 打包 | PyInstaller onedir(`packaging/saberlab.spec`) | 全内置,双击即用 |
 
 设计原则(摘自设计文档):local-first / deterministic-first;原始 Replay 只读;
@@ -21,8 +21,10 @@ AI 只解释不产生数据;HTTP API 是唯一 IPC(前端不调用 pywebview js_
 py -3 -m venv --without-pip .venv
 py -3 -m pip --python .venv\Scripts\python.exe install fastapi uvicorn numpy pyyaml pywebview
 
-:: chro 子项目（改动 chro 源码后必须重建，否则不生效）
-cd frontend\chro && pnpm build
+:: （可选）3D 回放组件 Local-ChroViewer（独立 GPL-2.0 项目，不在本仓库源码内）
+:: 克隆/构建到 SaberLab 同级目录，后端启动自动检测并挂载 /chro/：
+::   git clone <Local-ChroViewer 仓库> ..\Local-ChroViewer
+::   cd ..\Local-ChroViewer && pnpm install && pnpm build
 ```
 
 依赖现状：fastapi/uvicorn/numpy/pyyaml/pywebview 6.2.1/pyinstaller 6.22.2（watchdog、httpx 已移除）。
@@ -31,13 +33,22 @@ cd frontend\chro && pnpm build
 
 | 命令 | 模式 |
 |---|---|
-| `run.bat`（= `backend\host.py`） | 独立窗口（WebView2 + 毛玻璃） |
-| `run-browser.bat`（= `backend\host.py --browser`） | 系统浏览器（开发模式，无毛玻璃） |
+| `run.bat`（= `backend\host.py`） | 独立窗口（WebView2 + 毛玻璃）；**无控制台**（pythonw），日志见 `data/logs/saberlab.log` |
+| `run-browser.bat`（= `backend\host.py --browser`） | 系统浏览器（开发模式，无毛玻璃）；同样无控制台 |
+| `python backend\host.py` | 直接运行（保留控制台实时日志，排查用） |
 | `backend\host.py --acrylic-mode off` | 窗口但禁用毛玻璃（对照外观） |
 | `backend\host.py --acrylic-mode backdrop\|acrylic` | 实验：DWM 背景板（已知客户端灰底限制） |
 
-- 端口 8787，被占自动顺延（8788..8806）；单实例：已有实例则提示退出
+- 端口 6980，被占自动顺延（6981..6999）；单实例：已有实例则提示退出
 - 关窗 → 主动退出（uvicorn should_exit，无残留进程）
+- **无控制台启动**（2026-08）：`run.bat`/`run-browser.bat` 用 `pythonw.exe`，
+  打包版 `console=False`（不弹命令行窗口）；`host._setup_stdio()` 在无
+  控制台时把 stdout/stderr 重定向到 `data/logs/saberlab.log`（追加），
+  排查日志看该文件；`python backend\host.py` 直接跑保留控制台
+- **启动计时日志**：`[host] ready in X.XXs`（服务器就绪）、
+  `[host] webview window shown in X.XXs`（窗口显示，events.shown 回调）；
+  窗口模式下 pywebview/.NET runtime 在服务器启动期间**并行预热**
+  （`webview.platforms.winforms` 预导入），窗口显示几乎与服务器就绪同时
 
 ## 4. 目录结构
 
@@ -58,7 +69,8 @@ backend/
   main.py      FastAPI 入口（路由组装）
 frontend/      原生仪表盘（index.html + app.js + style.css + i18n.js）
 frontend/i18n/ 语言对照表（zh-CN/en-US/ja-JP.json，含 lang.name 自述名）
-frontend/chro/ ChroViewer 移植子项目（独立 Vite 构建）
+（仓库外）Local-ChroViewer/   3D 回放外部组件（独立 GPL-2.0 项目，Vite 构建；
+                        后端按候选路径自动检测其 dist/，见 §5.6）
 tests/         单元测试（黄金夹具回归 + schema 自举/升级）
 config/        config.yaml
 packaging/     PyInstaller spec + 打包文档
@@ -77,7 +89,15 @@ _tmp/          测试临时区（探针/截图脚本，可随时清空）
 - 原子写回：tmp → flush → os.replace；config.yaml 损坏自动备份 `.corrupt-<ts>`
 - 关键项：`ai.ai_report_enabled`（"使用 AI 生成报告"开关——不勾选时
   `run_ai_report` 直接短路到规则报告，不调用 LLM）；`analysis.slope_group_notes`
-  （note 分组大小）；`analysis.window_seconds/window_step_seconds`（已弃用，hidden 保留兼容）
+  （note 分组大小）；`analysis.window_seconds/window_step_seconds`（已弃用，hidden 保留兼容）；
+  `player.star_palette`（星级色谱预设：`community` 固定阈值 /
+  `personal` 个人动态——按玩家自己的 ScoreSaber 成绩算黄色基准，
+  颜色 = 曲目相对玩家水平的位次；算法见 `docs/STAR_PALETTE_ALGORITHM.md`，
+  纯函数在 `backend/analysis/player_palette.py`，结果缓存于
+  `player_palette_cache` 表，经 `/api/status` 的 `ui.*` 下发前端）
+- 玩家身份：ScoreSaber ID（= Steam ID）**只从 BSOR Replay 自动解析**
+  （`repo.latest_player_id()`）；`player.scoresaber_id` 配置项已**弃用**
+  （schema 保留 hidden，不再被读取）
 
 ### 5.2 dialog.py 桥（重要）
 `python backend\host.py` 启动时脚本以 `__main__` 运行；main.py 若 `from backend.host import ...`
@@ -106,6 +126,45 @@ reload 重推         前端加载/reload 后 POST /api/desktop/backdrop-ready�
 ### 5.5 repository
 SQLite 每次调用新建连接（WAL，timeout 30s）；所有 SQL 收敛在 `db/repository.py`；
 schema 迁移收敛在 `db/models.py`（新库即建全表，`_migrate` 幂等升级旧库）。
+
+### 5.6 插件系统（v2.0.0 起：plugins 目录识别加载）
+- 根目录 `plugins/` 按约定识别并加载第一方插件：**不同协议的项目、其它完整
+  功能**做成插件放入 `plugins/<插件名>/`，启动时检测目录内容并入主线。
+  当前机制：目录含入口文件（`index.html`）即被挂载/启用；**只做第一方插件，
+  不开发第三方插件接口/规范**（无专用 API）。
+- 当前唯一插件 = 3D 回放（Local-ChroViewer）：源码在**独立项目**
+  `Local-ChroViewer/`（GPL-2.0，ChroViewer 移植，不在本仓库）；
+  **唯一检测路径** `<仓库>/plugins/chro`（含 `index.html` 即挂载 `/chro/`；
+  frozen 下 `PROJECT_ROOT` == `<exe dir>`，同一路径自动覆盖发布布局）——
+  **无回退**：移除插件目录立即禁用
+- 命中 → `/api/status` 返回 `chro.available=true`；未命中 → 前端详情页
+  「查看回放」显示灰字安装提示（三语言，指引放入 `plugins/chro/`）；
+  前端依据 `window.chroAvailable`（loadStatus 设置）决定 iframe 还是提示
+- 插件目录约定见 `plugins/README.md`
+
+### 5.7 双平台云端数据（scoresaber | beatleader，2026-08）
+- **数据源切换**：设置 → 玩家 →「云端数据源」卡片（segmented control，
+  `player.data_source` 配置项，schema 驱动）；点击即保存并刷新页面
+- **ID 通用**：两平台都用 BSOR 自动解析的 ScoreSaber ID（= Steam ID，
+  17 位），无需任何手动输入
+- **数据隔离**：`scoresaber_cache`（玩家档案+成绩）、`scoresaber_leaderboards`
+  （谱面星级）、`map_ranked_cache`（stars/pp 索引）、`player_palette_cache`
+  （个人色谱）四张缓存表均带 `platform` 列（PK 含 platform）；切换平台时
+  另一平台数据**完全不动**，可来回切换；旧库迁移时老数据标 `scoresaber`
+  （`repository._migrate` 幂等重建）
+- **enrichment** 按当前平台读 leaderboards/ranked_cache（快照按平台缓存）；
+  列表/详情/历史/色谱全部自动跟随
+- **ranked_update / 一键刷新** 按平台路由：`scoresaber.sync_maps_batch` 或
+  `beatleader.sync_maps_batch`（BeatLeader 用 `/leaderboards/hash/{hash}`
+  一次拿全难度；ranked = difficulty.status==3；官方 OST（status 5/7）
+  **显示星级但不产生 PP**——用户决策）
+- **云端数据页**：导航「云端数据」（原 ScoreSaber 入口改造），按当前平台
+  调 `/api/scoresaber|/api/beatleader`（GET 缓存 / POST 拉取并计算动态水平）；
+  交叉验证按钮仅 ScoreSaber 平台显示（BeatLeader 无对应功能）
+- **个人色谱按平台独立**：各平台各自 top20-pp 计算 yellow 基准，缓存分平台
+  存储，切换数据源后色谱跟着换
+- BeatLeader API 客户端：`backend/beatleader.py`（字段与 scoresaber 对齐，
+  详见模块注释与 `docs/STAR_PALETTE_ALGORITHM.md`）
 
 ## 6. 前端要点
 
@@ -151,13 +210,32 @@ schema 迁移收敛在 `db/models.py`（新库即建全表，`_migrate` 幂等�
 - `_tmp/shot.ps1` 按窗口标题截图、`_tmp/pngstats.py` numpy 像素统计（无视觉模型时验证 UI 用）
 - 调试注意：窗口模式日志在 run.bat 控制台；`print` 到管道/重定向需 `flush=True`
 
-## 9. 常见坑速查
+## 9. 构建与发布约定（2026-08 用户决策，强制）
+
+> 目标：开发环境与用户版本行为一致，提前暴露用户版才会出现的问题。
+
+1. **构建后清理**：每次 PyInstaller 构建导出成功（`GitHub_Build\<版本>\` 归档生成）后
+   **必须删除临时构建内容**——`build/`（PyInstaller 中间产物）与 `dist/`（构建输出）。
+   `_tools/export_github_pkg.ps1` 末尾已自动清理；手动构建按此约定清理。
+   版本归档是构建的唯一留存；参考旧版代码一律从 `GitHub_Build\<版本>\saberlab-src\` 获取，
+   **不得依赖本地 dist/build**（它们随时会被删除）。
+2. **禁止回退引用构建**：代码/检测逻辑不得存在"回退到本地构建产物"的路径。
+   反例（已修复）：chro 曾回退 `../Local-ChroViewer/dist`，开发环境能加载而用户版缺失——
+   现检测唯一路径为第一方插件目录 `plugins/chro/`。
+3. **开发环境 = 用户版行为**：开发环境的检测路径/依赖解析/权限必须与发布版一致。
+   任何"开发便利"路径若与用户版不同，必须评估行为分叉；宁可先复制/放置产物到用户版
+   同款位置，也不加开发专属回退。
+
+## 10. 常见坑速查
 
 1. **venv 无 pip**：装包一律 `py -3 -m pip --python .venv\Scripts\python.exe install ...`
 2. **双模块**：main.py 不要直接 import backend.host 的模块级状态（见 §5.2，走 dialog.py）
 3. **WebView2 透明限制**：pywebview transparent 模式无窗体级透明（客户端区域=窗体底色），
    毛玻璃 A/B 方案因此不可行；DWM 背景板仅标题栏可见
-4. **chro 构建**：改 chro 源码后必须 `pnpm build`，否则后端挂载的是旧产物
+4. **chro 独立构建**：3D 回放是外部项目 Local-ChroViewer（仓库同级）；改其
+   源码后必须 `pnpm build`，并把构建产物放入第一方插件目录 `plugins/chro/`
+   ——**唯一检测路径，无回退**：产物不落该目录则 `/chro/` 不挂载、
+   详情页显示安装提示
 5. **打包**：`uvicorn.Config(app=app)` 传对象而非导入字符串（frozen 下不可解析）；
    `PROJECT_ROOT` 在 frozen 下 = exe 同目录
 6. **控制台编码**：中文输出在 GBK 控制台正常；管道重定向时确认编码/加 flush

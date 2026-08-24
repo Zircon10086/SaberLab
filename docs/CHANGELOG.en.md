@@ -2,6 +2,116 @@
 
 > Version format: `vX.Y (date)` — change summary. Parts of this document were described with AI assistance.
 
+## v2.0.0 (2026-08-23, pending release)
+
+> Version note: this release was originally planned as v1.6.0; it was bumped to
+> v2.0.0 because of the **plugin system**, an architecture-level change that
+> affects the directory layout, detection mechanism, packaging and license
+> boundaries.
+
+### Architecture: plugin system (plugins directory detection & loading)
+- **First-party plugin system added**: the root `plugins/` directory is detected
+  and loaded by convention — projects under different licenses or other complete
+  features can be shipped as plugins placed into `plugins/<name>/`, detected at
+  startup and integrated into the main flow (current mechanism: a directory with
+  an entry file is mounted/enabled). First-party only for now; **no third-party
+  plugin interface/specification**.
+- **First plugin = 3D replay (Local-ChroViewer)**: moved to an **independent
+  project** (`Local-ChroViewer/`, GPL-2.0-only, ChroViewer port); the SaberLab
+  repo no longer contains its source. Its build output loaded as a plugin from
+  `plugins/chro/` (the only detection path, no fallback — removing it disables
+  the viewer); releases that bundle it do so as separate works (mere
+  aggregation) and declare the external GPL-2.0 component
+- **Missing-plugin hint**: the detail-page "Replay" pane shows a grey install
+  hint (zh/en/ja, pointing at `plugins/chro/`) when the plugin is absent;
+  everything else keeps working
+
+### Dual-platform cloud data (ScoreSaber | BeatLeader)
+- **Data-source switch**: Settings → Player → "Cloud Data Source" card
+  (segmented control; saves and reloads immediately); `player.data_source`
+  config item (schema-driven)
+- **Shared player ID**: both platforms use the ScoreSaber ID auto-parsed from
+  BSOR replays (= Steam ID); no manual input
+- **Data isolation**: player profile / map stars / stars-pp index / personal
+  palette caches are all platform-scoped (`platform` column + composite PKs);
+  switching keeps the other platform's cached data untouched — switch back and
+  forth freely; legacy DBs migrate automatically (old rows marked
+  `scoresaber`, nothing lost)
+- **BeatLeader client** (`backend/beatleader.py`): profile/scores/full
+  per-map difficulty stars in one request; ranked = difficulty.status==3;
+  official OST maps (status 5/7) **show stars but never produce PP**
+- **Cloud data page**: nav renamed to "Cloud Data" (former ScoreSaber entry),
+  fetches and displays the ACTIVE platform (profile + recent scores + dynamic
+  level band); cross-validation is ScoreSaber-only; the "Fetch Data & Compute
+  Dynamic Level" button is shared
+- **One-click refresh / ranked update route by platform**; the personal
+  palette is cached per platform (yellow baseline and list colors follow the
+  active source)
+
+### Cut details (SliceDetails port)
+- The "Judgments" card became **"Cut Details"**: a 4×3 note grid (12 tiles) of
+  average scores; clicking a tile expands left/right **9-compass grids** in place
+  (grid shrinks to the top, selected tile highlighted)
+- **Pure-Python reimplementation** (`backend/analysis/slicedetails.py`):
+  direction mapping, circular angle means, effective denominators for
+  slider/burst special notes, exclusion of out-of-grid/non-standard events; no
+  DB writes — live parsing of the original `.bsor` (~19 ms)
+- **Signed cut offsets**: note center reconstruction (x/y grid formula +
+  z = cut-point z; self-consistent with BSOR cutDistanceToCenter to ~6 mm and
+  cross-validated against the SimSaber reverse-engineered motion model to
+  <1 mm / a few mm)
+- **Cut-trajectory visualization**: solid line = actual cut path, dashed line =
+  center reference (perfect path); their separation = signed offset. Note art
+  uses hand-drawn slicenote.svg / slicenote-any.svg (tinted by hand, rotated
+  with the direction for diagonal notes, dot variant for Any)
+- Score rows under each cell (avg score / note count); hover shows
+  pre/post/acc/offset details
+
+### Detail & overview UI
+- Hero KPIs extended: GOOD / MISS-BAD (same logic as list rows) / NOTE moved in,
+  with a vertical divider between NOTE and NPS; BOMB hidden
+- Timeline charts hide the fixed 0-100% y-axis ticks (grid lines, true-range
+  legends and hover values kept)
+- Overview pagination moved into the title row (same height as mode toggle /
+  search, centered); page refreshes fade items in one by one
+- Grid/compass animation system: centered shrink/grow (width +
+  align-self:center), compass container `0fr→1fr` height transition (monotonic
+  card height, no gap), pure-opacity fade-in delayed to align with the grid
+  animation (fades in place, independent of the equal-height layout)
+
+### Settings & visual
+- **Configurable star palette**: new "Star Palette" dropdown under Settings →
+  Player (schema-driven enum, localized option names). Tier definitions are
+  shipped by the backend via `/api/status` (`ui.star_palette` +
+  `ui.star_palettes`) and the frontend only applies them (falls back to the old
+  4 tiers when absent). The default "Community" palette has 5 tiers: <3 grey /
+  3–5 green / 5–7 yellow / 7–9 red / 9★+ purple. Palettes for different player
+  abilities can be added by extending the backend `STAR_PALETTES` only.
+- **Personal dynamic palette** (`player.star_palette = personal`): the yellow
+  baseline is computed from the player's own ScoreSaber records (valid
+  records sorted by PP descending, top 20 → Q25/Q50 mean, rounded to 0.25;
+  time deliberately ignored to exclude short-term form swings; NF excluded);
+  colors mean the map difficulty relative to that player's level
+  (grey/green/yellow/red/purple, ±0.5 / ±1.5 boundaries). The ScoreSaber page's
+  "Fetch Data & Compute Dynamic Level" button pulls scores and computes the
+  palette in one step; the result is cached locally (works offline; without a
+  cache it falls back to Community). The player info card shows the current
+  average level in yellow plus a five-color band (each segment labeled with
+  its range). Algorithm spec: `docs/STAR_PALETTE_ALGORITHM.md`. The player ID
+  is parsed from BSOR replays only (`player.scoresaber_id` config is now
+  deprecated and no longer read).
+
+### Data research
+- **SimSaber cross-validation** (MIT): three-way note position verification
+  (x identical / y mm-level / cutDistance 0.1 mm self-consistent) + scoring
+  reconciliation (official port matches stored scores per note)
+- Tooling: `_tools/start_headless_edge.ps1` (CDP instance),
+  `_tmp/verify_v160.mjs` (37+ assertion UI regression)
+
+### Tests
+- New `tests/test_slice_details.py` (23 cases: tile/direction mapping, circular
+  means, special notes, signed offsets, exclusions); 128 unit tests pass
+
 ## v1.5.0 (2026-08-23)
 
 ### Analysis engine: fixed time windows retired

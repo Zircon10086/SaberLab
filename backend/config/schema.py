@@ -81,6 +81,31 @@ SETTINGS_SCHEMA: list[dict] = [
         "sensitive": False,
         "group": "玩家",
     },
+    {
+        "key": "player.star_palette",
+        "label": "星级色谱",
+        "type": "enum",
+        "enum": ["community", "personal"],
+        "description": "按星级为 Replay 条目与详情页 STARS 数字配色的方案：社区惯例（固定阈值）或个人动态（按玩家自己的 ScoreSaber 成绩计算黄色基准，颜色 = 曲目难度相对玩家当前水平的位次）。个人动态在 ScoreSaber 页点击「拉取数据并计算动态水平」后生效，离线时沿用上次结果；从未拉取过（无缓存）时自动回退社区惯例",
+        "restart_required": False,
+        "required": False,
+        "sensitive": False,
+        "group": "玩家",
+        "default": "community",
+    },
+    {
+        "key": "player.data_source",
+        "label": "云端数据源",
+        "type": "enum",
+        "enum": ["scoresaber", "beatleader"],
+        "description": "云端数据来源：ScoreSaber 或 BeatLeader（玩家 ID 两平台通用，从 BSOR 自动解析；切换后另一平台已缓存的数据保留不动，可随时切回）。设置页「玩家」栏的切换按钮即此配置",
+        "restart_required": False,
+        "required": False,
+        "sensitive": False,
+        "group": "玩家",
+        "default": "scoresaber",
+        "hidden": True,
+    },
 
     # ---------- analysis ----------
     {
@@ -146,12 +171,12 @@ SETTINGS_SCHEMA: list[dict] = [
         "key": "server.port",
         "label": "端口",
         "type": "integer",
-        "description": "FastAPI 监听端口（默认 8787）",
+        "description": "FastAPI 监听端口（默认 6980）",
         "restart_required": True,
         "required": False,
         "sensitive": False,
         "group": "服务器",
-        "default": 8787,
+        "default": 6980,
     },
 
     # ---------- AI ----------
@@ -255,6 +280,33 @@ SETTINGS_SCHEMA: list[dict] = [
         "default": 30.0,
     },
 ]
+
+
+# Star rating color palettes (player.star_palette). Each palette is a list of
+# tiers in ascending `max` order; a replay's stars pick the first tier where
+# stars < max. `max: None` = unbounded (top tier). `cls` is a CSS class name
+# applied to the STARS number (defined in frontend/style.css). The palette is
+# shipped to the frontend via /api/status so display logic stays single-source.
+STAR_PALETTES: list[dict] = [
+    {
+        "id": "community",
+        "tiers": [
+            {"max": 3.0, "cls": "star-gray"},    # beginner / low difficulty
+            {"max": 5.0, "cls": "star-green"},   # medium
+            {"max": 7.0, "cls": "star-yellow"},  # hard
+            {"max": 9.0, "cls": "star-red"},     # expert
+            {"max": None, "cls": "star-purple"}, # top tier (9★+)
+        ],
+    },
+]
+
+
+def get_star_palette(palette_id: str) -> dict | None:
+    """Return a palette definition by id (None when unknown)."""
+    for p in STAR_PALETTES:
+        if p["id"] == palette_id:
+            return p
+    return None
 
 
 def get_schema() -> list[dict]:

@@ -83,14 +83,14 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 
 | File | Description | Size |
 | --- | --- | --- |
-| [SaberLab-v1.5.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v1.5.0/SaberLab-v1.5.0-win64.zip) | **User edition**: all dependencies bundled (Python runtime + chro 3D viewer). Unzip and double-click to run | ~45 MB |
+| [SaberLab-v2.0.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.0.0/SaberLab-v2.0.0-win64.zip) | **User edition**: all dependencies bundled (Python runtime + chro 3D viewer). Unzip and double-click to run | ~45 MB |
 | [Source (saberlab-src)](https://github.com/Zircon10086/SaberLab) | **Developer edition**: repository source; install dependencies yourself as described under "Build from Source" | — |
 
 > Older versions are available on the [Releases page](https://github.com/Zircon10086/SaberLab/releases).
 
 **First run**:
 
-1. Double-click `SaberLab.exe` — a console window and the app window open.
+1. Double-click `SaberLab.exe` — the app window opens.
 2. Go to "Settings → Game Path" and click "Choose folder…" to select your Beat Saber root directory — Replay/Map/SongCore paths are derived and validated automatically, and saved on success.
 3. Optional: configure an AI API key (`.env`); without one you still get algorithm-based basic reports.
 
@@ -169,7 +169,7 @@ SaberLab itself is released under **[GPL-3.0-or-later](LICENSE)**.
 
 ## AI Use Disclosure
 
-This project is developed with the assistance of **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)**.
+This project is developed with the assistance of **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)**. We maintain full transparency regarding the integration of AI tools in our workflow.
 
 ### What AI Did
 * **Code Implementation**: Used DeepSeek Harness for boilerplate generation, localized code writing, and routine implementation tasks based on the provided architecture.
