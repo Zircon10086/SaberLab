@@ -72,7 +72,7 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 | **Standalone window** | Built-in WebView2 window with an acrylic background; relaunch replaces a prior SaberLab instance on 6980, while unrelated port conflicts relocate safely |
 | **3D replay** | A ChroViewer port rendering maps/replays/environments fully locally, from local data only |
 | **AI coach** | Structured metrics interpreted by an LLM for personalized guidance; can be disabled for rule-based reports (Settings → AI) |
-| **Online sync** | ScoreSaber star/PP cache rooted at local maps, with 429 rate-limit backoff and retry |
+| **Cross-Platform** | Supports ScoreSaber and BeatLeader. star/PP cache rooted at local maps, with 429 rate-limit backoff and retry |
 | **Completion status** | Automatically detects mid-play exits / NF (Fail) / duration fallback — clear at a glance in lists and details |
 
 ---
