@@ -25,6 +25,10 @@ DERIVED_PATHS = {
     "custom_levels_dir": "Beat Saber_Data/CustomLevels",
     "replay_dir": "UserData/BeatLeader/Replays",
     "songcore_cache": "UserData/SongCore/SongHashData.dat",
+    # Optional second replay source (LocalLeaderboard mod, 2026-09): derived
+    # alongside the required paths, but NEVER required — zero-config feature,
+    # enabled automatically when the directory exists.
+    "local_leaderboard_dir": "UserData/LocalLeaderboard/Replays",
 }
 
 
@@ -112,9 +116,13 @@ def check_paths(instance_root: str) -> list[PathStatus]:
     for key, rel in DERIVED_PATHS.items():
         p = root / rel
         exists = p.exists()
+        note = ""
+        if not exists:
+            note = "未找到，请确认根目录正确"
+            if key == "local_leaderboard_dir":
+                note = "未找到（可选：LocalLeaderboard 补充扫描源，无该 mod 可忽略）"
         results.append(PathStatus(key, rel, normalize_path(str(p)),
-                                  exists=exists, ok=exists,
-                                  note="" if exists else "未找到，请确认根目录正确"))
+                                  exists=exists, ok=exists, note=note))
     return results
 
 
@@ -265,12 +273,66 @@ class ConfigService:
             cur = mapping.get(parts[1], "")
         return cur
 
+    def _effective_value(self, item: dict, raw):
+        """Normalize a stored or submitted value to the schema type for comparison.
+
+        Stored raw yaml values may be None (empty field) or already typed;
+        submitted values arrive as strings from the settings form. Both sides
+        are coerced so "50" vs 50 compares equal (settings save must only count
+        actually-changed keys — the form submits every visible field).
+        """
+        t = item.get("type")
+        if raw is None:
+            raw = False if t == "boolean" else 0 if t in ("integer", "float") else ""
+        try:
+            if t == "integer":
+                return int(raw)
+            if t == "float":
+                return float(raw)
+            if t == "boolean":
+                return bool(raw)
+        except (TypeError, ValueError):
+            return raw
+        if t == "enum":
+            return str(raw)
+        return str(raw)
+
+    def changed_keys(self, updates: dict) -> list[str]:
+        """Keys in `updates` whose coerced value differs from the stored config.
+
+        The settings form submits every visible field on each save; side effects
+        keyed on submission (analysis cache reset, restart-required hint) must
+        fire only for values that actually changed, not for unchanged resubmits.
+        Secret items are always treated as changed (they are only sent when the
+        user typed a new value; the stored one is unreadable by design).
+        """
+        from .schema import get_schema
+        schema_by_key = {it["key"]: it for it in get_schema()}
+        raw = self._read_raw()
+        changed = []
+        for k, v in updates.items():
+            item = schema_by_key.get(k)
+            if item is None:
+                continue
+            if item.get("type") == "secret":
+                changed.append(k)
+                continue
+            parts = k.split(".")
+            old = (raw.get(parts[0]) or {}).get(parts[1])
+            if self._effective_value(item, old) != self._effective_value(item, v):
+                changed.append(k)
+        return changed
+
     def save_values(self, updates: dict) -> dict:
         """Batch-save config items (atomic write-back).
 
         updates: {key: value}; only keys present in the schema are allowed.
         secret-type items are written to .env (not config.yaml).
-        Returns {saved, restart_required, errors: {key: msg}}.
+        Returns {saved, restart_required, changed, errors: {key: msg}}.
+
+        `changed` lists the keys whose value actually differs from the stored
+        config; callers must key side effects (analysis cache reset,
+        restart-required hint) on it — the form resubmits unchanged fields.
         """
         from .schema import get_schema
         schema_by_key = {it["key"]: it for it in get_schema()}
@@ -278,6 +340,8 @@ class ConfigService:
         if unknown:
             return {"saved": False,
                     "error": f"未知配置项: {', '.join(unknown)}"}
+
+        changed = self.changed_keys(updates)
 
         # Split secrets from normal items
         secrets = {}
@@ -312,10 +376,9 @@ class ConfigService:
             if err:
                 return {"saved": False, "error": err}
 
-        # restart_required = any changed item requires a restart
-        restart = any(schema_by_key[k].get("restart_required")
-                      for k in updates)
-        return {"saved": True, "restart_required": restart,
+        # restart_required = only among the actually-changed keys
+        restart = any(schema_by_key[k].get("restart_required") for k in changed)
+        return {"saved": True, "restart_required": restart, "changed": changed,
                 "message": "设置已保存" + ("，重启 SaberLab 后生效。" if restart else "。")}
 
     def _coerce(self, item: dict, val):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -19,6 +20,24 @@ from .config import Config
 from .db.repository import Repository
 from .maps.resolver import MapResolver
 from .analysis.engine import analyze_replay
+
+# LocalLeaderboard stores the same session as BeatLeader but with a `_<tick>`
+# suffix: `<player>-<song>-<diff>-<mode>-<hash>-<ts>_<tick>.bsor` (the tick is
+# a high-resolution timestamp). Normalizing = dropping the tick (2026-09,
+# second replay source, HANDOFF §4.25 待办 2).
+_LL_NAME_RE = re.compile(r"^(\d+)-(.+)-(\d{10})(_\d+)?\.bsor$")
+
+
+def normalize_ll_replay_name(name: str) -> str | None:
+    """Drop a LocalLeaderboard `_<tick>` suffix (BL-style replay name).
+
+    Returns None when the name is not a standard LL/BL replay name (the
+    caller then skips the file — no name to match by).
+    """
+    m = _LL_NAME_RE.match(name)
+    if not m:
+        return None
+    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}.bsor"
 
 
 def _now() -> str:
@@ -98,10 +117,12 @@ class ReplayPipeline:
         return out
 
     # ---------- single file ----------
-    def process_file(self, path: str, run_ai: bool = False,
-                     ai_client=None, build_context=None,
-                     force: bool = False, lang: str = "zh-CN") -> dict:
-        """Parse + match map + analyze + persist. With force=True, skip the already-analyzed dedup."""
+    def process_file(self, path: str, force: bool = False) -> dict:
+        """Parse + match map + analyze + persist. With force=True, skip the already-analyzed dedup.
+
+        Never generates reports (v2.1.0 decision) — reports are created on
+        demand via /api/ai/analyze/{id} (ai/report.run_ai_report).
+        """
         p = pathlib.Path(path)
         if not p.exists():
             return {"status": "error", "error": f"文件不存在: {path}"}
@@ -222,16 +243,11 @@ class ReplayPipeline:
             "profile_id": profile_id,
         }
 
-        # AI report (optional)
-        if run_ai and ai_client is not None and build_context is not None:
-            try:
-                from .ai import run_ai_report
-                rep = run_ai_report(self.repo, self.cfg, rid, ai_client,
-                                    build_context, lang=lang)
-                out["ai_report"] = {"status": rep.get("status"),
-                                    "report_id": rep.get("report_id")}
-            except Exception as e:  # noqa: BLE001
-                out["ai_report"] = {"status": "error", "error": str(e)}
+        # No reports here (v2.1.0 decision): the analysis pipeline never
+        # generates reports. Historically batch runs called the LLM per replay,
+        # which made a post-clear full batch take hours (345 plays x ~20s).
+        # Reports are generated ONLY on demand via /api/ai/analyze/{id}
+        # (ai/report.run_ai_report — the settings toggle decides LLM vs rule).
         return out
 
     # ---------- layered ingest (layered analysis strategy §analysis-strategy) ----------
@@ -333,10 +349,11 @@ class ReplayPipeline:
                 "difficulty": info.difficulty, "map_status": map_status,
                 "completion_status": completion, "score": info.score}
 
-    def analyze_ingested(self, replay_id: str, run_ai: bool = False,
-                         ai_client=None, build_context=None,
-                         lang: str = "zh-CN") -> dict:
-        """Full analysis of an already-ingested (pending) Replay (lazy trigger from the detail page). Idempotent."""
+    def analyze_ingested(self, replay_id: str) -> dict:
+        """Full analysis of an already-ingested (pending) Replay (lazy trigger from the detail page). Idempotent.
+
+        Never generates reports — see process_file.
+        """
         row = self.repo.get_replay(replay_id)
         if not row:
             return {"status": "error", "error": f"Replay 不在库中: {replay_id}",
@@ -348,9 +365,7 @@ class ReplayPipeline:
         # No force: a pending snapshot is overwritten by the analysis; when
         # already analyzed, process_file returns early via content dedup
         # (idempotent — repeatedly opening the detail page never recomputes).
-        return self.process_file(path, run_ai=run_ai, ai_client=ai_client,
-                                 build_context=build_context, force=False,
-                                 lang=lang)
+        return self.process_file(path, force=False)
 
     def _ensure_profile(self, replay) -> Optional[str]:
         co = replay.controller_offsets
@@ -382,9 +397,8 @@ class ReplayPipeline:
         return pid
 
     # ---------- batch ----------
-    def analyze_latest(self, run_ai: bool = False, ai_client=None,
-                       build_context=None, lang: str = "zh-CN") -> dict:
-        """Design doc §18: scan -> pick newest unanalyzed -> parse -> analyze -> report."""
+    def analyze_latest(self) -> dict:
+        """Design doc §18: scan -> pick newest unanalyzed -> parse -> analyze. No reports."""
         scan = self.scan()
         if not scan["exists"]:
             return {"status": "error", "error": f"Replay 目录不存在: {scan['replay_dir']}"}
@@ -404,17 +418,18 @@ class ReplayPipeline:
                     "total_files": scan["total_files"]}
         candidates.sort(key=lambda c: c["mtime"], reverse=True)
         target = candidates[0]
-        res = self.process_file(target["path"], run_ai=run_ai,
-                                ai_client=ai_client, build_context=build_context,
-                                lang=lang)
+        res = self.process_file(target["path"])
         res["pending_remaining"] = len(candidates) - 1
         res["total_files"] = scan["total_files"]
         return res
 
-    def analyze_all_new(self, progress_cb=None, limit: int = 0,
-                        run_ai: bool = False, ai_client=None,
-                        build_context=None, lang: str = "zh-CN") -> list[dict]:
-        """Background precompute: analyze files newly found by scan + all ingested-but-pending replays."""
+    def analyze_all_new(self, progress_cb=None, limit: int = 0) -> list[dict]:
+        """Background precompute: analyze files newly found by scan + all ingested-but-pending replays.
+
+        Never generates reports (v2.1.0 decision): a post-clear full batch used
+        to call the LLM once per replay (~20s each, hours for 300+ plays).
+        Reports are generated on demand from the detail page instead.
+        """
         scan = self.scan()
         candidates = scan["new"] + scan["changed"]
         # Also add ingested-but-unanalyzed (pending) entries — the core target
@@ -437,10 +452,7 @@ class ReplayPipeline:
         for i, c in enumerate(candidates):
             if progress_cb:
                 progress_cb(i + 1, len(candidates), pathlib.Path(c["path"]).name)
-            results.append(self.process_file(c["path"], run_ai=run_ai,
-                                             ai_client=ai_client,
-                                             build_context=build_context,
-                                             lang=lang))
+            results.append(self.process_file(c["path"]))
         return results
 
     def ingest_all_new(self, progress_cb=None, limit: int = 0) -> list[dict]:
@@ -461,3 +473,83 @@ class ReplayPipeline:
                 progress_cb(i + 1, len(candidates), pathlib.Path(c["path"]).name)
             results.append(self.ingest_file(c["path"]))
         return results
+
+    # ---------- second replay source: LocalLeaderboard (2026-09) ----------
+    def ingest_local_leaderboard(self) -> dict:
+        """Ingest the optional LocalLeaderboard replay directory (second
+        read-only source; zero-config — enabled when the derived
+        `UserData/LocalLeaderboard/Replays` dir exists).
+
+        The two mods store one copy per session (LL keeps no exit replays),
+        so the LL dir doubles as a safety copy:
+        - row exists + its own file is gone → repair the row to point at the
+          LL twin (HANDOFF §4.25 恢复场景; analysis data untouched — same
+          content, the mod_VERSION shows the twins are byte-identical today,
+          and matching is by session key anyway);
+        - session not in the DB + BL twin exists → skip (the normal BL scan
+          owns the session);
+        - session not in the DB + no BL twin → LL-only replay, ingest as a
+          normal row.
+
+        Dedupe is by session (player + map_hash + play timestamp), not by
+        content hash: content-hash dedupe would double-count a session if the
+        two mods ever start writing different payloads.
+        Returns per-file results (for the ingest task tally) + counts.
+        """
+        ll_dir = pathlib.Path(self.cfg.local_leaderboard_dir or "")
+        empty = {"dir": str(ll_dir), "exists": False, "files": 0,
+                 "ingested": 0, "duplicate": 0, "repaired": 0, "skipped": 0,
+                 "results": []}
+        if not ll_dir.exists():
+            return empty
+        bl_dir = pathlib.Path(self.cfg.replay_dir)
+        bl_names = ({p.name for p in bl_dir.glob("*.bsor")}
+                    if bl_dir.exists() else set())
+        try:
+            files = sorted(ll_dir.glob("*.bsor"),
+                           key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return empty
+        out = {"dir": str(ll_dir), "exists": True,
+               "files": len(files), "ingested": 0, "duplicate": 0,
+               "repaired": 0, "skipped": 0, "results": []}
+        for f in files:
+            norm = normalize_ll_replay_name(f.name)
+            if not norm:
+                out["skipped"] += 1
+                continue
+            if (bl_dir / norm).exists():
+                # The BL twin is present — the normal BL scan owns the
+                # session; do not create a second row or touch paths here.
+                out["duplicate"] += 1
+                continue
+            try:
+                meta = parse_metadata_only(f)
+            except (BsorError, UnsupportedFormatError, ValueError):
+                out["skipped"] += 1
+                continue
+            row = self.repo.get_replay_by_session(
+                meta.info.player_id, meta.info.map_hash.upper(),
+                meta.info.timestamp_int)
+            if row:
+                old = row.get("file_path")
+                if old and pathlib.Path(old).exists():
+                    out["duplicate"] += 1     # row file present; LL copy redundant
+                else:
+                    # Repair: the row's original .bsor is gone, the LL twin
+                    # survives — point the row at it (ingest is add-only, so
+                    # the row itself must be kept).
+                    self.repo.refresh_replay_file(row["replay_id"], str(f))
+                    out["repaired"] += 1
+                continue
+            # LL-only session (no BL twin): ingest as a normal row
+            res = self.ingest_file(str(f))
+            out["results"].append(res)
+            status = res.get("status")
+            if status in ("parsed", "analyzed"):
+                out["ingested"] += 1
+            elif status == "duplicate":
+                out["duplicate"] += 1
+            else:
+                out["skipped"] += 1
+        return out

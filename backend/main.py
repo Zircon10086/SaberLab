@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pathlib
 import sys
 import threading
@@ -25,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend.config import Config, load_config, PROJECT_ROOT
+from backend import APP_INSTANCE_ID
 from backend.config.schema import STAR_PALETTES, get_star_palette
 from backend.config.service import ConfigService, check_paths
 from backend.analysis.player_palette import build_tiers, classify_player
@@ -35,7 +37,6 @@ from backend.services.enrichment import EnrichmentService
 from backend.watcher import ReplayPipeline
 from backend.analysis.compare import compare_metrics
 from backend.ai.provider import LLMClient
-from backend.ai.context import build_context
 from backend.ai.report import run_ai_report
 import backend.scoresaber as scoresaber
 
@@ -50,11 +51,13 @@ enrichment = EnrichmentService(repo)
 
 def reload_runtime_config() -> None:
     """Hot-reload the runtime config (called after settings save): reload
-    config.yaml and sync to resolver/pipeline; path settings apply at once."""
+    config.yaml and sync to resolver/pipeline/llm; path settings apply at once,
+    AI settings (incl. the non-restart temperature/max_tokens) follow too."""
     global cfg
     cfg = load_config()
     resolver.update_paths(cfg.custom_levels_dir, cfg.songcore_cache)
     pipeline.update_config(cfg)
+    llm.update_config(cfg)
 
 
 def _scoresaber_id() -> str:
@@ -78,6 +81,21 @@ def _path_ok(p: str) -> bool:
         return bool(p) and pathlib.Path(p).exists()
     except OSError:
         return False
+
+
+def _attach_file_available(rows: list[dict]) -> None:
+    """Attach file_available (server-side read-only presence check) to replay dicts.
+
+    Ingest is add-only (2026-09 decision): DB rows can outlive their original
+    .bsor files, so the UI must degrade explicitly instead of showing generic
+    "no data" — persisted data (timeline) still renders, raw-file features
+    (slice details / 3D replay / re-analysis) show an unavailable reason.
+    The flag is computed here so the frontend never judges file existence
+    from local paths.
+    """
+    for row in rows:
+        fp = row.get("file_path")
+        row["file_available"] = bool(fp) and pathlib.Path(fp).exists()
 
 
 def _require_replay_dir() -> None:
@@ -116,7 +134,7 @@ def _require_db_populated() -> None:
             400, "数据库为空：请先点击总览「⚡ 一键刷新」完成首次扫描"
                  "（入库 + 谱面库 + NPS + 联网星级同步）")
 
-app = FastAPI(title="SaberLab", version="1.5.0",
+app = FastAPI(title="SaberLab", version="2.1.0",
               description="Beat Saber 本地 Replay 分析实验室")
 
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
@@ -205,20 +223,22 @@ def _wait_ingest_done(kind: str):
         time.sleep(0.5)
 
 
-def _run_batch(limit: int, run_ai: bool, lang: str = "zh-CN"):
+def _run_batch(limit: int):
     try:
         _wait_ingest_done("batch")
         def cb(i, n, name):
             _set_task("batch", done=i, total=n, current=name)
-        results = pipeline.analyze_all_new(progress_cb=cb, limit=limit,
-                                           run_ai=run_ai, ai_client=llm,
-                                           build_context=build_context, lang=lang)
+        # No reports (v2.1.0 decision): the batch used to call the LLM once per
+        # replay (~20s each — hours after a cache clear). Reports are generated
+        # on demand from the detail page via /api/ai/analyze/{id}.
+        results = pipeline.analyze_all_new(progress_cb=cb, limit=limit)
         _set_task("batch", running=False, results=results, current="")
     except Exception as e:  # noqa: BLE001
         _set_task("batch", running=False, error=f"{e}\n{traceback.format_exc()}")
 
 
-def _run_ranked_update(only_missing: bool = False):
+def _run_ranked_update(only_missing: bool = False,
+                       refresh_player: bool = False):
     """Background sync: rooted at local maps, batch-fetch the ACTIVE platform's
     leaderboard metadata (scoresaber | beatleader, player.data_source).
 
@@ -261,6 +281,15 @@ def _run_ranked_update(only_missing: bool = False):
                 repo.upsert_ranked_cache(mh, df, info.get("stars"),
                                          info.get("pp"), now, platform=platform)
         stats["pp_indexed"] = len(idx)
+
+        # One-click refresh is the user's complete sync action: after map
+        # leaderboards and the per-player score index, also refresh the active
+        # platform's profile/recent scores and recompute the personal palette.
+        # Keep this in the same task to avoid parallel duplicate API traffic.
+        if refresh_player:
+            _set_task("ranked_update", current="更新玩家数据与动态水平…")
+            _cloud_page_refresh(platform)
+            stats["player_refreshed"] = True
 
         _set_task("ranked_update", running=False, current="",
                   results=[{"kind": "ranked_update", **stats}])
@@ -373,6 +402,8 @@ def api_status():
     personal = _personal_palette_entry(platform)
     return {
         "ok": True,
+        "app_instance": APP_INSTANCE_ID,
+        "pid": os.getpid(),
         "platform": platform,   # active cloud data source: scoresaber | beatleader
         "config": {
             "replay_dir": cfg.replay_dir,
@@ -406,56 +437,69 @@ def api_status():
 
 
 # ---------- scan & analyze ----------
+# DEPRECATED (2026-08): not used by the frontend (scan detail is internal
+# to the pipeline now); kept for API compatibility, intentional no-delete.
 @app.post("/api/scan")
 def api_scan():
     return pipeline.scan()
 
 
 class AnalyzeBody(BaseModel):
+    """Body of the deprecated analyze endpoints and /api/refresh/all.
+
+    run_ai/lang are accepted for backward compatibility but no longer have any
+    effect: analysis never generates reports (v2.1.0 decision) — reports come
+    exclusively from /api/ai/analyze/{id}.
+    """
     run_ai: bool = True
-    lang: str = "zh-CN"   # UI language code: output language for batch-analysis AI reports
+    lang: str = "zh-CN"
 
 
+# DEPRECATED (2026-08): not used by the frontend (one-click refresh covers it);
+# kept for API compatibility, intentional no-delete.
 @app.post("/api/analyze/latest")
 def api_analyze_latest(body: AnalyzeBody | None = None):
-    # Reports are always generated; whether the LLM is called is decided by
-    # the settings toggle ai.ai_report_enabled inside run_ai_report (2026-08).
+    # No reports (v2.1.0 decision): analysis never generates them; reports are
+    # created on demand via /api/ai/analyze/{id}.
     _require_db_populated()   # empty-DB guard (all tasks rejected except one-click refresh)
     if _task_running():
         raise HTTPException(409, "已有批量分析任务在运行")
-    res = pipeline.analyze_latest(run_ai=True, ai_client=llm,
-                                  build_context=build_context,
-                                  lang=(body.lang if body else "zh-CN"))
+    res = pipeline.analyze_latest()
     return res
 
 
+# DEPRECATED (2026-08): not used by the frontend (one-click refresh covers it);
+# kept for API compatibility, intentional no-delete.
 @app.post("/api/analyze/all")
 def api_analyze_all(body: AnalyzeBody | None = None, limit: int = Query(0)):
     _require_db_populated()   # empty-DB guard (all tasks rejected except one-click refresh)
     _require_replay_dir()   # reject directly when path is unavailable (frontend already guards, backend fallback)
-    _start_task("batch", _run_batch, (limit, True, body.lang if body else "zh-CN"))
+    _start_task("batch", _run_batch, (limit,))
     return {"status": "started"}
 
 
+# DEPRECATED (2026-08): not used by the frontend; kept for API compatibility,
+# intentional no-delete.
 @app.post("/api/analyze/by-path")
-def api_analyze_by_path(path: str = Query(...)):
-    return pipeline.process_file(path, run_ai=True, ai_client=llm,
-                                 build_context=build_context)
+def api_analyze_by_path(path: str = Query(...), lang: str = Query("zh-CN")):
+    return pipeline.process_file(path)
 
 
 @app.post("/api/analyze/{replay_id}")
-def api_reanalyze(replay_id: str):
+def api_reanalyze(replay_id: str, lang: str = Query("zh-CN")):
     row = repo.get_replay(replay_id)
     if not row:
         raise HTTPException(404, "replay 不存在")
     if not row.get("file_path") or not pathlib.Path(row["file_path"]).exists():
         raise HTTPException(410, "原始 .bsor 文件已不存在，无法重新分析")
-    # force re-analysis (bypass content dedup)
-    res = pipeline.process_file(row["file_path"], run_ai=True, ai_client=llm,
-                                build_context=build_context, force=True)
+    # force re-analysis (bypass content dedup); no reports — generate them
+    # on demand via /api/ai/analyze/{id}
+    res = pipeline.process_file(row["file_path"], force=True)
     return res
 
 
+# DEPRECATED (2026-08): not used by the frontend (one-click refresh covers it);
+# kept for API compatibility, intentional no-delete.
 @app.post("/api/ingest/all")
 def api_ingest_all(limit: int = Query(0)):
     """Lightweight ingest of all new/changed replays (metadata snapshot,
@@ -477,6 +521,12 @@ def _run_ingest(limit: int):
         def cb(i, n, name):
             _set_task("ingest", done=i, total=n, current=name)
         results = pipeline.ingest_all_new(progress_cb=cb, limit=limit)
+        # Second replay source (LocalLeaderboard, 2026-09, zero-config):
+        # ingests LL-only sessions and repairs rows whose original .bsor is
+        # gone by pointing them at the surviving LL twin. Per-file results
+        # join the common tally; counts ride along for the done toast.
+        ll = pipeline.ingest_local_leaderboard()
+        results.extend(ll.pop("results", []))
         counts: dict = {"parsed": 0, "duplicate": 0, "error": 0,
                         "unsupported": 0, "total": len(results)}
         for r in results:
@@ -485,6 +535,7 @@ def _run_ingest(limit: int):
         # take the config path directly (previously pipeline.scan() ran a full directory glob +
         # table-wide known_file_states(), just to echo a single string, P1-3.5)
         counts["replay_dir"] = cfg.replay_dir
+        counts["local_leaderboard"] = ll
         _set_task("ingest", running=False, current="",
                   results=[{"kind": "ingest", **counts}])
     except Exception as e:  # noqa: BLE001
@@ -496,10 +547,10 @@ def api_replay_lazy_analyze(replay_id: str):
     """Detail-page lazy load: full analysis for a pending replay (idempotent,
     instant return when already analyzed).
 
-    No AI report (run_ai=False); AI reports generated on demand via /api/ai/analyze/{id}.
+    Never generates reports (v2.1.0 decision); reports are generated on demand
+    via /api/ai/analyze/{id}.
     """
-    res = pipeline.analyze_ingested(replay_id, run_ai=False,
-                                    ai_client=llm, build_context=build_context)
+    res = pipeline.analyze_ingested(replay_id)
     if res.get("status") == "error":
         raise HTTPException(422, res.get("error", "分析失败"))
     return res
@@ -521,6 +572,7 @@ def api_replays(page: int = Query(1, ge=1),
     if flat:
         replays = repo.list_replays(limit=limit, map_hash=map_hash, days=days)
         enrichment.enrich_flat(replays, _active_platform())
+        _attach_file_available(replays)
         return replays
     if mode == "count":
         page_size = 20
@@ -530,11 +582,14 @@ def api_replays(page: int = Query(1, ge=1),
         page = max(1, min(page, pages)) if pages else 1
         chunk = replays[(page - 1) * page_size: page * page_size]
         enrichment.enrich_flat(chunk, _active_platform())
+        _attach_file_available(chunk)
         return {"replays": chunk, "total": total, "page": page,
                 "pages": pages, "mode": "count"}
     data = repo.list_replays_by_day(page=page, map_hash=map_hash, days=days)
     # attach beatmap_key + ranked stars + pp (services/enrichment.py, cached)
     enrichment.enrich(data.get("days", []), _active_platform())
+    for day in data.get("days", []):
+        _attach_file_available(day.get("replays", []))
     return data
 
 
@@ -557,9 +612,13 @@ def api_replay_detail(replay_id: str):
         enrichment.enrich_flat(hist, _active_platform())
     # the current replay itself carries nps / stars / pp
     enrichment.enrich_flat([row], _active_platform())
+    _attach_file_available([row])
+    _attach_file_available(row.get("history_same_map", []))
     return row
 
 
+# Not used by the frontend (the detail response embeds metrics); kept for API
+# completeness.
 @app.get("/api/replays/{replay_id}/metrics")
 def api_replay_metrics(replay_id: str):
     return repo.get_metrics(replay_id)
@@ -639,12 +698,55 @@ def api_replay_slice_details(replay_id: str):
                                  left_handed=replay.info.left_handed)
 
 
+@app.get("/api/replays/{replay_id}/pp-preview")
+def api_replay_pp_preview(replay_id: str):
+    """Accuracy-preview for one replay (v2.1.0): the map difficulty's PP as a
+    function of accuracy, replicated from ScoreSaber's formula
+    pp = maxPP * curve(acc) (see analysis/pp_predict.py; deterministic, no
+    network at request time — the curve is embedded).
+
+    Platform-scoped: ScoreSaber only (BeatLeader uses a different, open-source
+    formula — not replicated here). The ranked-cache pp is informational: the
+    prediction itself only needs the leaderboard's maxPP, so it works for every
+    ranked map, including ones whose pp is outside the player's top-100 sync.
+    """
+    from backend.analysis import pp_predict
+    from backend.services.enrichment import pick_leaderboard
+    if _active_platform() != "scoresaber":
+        raise HTTPException(400, "PP 预测目前仅支持 ScoreSaber 数据源（BeatLeader 公式不同，暂未支持）")
+    row = repo.get_replay(replay_id)
+    if not row:
+        raise HTTPException(404, "replay 不存在")
+    mh = (row.get("map_hash") or "").upper()
+    diff = row.get("difficulty") or ""
+    lbs = [lb for lb in repo.get_ss_leaderboards_by_hash(mh)
+           if (lb.get("difficulty_name") or "") == diff]
+    lb = pick_leaderboard(lbs)
+    if not lb or not lb.get("ranked") or not lb.get("max_pp"):
+        raise HTTPException(404, "该谱面在 ScoreSaber 上不是 ranked 谱面（或星级数据未同步，请先联网更新）")
+    max_pp = float(lb["max_pp"])
+    # The preview explores PP at the accuracy shown on this replay. NF's
+    # effective-score penalty affects its awarded/list PP, but must not move
+    # the preview slider away from the visible replay accuracy.
+    acc = row.get("accuracy")
+    cached = repo.get_ranked_cache(mh, diff, platform="scoresaber")
+    payload = pp_predict.preview_payload(max_pp, default_acc=acc)
+    payload.update({
+        "song_name": row.get("song_name"),
+        "difficulty": diff,
+        "stars": lb.get("stars"),
+        "replay_pp": cached.get("pp") if cached else None,
+    })
+    return payload
+
+
 @app.get("/api/history")
 def api_history(map_hash: Optional[str] = None, days: Optional[int] = None,
                 limit: int = Query(200, le=2000)):
     replays = repo.list_replays(limit=limit, map_hash=map_hash, days=days)
     # attach beatmap_key / nps / stars / pp (the history list's highlight search needs the key)
     enrichment.enrich_flat(replays, _active_platform())
+    _attach_file_available(replays)
     return replays
 
 
@@ -712,6 +814,7 @@ def api_map_package(map_hash: str):
 
 
 # ---------- maps ----------
+# Not used by the frontend; kept for API completeness.
 @app.get("/api/maps")
 def api_maps():
     return repo.list_maps()
@@ -729,6 +832,8 @@ def _run_map_scan():
         _set_task("map_scan", running=False, error=f"{e}\n{traceback.format_exc()}")
 
 
+# DEPRECATED (2026-08): not used by the frontend (one-click refresh covers it);
+# kept for API compatibility, intentional no-delete.
 @app.post("/api/maps/rescan")
 def api_maps_rescan():
     _require_db_populated()   # empty-DB guard (map scan: use "One-click Refresh")
@@ -737,6 +842,7 @@ def api_maps_rescan():
     return {"status": "started"}
 
 
+# Not used by the frontend; kept for API completeness.
 @app.get("/api/maps/{map_hash}")
 def api_map_detail(map_hash: str):
     m = repo.get_map(map_hash)
@@ -777,6 +883,7 @@ class ProfileBody(BaseModel):
     notes: str = ""
 
 
+# API-only by design (README: A/B experiment records); no UI surface.
 @app.get("/api/profiles")
 def api_profiles():
     return repo.list_profiles()
@@ -795,6 +902,7 @@ class ExperimentBody(BaseModel):
     candidate_replay_id: Optional[str] = None
 
 
+# API-only by design (README: A/B experiment records); no UI surface.
 @app.get("/api/experiments")
 def api_experiments():
     return repo.list_experiments()
@@ -948,6 +1056,8 @@ def api_scoresaber_validate():
     return result
 
 
+# DEPRECATED (2026-08): not used by the frontend (one-click refresh covers it);
+# kept for API compatibility, intentional no-delete.
 @app.post("/api/scoresaber/update-ranked")
 def api_scoresaber_update_ranked():
     """Background fill of the (map_hash, difficulty) -> stars/pp cache for the
@@ -958,6 +1068,8 @@ def api_scoresaber_update_ranked():
     return {"status": "started"}
 
 
+# DEPRECATED (2026-08): not used by the frontend (one-click refresh covers it);
+# kept for API compatibility, intentional no-delete.
 @app.post("/api/maps/update-nps")
 def api_maps_update_nps():
     """Compute NPS (block density) for all maps in the background."""
@@ -970,26 +1082,26 @@ def api_maps_update_nps():
 # ---------- one-click refresh / online update ----------
 @app.post("/api/refresh/all")
 def api_refresh_all(body: AnalyzeBody | None = None):
-    """One-click refresh: trigger all 5 tasks in parallel (ingest / batch
-    analysis / map scan / NPS / online stars).
+    """One-click refresh: trigger all 5 task groups in parallel (ingest /
+    batch analysis / map scan / NPS / online data).
 
     Incremental semantics (v1.4.1): only new/changed data is processed -
     ingest/batch dedup by sha256+mtime, map_scan reuses the DB by folder mtime,
     nps_update skips already-computed unchanged maps, ranked_update syncs only
-    new uncached maps. Ingested data and stale cloud values are never
-    recomputed or re-fetched.
+    new uncached maps. The online task also refreshes the active platform's
+    player profile/recent scores and recomputes the dynamic level.
     """
     _require_replay_dir()
     _require_maps_dir()
-    # Reports are always generated; whether the LLM is called is decided by
-    # the settings toggle ai.ai_report_enabled inside run_ai_report (2026-08).
-    lang = (body.lang if body else "zh-CN")
+    # No reports (v2.1.0 decision): batch analysis never generates them; the
+    # detail page generates reports on demand via /api/ai/analyze/{id}
+    # (the settings toggle ai.ai_report_enabled decides LLM vs rule there).
     started = []
     for kind, fn, args in (("ingest", _run_ingest, (0,)),
-                           ("batch", _run_batch, (0, True, lang)),
+                           ("batch", _run_batch, (0,)),
                            ("map_scan", _run_map_scan, ()),
                            ("nps_update", _run_nps_update, ()),
-                           ("ranked_update", _run_ranked_update, (True,))):
+                           ("ranked_update", _run_ranked_update, (True, True))):
         try:
             _start_task(kind, fn, args)
             started.append(kind)
@@ -1068,6 +1180,8 @@ class SettingsSaveBody(BaseModel):
     values: dict = {}
 
 
+# DEPRECATED (2026-08): not used by the frontend (it uses /api/settings/schema);
+# kept for API compatibility, intentional no-delete.
 @app.get("/api/settings")
 def api_settings():
     """Return the current config view (without secrets)."""
@@ -1116,19 +1230,22 @@ def api_settings_save(body: SettingsSaveBody | None = None):
     """Batch-save config (atomic write-back to config.yaml / .env).
 
     Hot-reloads the runtime config on success (path settings apply immediately,
-    no restart needed). When analysis parameters (analysis.*) change (v1.4.1):
-    metrics were computed with the old parameters, so the analysis cache is
-    cleared and replays reset to pending - the detail-page lazy analysis
-    recomputes with the new parameters.
+    no restart needed). When analysis parameters (analysis.*) actually change
+    (v1.4.1): metrics were computed with the old parameters, so the analysis
+    cache is cleared and replays reset to pending - the detail-page lazy
+    analysis recomputes with the new parameters. The settings form submits
+    every visible field on each save, so the reset must key on
+    save_values' actually-changed list, not on mere submission (2026-08 fix:
+    saving an untouched form used to wipe the analysis cache every time).
     """
     updates = body.values if body and body.values else {}
     if not updates:
         return {"saved": False, "error": "没有要保存的配置"}
-    analysis_changed = any(k.startswith("analysis.") for k in updates)
     res = config_svc.save_values(updates)
     if res.get("saved"):
         reload_runtime_config()
-        if analysis_changed:
+        changed = res.get("changed") or []
+        if any(k.startswith("analysis.") for k in changed):
             cache_res = repo.reset_analysis_cache()
             enrichment.invalidate()
             res["message"] = cache_res["message"]

@@ -45,20 +45,126 @@ const fmt = {
     : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}.${String(Math.round((s % 1) * 100)).padStart(2, "0")}`,
 };
 
-/* ---------------- toast（替代原生 alert） ---------------- */
+/* ---------------- toast（替代原生 alert 的轻提示） ----------------
+   顶部居中向下弹出；卡片顶部进度条**全宽**（显示剩余时间：生存期 3s 内
+   从右向左缩短到最左端，左端固定）；进度条归零（animationend）触发
+   淡出移除（向上收起，与入场对称）。reduced-motion 下进度条隐藏，
+   走 setTimeout 兜底离场。
+   kind（语义色渐变背景 + 同色进度条）：success=绿 / error=红（失败/警告）/
+   info=蓝；默认 error。
+   入场：插入后双 rAF 再加 .in —— 若插入即显示态，浏览器首帧就命中目标
+   样式、过渡无从发生（旧版"无入场动画"就是这个原因）。 */
 function toast(message, kind = "error") {
   const root = $("#toast-root");
   if (!root) { console.warn("[toast]", message); return; }
   const el = document.createElement("div");
   el.className = `toast toast-${kind}`;
-  el.textContent = message;
+  const bar = document.createElement("div");
+  bar.className = "toast-bar";
+  el.appendChild(bar);
+  el.appendChild(document.createTextNode(message));
   root.appendChild(el);
-  // 入场动画（CSS）；4s 后自动离场销毁
-  setTimeout(() => {
+  requestAnimationFrame(() => requestAnimationFrame(() => el.classList.add("in")));
+  const dismiss = () => {
+    if (el.classList.contains("leaving")) return;
+    el.classList.remove("in");
     el.classList.add("leaving");
     el.addEventListener("transitionend", () => el.remove(), { once: true });
     setTimeout(() => el.remove(), 600);  // transition 不触发时的兜底
-  }, 4000);
+  };
+  bar.addEventListener("animationend", dismiss, { once: true });
+  setTimeout(dismiss, 3200);  // 进度条 animation 不触发（reduced-motion）时的兜底
+}
+
+/* ---------------- 通用弹窗（全局强提醒接口，独立的顶层浮层组件） ----------------
+   专门用于需要用户显式关注/确认的强提醒内容（警示、不可撤销操作、结构化
+   长内容等）；与轻量 popover（锚定、不阻断交互）语义不同、各自独立。
+   openModal({ title, body, onClose }): title = 纯文本标题；body = HTML 字符串
+   （调用方自行转义）；点遮罩或关闭按钮均可关闭。返回 overlay 元素。
+   closeModal(): 关闭当前打开的弹窗（幂等）。 */
+function openModal({ title, body, onClose = null } = {}) {
+  closeModal();
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML =
+    `<div class="modal" role="dialog" aria-modal="true">` +
+    (title ? `<div class="modal-title">${escHtml(title)}</div>` : "") +
+    (body || "") +
+    `<div class="modal-close"><button class="mini" id="modal-close-btn">${t("common.close")}</button></div>` +
+    `</div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeModal(); });
+  document.getElementById("modal-close-btn").addEventListener("click", closeModal);
+  if (onClose) overlay.addEventListener("modalclose", onClose);
+  return overlay;
+}
+
+function closeModal() {
+  document.querySelectorAll(".modal-overlay").forEach((o) => {
+    o.dispatchEvent(new CustomEvent("modalclose"));
+    o.remove();
+  });
+}
+
+/* ---------------- 锚定弹出小窗（popover，2026-08 为 PP 预测引入的通用组件） ----------------
+   轻量浮动卡片：锚定在触发元素下方弹出（空间不足自动翻转到上方，左右夹边），
+   不加遮罩、不阻断页面交互；点击外部 / Escape / 页面滚动 / 窗口尺寸变化即关闭。
+   全屏 openModal 保留为强提醒接口，二者并存、语义不同。
+   openPopover({ anchor, body, onClose }): anchor = 触发元素；body = HTML 字符串
+   （调用方自行转义）；onClose 在开始关闭时回调。返回 popover 元素。
+   closePopover(): 关闭当前弹出小窗（幂等，带退出动画 + 移除全部监听）。 */
+let popoverState = null;
+
+function closePopover() {
+  const st = popoverState;
+  if (!st) return;
+  popoverState = null;
+  document.removeEventListener("click", st.onDocClick, true);
+  document.removeEventListener("keydown", st.onKey);
+  window.removeEventListener("scroll", st.onDismiss, true);
+  window.removeEventListener("resize", st.onDismiss);
+  if (st.onClose) st.onClose();
+  st.el.classList.add("closing");
+  st.el.addEventListener("animationend", () => st.el.remove(), { once: true });
+  setTimeout(() => st.el.remove(), 300);   // animation 不触发时的兜底（同 toast）
+}
+
+function openPopover({ anchor, body, onClose = null } = {}) {
+  closePopover();
+  const el = document.createElement("div");
+  el.className = "popover";
+  el.innerHTML = body;
+  document.body.appendChild(el);
+  // 定位：默认锚点下方居中；下方放不下且上方放得下则翻转（入场方向跟随翻转）；
+  // 左右夹到视口内。先隐藏测量尺寸再定位，避免闪现。
+  el.style.visibility = "hidden";
+  const r = anchor.getBoundingClientRect();
+  const margin = 8, gap = 10;
+  const pw = el.offsetWidth, ph = el.offsetHeight;
+  let left = r.left + r.width / 2 - pw / 2;
+  left = Math.max(margin, Math.min(left, window.innerWidth - pw - margin));
+  let top = r.bottom + gap;
+  if (top + ph > window.innerHeight - margin && r.top - gap - ph >= margin) {
+    top = r.top - gap - ph;
+    el.style.setProperty("--pop-drop", "6px");       // 从下方入场 → 上方翻转入场方向反转
+    el.style.transformOrigin = "bottom center";
+  }
+  el.style.left = `${Math.round(left)}px`;
+  el.style.top = `${Math.round(top)}px`;
+  el.style.visibility = "";
+  el.classList.add("open");
+  const onDocClick = (e) => {
+    if (!el.contains(e.target) && !anchor.contains(e.target)) closePopover();
+  };
+  const onKey = (e) => { if (e.key === "Escape") closePopover(); };
+  const onDismiss = () => closePopover();   // 滚动/缩放会让锚点漂移，直接关闭
+  // 延后一拍绑定外部点击：避免打开弹窗的那次点击（事件还在传播）立刻触发关闭
+  setTimeout(() => document.addEventListener("click", onDocClick, true), 0);
+  document.addEventListener("keydown", onKey);
+  window.addEventListener("scroll", onDismiss, true);
+  window.addEventListener("resize", onDismiss);
+  popoverState = { el, onClose, onDocClick, onKey, onDismiss };
+  return el;
 }
 
 /* ---------------- 毛玻璃（webview 窗口模式，见 others/毛玻璃方案探索.md） ----------------
@@ -508,11 +614,8 @@ function updateTaskKpi(tasks) {
   if (!card) return;
   const big = document.getElementById("kpi-task");
   const sub = document.getElementById("kpi-task-sub");
-  const spin = document.getElementById("kpi-task-spinner");
   const list = Array.isArray(tasks) ? tasks : (tasks ? [tasks] : []);
   const active = list.filter((t) => t && t.running);
-  // 标题旁加载动画：有任务运行时显示（灰色圆环+蓝色弧线旋转）
-  if (spin) spin.style.display = active.length ? "inline-block" : "none";
   if (!active.length) {
     delete card.dataset.task;
     card.style.removeProperty("--task-pct");
@@ -527,7 +630,8 @@ function updateTaskKpi(tasks) {
     const pct = t.total ? Math.round((t.done / t.total) * 100) : 0;
     card.style.setProperty("--task-pct",
       `${Math.min(100, Math.max(0, pct))}%`);
-    big.textContent = t.current || `${t.done}/${t.total}`;
+    // current 是后端拼的进度字符串（"谱面同步:Song"）；en/ja 经查表翻译
+    big.textContent = tTaskCurrent(t.current) || t.current || `${t.done}/${t.total}`;
     sub.textContent = taskKindLabel(t.kind);
   } else {
     // 多任务组（如"一键刷新"5 任务）：始终完成数模式
@@ -548,10 +652,21 @@ function taskDoneMessage(tk) {
   const kind = tk.kind;
   if (tk.error) return t("task.failed", { err: tErr(tk.error) });
   const base = t("task.done." + kind);
+  if (kind === "ingest") {
+    // LocalLeaderboard 第二扫描源（2026-09）：完成后提示找回/新增情况
+    const ll = (((tk.results || [])[0]) || {}).local_leaderboard;
+    if (ll) {
+      const parts = [];
+      if (ll.repaired > 0) parts.push(t("task.ll_repaired", { n: ll.repaired }));
+      if (ll.ingested > 0) parts.push(t("task.ll_ingested", { n: ll.ingested }));
+      if (parts.length) return base + parts.join("");
+    }
+    return base;
+  }
   if (kind !== "ranked_update") return base;
   const failed = (((tk.results || [])[0]) || {}).failed_songs || [];
   if (!failed.length) return base;
-  const shown = failed.slice(0, 3).join("、");
+  const shown = failed.slice(0, 3).join(t("common.list_sep"));
   return base + t("task.failed_songs", {
     names: shown,
     more: failed.length > 3 ? t("task.failed_songs_more") : "",
@@ -729,11 +844,19 @@ function replayItem(r, highlight = "") {
     ? `<span class="${starColor(r.stars)} star-unranked" title="${t("replay.stars_unranked")}">${Number(r.stars).toFixed(2)}★</span>`
     : `<span class="${starColor(r.stars)}">${starsTxt}</span>`;
   const ppTxt = r.pp != null ? Number(r.pp).toFixed(1) + "pp" : "–";
+  // PP 预测（v2.1.0）：ranked + ScoreSaber 平台时 PP 值可点击，弹出准确率预览卡片
+  const ppClickable = window.__platform !== "beatleader" && hasStars && r.ranked === true;
+  const ppCell = ppClickable
+    ? `<div class="num pp-click" title="${t("replay.pp_hint")}"><div class="v">${ppTxt}</div><div class="k">${t("replay.kpi.pp")}</div></div>`
+    : `<div class="num"><div class="v">${ppTxt}</div><div class="k">${t("replay.kpi.pp")}</div></div>`;
   const npsTxt = r.nps != null ? Number(r.nps).toFixed(2) : "–";
   const scoreTxt = r.score_effective != null ? fmt.num(r.score_effective) : fmt.num(r.score);
   const scoreExtra = r.has_nf ? '<span class="nf-badge" title="' + t("replay.nf_badge") + '">NF</span>' : "";
   const pendingBadge = isPending
     ? `<span class="pill pending" title="${t("replay.pending")}">${t("replay.pending")}</span>` : "";
+  // 原始文件缺失标记（2026-09，ingest 只增不删：DB 行可能比文件长寿）
+  const fileMissingBadge = r.file_available === false
+    ? `<span class="pill missing" title="${t("replay.file_missing_title")}">${t("replay.file_missing")}</span>` : "";
   // MISS/BAD：未分析时显示"待分析"，不显示 null/null
   const missBadTxt = isPending
     ? `<span style="color:var(--muted)">${t("replay.pending")}</span>`
@@ -745,6 +868,7 @@ function replayItem(r, highlight = "") {
       <div class="sub">
         <span class="pill diff-${r.difficulty}">${r.difficulty}</span>
         ${pendingBadge}
+        ${fileMissingBadge}
         ${r.has_nf ? '<span class="pill nf">NF</span>' : ""}
         ${r.full_combo ? '<span class="pill fc">FC</span>' : ""}
         ${!r.won ? '<span class="pill fail">FAIL</span>' : ""}
@@ -753,7 +877,7 @@ function replayItem(r, highlight = "") {
     </div>
     <div class="num"><div class="v">${npsTxt}</div><div class="k">${t("replay.kpi.nps")}</div></div>
     <div class="num"><div class="v">${starsHtml}</div><div class="k">${t("replay.kpi.stars")}</div></div>
-    <div class="num"><div class="v">${ppTxt}</div><div class="k">${t("replay.kpi.pp")}</div></div>
+    ${ppCell}
     <div class="num"><div class="v">${scoreTxt}${scoreExtra}</div><div class="k">${t("replay.kpi.score")}${r.has_nf ? " (×0.5)" : ""}</div></div>
     <div class="num"><div class="v">${acc}</div><div class="k">${t("replay.kpi.acc")}</div></div>
     <div class="num"><div class="v">${missBadTxt}</div><div class="k">${t("replay.kpi.miss_bad")}</div></div>
@@ -772,7 +896,116 @@ function bindReplayItems() {
         openDetail(el.dataset.id, "replay");
       });
     }
+    // PP 值点击 = 锚定弹出准确率预览小窗（阻止条目自身点击跳详情）
+    const ppCell = el.querySelector(".pp-click");
+    if (ppCell) {
+      ppCell.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openPpPreview(el.dataset.id, ppCell);
+      });
+    }
   });
+}
+
+/* ---------------- PP 预测（v2.1.0，ScoreSaber 公式复刻） ----------------
+   点击 ranked replay 条目的 PP 值，在其下方锚定弹出准确率预览小窗：
+   pp = maxPP × curve(acc)（曲线节点由后端 analysis/pp_predict.py 内嵌 SC 官方
+   pp-curve 数据生成，分段线性——前端仅做节点间插值读取，公式本体在后端）。
+   滑条默认停在界面显示的本次游玩准确率（含 NF/失败/退出），↺ 复位；
+   再次点击同一 PP 值 = 切换关闭。 */
+function ppCurveLerp(curve, acc) {
+  if (acc <= curve[0][0]) return curve[0][1];
+  const last = curve[curve.length - 1];
+  if (acc >= last[0]) return last[1];
+  for (let i = 1; i < curve.length; i++) {
+    const [a0, p0] = curve[i - 1], [a1, p1] = curve[i];
+    if (acc <= a1) return a1 === a0 ? p0 : p0 + (p1 - p0) * (acc - a0) / (a1 - a0);
+  }
+  return last[1];
+}
+
+let ppPopoverId = null;   // 当前打开预览的 replay id（同格点击 = 关闭）
+
+async function openPpPreview(id, anchor) {
+  if (ppPopoverId === id) { closePopover(); return; }
+  let d;
+  try {
+    d = await api(`/api/replays/${id}/pp-preview`);
+  } catch (e) {
+    // api() 抛出的消息带 "path -> status: " 前缀，弹窗场景只提示翻译后的原因
+    toast(e.message.replace(/^.* -> \d+:\s*/, ""));
+    return;
+  }
+  const lo = d.lo * 100, hi = d.hi * 100;
+  const rawAcc0 = (d.default_acc != null ? d.default_acc : 0.95) * 100;
+  const acc0 = Math.min(hi, Math.max(lo, rawAcc0));
+  const el = openPopover({
+    anchor,
+    onClose: () => { ppPopoverId = null; },
+    body: `<div class="pp-preview">
+      <div class="pp-head">
+        <span class="pp-title">${t("replay.pp_preview")}</span>
+        <button type="button" class="pp-reset" title="${t("replay.pp_reset")}">↺</button>
+      </div>
+      <div class="pp-sub">${escHtml(d.song_name || "")} · ${escHtml(d.difficulty || "")} · ${d.stars != null ? Number(d.stars).toFixed(2) + "★" : "–"}</div>
+      <div class="pp-slider-row">
+        <div class="pp-slider">
+          <div class="pp-track"><div class="pp-fill"></div></div>
+          <div class="pp-thumb"></div>
+          <input type="range" class="pp-range" min="${lo}" max="${hi}" step="0.01" value="${acc0.toFixed(2)}" aria-label="${t("replay.pp_preview")}">
+        </div>
+        <div class="pp-acc-box">
+          <input type="text" class="pp-acc-input" inputmode="decimal" value="${acc0.toFixed(2)}" aria-label="${t("replay.pp_preview")}" title="${t("replay.pp_acc_hint")}">
+          <span class="pp-unit">%</span>
+        </div>
+      </div>
+      <div class="pp-result-row"><span class="k">PP</span><span class="v"><span class="pp-val">--</span><span class="pp-unit">pp</span></span></div>
+      <div class="pp-note">${t("replay.pp_note")}</div>
+    </div>`,
+  });
+  ppPopoverId = id;
+  const range = el.querySelector(".pp-range");
+  const accInput = el.querySelector(".pp-acc-input");
+  const slider = el.querySelector(".pp-slider");
+  const THUMB_W = 18;   // 与 style.css .pp-thumb 宽度一致
+  const update = () => {
+    // 滑条值为百分数（60–100）：显示原值，查曲线时再除以 100
+    const acc = Number(range.value) / 100;
+    // 输入框回显：聚焦中（用户正在输入）不覆盖；失焦/拖滑条时同步
+    if (accInput !== document.activeElement) accInput.value = Number(range.value).toFixed(2);
+    el.querySelector(".pp-val").textContent = ppCurveLerp(d.curve, acc).toFixed(2);
+    // 自绘滑块：与原生 input 的 value→位置映射一致——thumb 中心在
+    // [THUMB_W/2, w-THUMB_W/2] 线性（两端半宽偏移是浏览器的原生手感），
+    // fill 宽度 = 轨道左端到 thumb 圆心 → 三元素始终重合、拖动不脱手。
+    const w = slider.clientWidth;
+    const cx = THUMB_W / 2
+      + ((range.value - range.min) / (range.max - range.min)) * (w - THUMB_W);
+    slider.querySelector(".pp-fill").style.width = `${cx}px`;
+    slider.querySelector(".pp-thumb").style.left = `${cx}px`;
+  };
+  // 手动输入精确 ACC：回车即刻生效（解析 → 越界 clamp 到 [lo, hi] → 联动滑条
+  // 与 PP 值 → blur 定格）；解析失败回滚为当前有效值
+  const applyAccInput = () => {
+    const v = parseFloat(accInput.value.replace(",", "."));
+    if (!isFinite(v)) { accInput.value = Number(range.value).toFixed(2); return; }
+    const clamped = Math.min(Number(range.max), Math.max(Number(range.min), v));
+    range.value = clamped.toFixed(2);
+    update();
+    accInput.value = clamped.toFixed(2);
+    accInput.blur();
+  };
+  accInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); applyAccInput(); }
+  });
+  accInput.addEventListener("blur", () => {
+    accInput.value = Number(range.value).toFixed(2);   // 失焦回显当前有效值
+  });
+  range.addEventListener("input", update);
+  el.querySelector(".pp-reset").addEventListener("click", () => {
+    range.value = acc0.toFixed(2);
+    update();
+  });
+  update();
 }
 
 function escHtml(s) {
@@ -797,9 +1030,8 @@ function requirePaths(need) {
 $("#btn-refresh-all").addEventListener("click", async () => {
   if (!requirePaths("both")) return;
   try {
-    // Whether reports call the LLM is now a settings toggle
-    // (settings → AI → "Use AI for reports", backend reads ai.ai_report_enabled);
-    // batch analysis always generates reports (rule or AI) accordingly.
+    // 一键刷新同时更新 Replay/谱面分析、云端榜单、玩家档案和动态水平；
+    // 报告仍只允许从详情页手动生成。
     await api("/api/refresh/all", {
       method: "POST", body: JSON.stringify({ lang: I18N.lang }),
     });
@@ -853,7 +1085,8 @@ async function pollTask() {
     const runningNow = new Set(active.map((t) => t.kind));
     tasks.forEach((t) => {
       if (!t.running && prevRunning.has(t.kind) && t.kind) {
-        toast(taskDoneMessage(t), t.error ? "error" : "info");
+        // 任务完成 toast：成功 → 绿色 success（渐变+绿进度条），失败 → 红色 error
+        toast(taskDoneMessage(t), t.error ? "error" : "success");
       }
     });
     prevRunning = runningNow;
@@ -1026,6 +1259,20 @@ function renderDetailBody(content) {
   if (heroEl) {
     heroEl.classList.add("status-" + (r.completion_status || "completed"));
   }
+  // 原始回放文件缺失警告（2026-09）：ingest 只增不删——DB 行可能比文件长寿，
+  // 漏掉标注会让用户看到笼统"无数据"（§HANDOFF 4.25 事故后用户决策）
+  const missingBox = $("#detail-file-missing");
+  if (missingBox) {
+    if (r.file_available === false) {
+      missingBox.classList.remove("hidden");
+      missingBox.innerHTML =
+        `<span class="dmf-icon">⚠️</span><div><b>${escHtml(t("replay.file_missing_title"))}</b>` +
+        `<br>${escHtml(t("detail.file_missing_desc"))}</div>`;
+    } else {
+      missingBox.classList.add("hidden");
+      missingBox.innerHTML = "";
+    }
+  }
   // 返回按钮
   $("#btn-detail-back").onclick = goBack;
   // header
@@ -1148,7 +1395,7 @@ function switchDetailPane(name, instant = false) {
   if (name === "replay" && currentReplay) {
     const wrap = document.getElementById("replay-frame-wrap");
     if (wrap && !wrap.querySelector(".replay-frame-fill")) {
-      if (window.chroAvailable) {
+      if (window.chroAvailable && currentReplay.file_available !== false) {
         const iframe = document.createElement("iframe");
         iframe.id = "replay-frame";
         iframe.className = "replay-frame-fill";
@@ -1166,6 +1413,13 @@ function switchDetailPane(name, instant = false) {
         } else {
           window.addEventListener("resize", resizeFrame);
         }
+      } else if (currentReplay.file_available === false) {
+        // 原始文件缺失：/api/replays/{id}/raw 必 410，直接给不可用原因
+        // （2026-09，区别于 chro 组件缺失的安装提示）
+        const hint = document.createElement("div");
+        hint.className = "replay-frame-fill chro-missing";
+        hint.innerHTML = `<div class="chro-missing-icon">📄</div><div>${escHtml(t("replay.file_missing_hint"))}</div>`;
+        wrap.appendChild(hint);
       } else {
         const hint = document.createElement("div");
         hint.className = "replay-frame-fill chro-missing";
@@ -1201,6 +1455,8 @@ function buildDetailSkeleton() {
       <div class="hero-kpi"><div class="v" id="d-combo"></div><div class="k">MAX COMBO</div></div>
     </div>
   </div>
+  <!-- 原始回放文件缺失警告（2026-09）：DB 数据仍可查看，raw 文件功能不可用 -->
+  <div id="detail-file-missing" class="detail-file-missing hidden"></div>
   <div class="detail-tabs" id="detail-tabs">
     <button class="dt-tab active" data-pane="data">${t("detail.tab.data")}</button>
     <button class="dt-tab" data-pane="ai">${t("detail.tab.ai")}</button>
@@ -1419,8 +1675,11 @@ function renderSliceDetails(data) {
   const el = $("#d-slice");
   if (!el) return;
   sliceSelectedTile = null;
-  if (!data || !data.tiles || !data.tiles.length) {
-    el.innerHTML = `<div class="empty">${t("slice.no_data")}</div>`;
+  // 原始文件缺失 → 明确不可用原因（区别于"无数据"，2026-09：slice-details
+  // 实时解析 .bsor，无文件必 404，前端此前笼统显示"无数据"）
+  const fileMissing = currentReplay && currentReplay.file_available === false;
+  if (fileMissing || !data || !data.tiles || !data.tiles.length) {
+    el.innerHTML = `<div class="empty">${fileMissing ? t("detail.file_missing_unavailable") : t("slice.no_data")}</div>`;
     return;
   }
   // 视觉行序：Top 层在上、Bottom 层在下（与游戏 note 网格视角一致）
@@ -1484,36 +1743,6 @@ function collapseSlice(data, tileIndex) {
     el.querySelector(".slice-expand").innerHTML = "";
     el.querySelectorAll(".slice-tile.selected").forEach((t) => t.classList.remove("selected"));
   }, 180);
-}
-
-/* 弹窗（保留通用能力，切割细节已改为卡片内展开，不再使用） */
-function openSliceModal(data, tileIndex) {
-  const tile = data.tiles[tileIndex];
-  if (!tile || tile.count <= 0) return;
-  closeSliceModal();
-  const overlay = document.createElement("div");
-  overlay.className = "slice-modal-overlay";
-  const hands = [
-    { label: t("slice.left_hand"), color: "var(--red)", cls: "left", cells: tile.cells.slice(0, 9) },
-    { label: t("slice.right_hand"), color: "var(--blue)", cls: "right", cells: tile.cells.slice(9, 18) },
-  ];
-  overlay.innerHTML = `<div class="slice-modal" role="dialog">` +
-    `<div class="slice-modal-title">${escHtml(t("slice.tile_title", { score: Number(tile.score_avg).toFixed(2), count: tile.count }))}</div>` +
-    `<div class="slice-hands">` +
-    hands.map((h) => `<div class="slice-hand">` +
-      `<div class="h-label" style="color:${h.color}">${escHtml(h.label)}</div>` +
-      `<div class="slice-compass">${h.cells.map((c, slot) => sliceCellHtml(c, slot, h.cls)).join("")}</div>` +
-      `</div>`).join("") +
-    `</div>` +
-    `<div class="slice-modal-close"><button class="mini" id="slice-modal-close-btn">${escHtml(t("slice.close"))}</button></div>` +
-    `</div>`;
-  document.body.appendChild(overlay);
-  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeSliceModal(); });
-  document.getElementById("slice-modal-close-btn").addEventListener("click", closeSliceModal);
-}
-
-function closeSliceModal() {
-  document.querySelectorAll(".slice-modal-overlay").forEach((o) => o.remove());
 }
 
 /* ---------------- charts ---------------- */
@@ -1658,7 +1887,9 @@ function drawMotionSeries(animate = true) {
   const speedBox = $("#chart-speed"), angBox = $("#chart-ang");
   if (!speedBox || !angBox) return;
   if (!s || !s.t || !s.t.length) {
-    speedBox.innerHTML = `<div class="empty">${t("chart.no_data")}</div>`;
+    // 原始文件缺失时说明不可用原因（motion_series 需原始文件重算；2026-09）
+    const fileMissing = currentReplay && currentReplay.file_available === false;
+    speedBox.innerHTML = `<div class="empty">${fileMissing ? t("detail.file_missing_unavailable") : t("chart.no_data")}</div>`;
     angBox.innerHTML = "";
     return;
   }
@@ -1677,11 +1908,15 @@ function drawMotionSeries(animate = true) {
 
 function renderReport(rep) {
   const el = $("#d-report");
+  // 按钮随报告状态：无报告 = 「生成报告」，已有 = 「重新生成」
+  // （v2.1.0：批量分析不再产报告，此按钮是报告的唯一生成入口）
+  const btn = $("#btn-run-ai");
+  if (btn) btn.textContent = rep ? t("detail.report_regenerate") : t("detail.report_generate");
   if (!rep) { el.innerHTML = `<div class="empty">${t("detail.report_none")}</div>`; return; }
   let head = "";
   if (rep.status === "rule_based") head = `<p class="hint">${t("detail.report_rule_based")}</p>`;
   if (rep.status === "error") head = `<p class="hint" style="color:var(--red)">${t("detail.report_error", { err: escHtml(rep.error || "") })}</p>`;
-  el.innerHTML = head + renderMarkdown(rep.report_md || "*（空报告）*");
+  el.innerHTML = head + renderMarkdown(rep.report_md || t("detail.report_empty"));
 }
 
 /* ---------------- 历史（搜索：歌名 + key，重合度排序，黄色高亮） ---------------- */
@@ -1892,6 +2127,9 @@ $("#btn-ss-refresh").addEventListener("click", async () => {
     const data = await api(cloudRefreshPath(), { method: "POST" });
     renderScoreSaber(data);
     ssLoaded = true;
+    toast(t("scoresaber.synced", {
+      platform: t("platform." + window.__platform),
+    }), "success");
   } catch (e) { toast(t("scoresaber.failed", { err: e.message })); }
   btn.disabled = false; btn.textContent = t("scoresaber.refresh_btn");
 });
@@ -1965,7 +2203,7 @@ $("#btn-ss-validate").addEventListener("click", async () => {
   const validateBtn = $("#btn-ss-validate");
   if (validateBtn) validateBtn.classList.toggle("hidden", window.__platform !== "scoresaber");
   await loadRecent();
-  if (s && s.task && s.task.running) pollTask();
+  if (s && (s.tasks || []).some((task) => task.running)) pollTask();
 })();
 
 // 窗口尺寸变化时重绘详情图表（防 SVG 拉伸失真），debounce 150ms；全局只绑一次
@@ -2086,23 +2324,31 @@ function renderSettingsForm() {
   $("#set-form").innerHTML = html;
 }
 
-/* 收集表单值（忽略未改动的 secret 空输入；游戏根目录由"游戏路径"卡片输入
-   补入，其余 game.* 已 hidden 不在表单中） */
+/* Collect form values (defense in depth alongside the backend's changed-key
+   check): only fields whose value differs from the loaded settings are sent,
+   so an untouched form submits nothing and can never trigger side effects
+   keyed on submission (analysis cache reset, restart-required hint).
+   Unchanged secrets are skipped (empty input = no change, as before);
+   game root lives outside #set-form and is compared against its stored value. */
 function collectSettings() {
   const values = {};
   const rootVal = $("#set-root-input").value.trim();
-  if (rootVal) values["game.instance_root"] = rootVal;
+  if (rootVal && rootVal !== (settingsValues["game.instance_root"] || "")) {
+    values["game.instance_root"] = rootVal;
+  }
   $$("#set-form [data-key]").forEach((el) => {
     const key = el.dataset.key;
     const item = settingsSchema.find((s) => s.key === key);
     if (!item) return;
     if (item.type === "boolean") {
-      values[key] = el.checked;
+      if (el.checked !== Boolean(settingsValues[key])) values[key] = el.checked;
     } else if (item.type === "secret") {
-      // 空输入 = 不修改
+      // empty input = no change; a typed value is always a change
       if (el.value.trim() !== "") values[key] = el.value.trim();
     } else {
-      values[key] = el.value;
+      // numbers arrive as strings; String() comparison treats "50" == 50
+      const v = el.value;
+      if (String(v) !== String(settingsValues[key] ?? "")) values[key] = v;
     }
   });
   return values;
@@ -2204,7 +2450,8 @@ $("#btn-set-save").addEventListener("click", async () => {
       method: "POST", body: JSON.stringify({ values }),
     });
     if (res.saved) {
-      msg.textContent = t("settings.saved", { msg: res.message || "" });
+      // 后端确认消息（中文原文）经 msg 段查表翻译（en/ja）
+      msg.textContent = t("settings.saved", { msg: tMsg(res.message || "") });
       await loadSettings();
       // 星级色谱变更：重新拉取 palette 定义并重绘列表（即时生效，无需重启）
       if (Object.prototype.hasOwnProperty.call(values, "player.star_palette")) {
@@ -2212,7 +2459,7 @@ $("#btn-set-save").addEventListener("click", async () => {
         await loadRecent(currentPage);
       }
     } else {
-      msg.textContent = t("settings.save_failed", { err: res.error || "" });
+      msg.textContent = t("settings.save_failed", { err: tErr(res.error || "") });
     }
   } catch (e) {
     msg.textContent = e.message;
@@ -2268,7 +2515,7 @@ $("#btn-clear-cache").addEventListener("click", () => {
       box.innerHTML = `<span class="spinner"></span>${t("settings.storage.clearing")}`;
       try {
         const res = await api("/api/settings/clear-cache", { method: "POST" });
-        box.innerHTML = `<span style="color:var(--green)">${t("settings.storage.cleared", { msg: escHtml(res.message || "") })}</span>`;
+        box.innerHTML = `<span style="color:var(--green)">${t("settings.storage.cleared", { msg: escHtml(tMsg(res.message || "")) })}</span>`;
         // 清缓存即刻生效：刷新所有页面数据（不刷新整个网页，避免闪烁）
         ssLoaded = false;   // ScoreSaber 页下次切入时重新加载（读保留的联网缓存）
         await Promise.allSettled([

@@ -327,6 +327,39 @@ class Repository:
                             (replay_id,)).fetchone()
             return _row_to_dict(row) if row else None
 
+    def get_replay_by_session(self, player_id: str, map_hash: str,
+                              timestamp: int) -> Optional[dict]:
+        """Find a replay row by session identity (player + map + play timestamp).
+
+        Used by the LocalLeaderboard second source (2026-09): a BL/LL twin
+        pair shares player/map/timestamp, so the LL copy can be matched to
+        the row (missing-file repair) or recognized as a duplicate without
+        relying on file names. Returns only the fields the repair path needs.
+        """
+        if not player_id or not map_hash or not timestamp:
+            return None
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT replay_id, file_path FROM replays "
+                "WHERE player_id=? AND map_hash=? AND timestamp=? LIMIT 1",
+                (player_id, map_hash.upper(), timestamp)).fetchone()
+            return _row_to_dict(row) if row else None
+
+    def refresh_replay_file(self, replay_id: str, new_path: str) -> None:
+        """Point a replay row at a different copy of its original .bsor.
+
+        Only file-location fields change (LocalLeaderboard twin repair,
+        2026-09); analysis data (metrics/notes/accuracy_curve/motion) is
+        untouched because the content is identical.
+        """
+        p = pathlib.Path(new_path)
+        st = p.stat()
+        with self._conn() as c:
+            c.execute(
+                "UPDATE replays SET file_path=?, file_name=?, file_size=?,"
+                " file_mtime=? WHERE replay_id=?",
+                (str(p), p.name, st.st_size, st.st_mtime, replay_id))
+
     def list_replays(self, limit: int = 30, offset: int = 0,
                      map_hash: str | None = None,
                      days: int | None = None) -> list[dict]:
@@ -460,8 +493,8 @@ class Repository:
                              platform: str = "scoresaber") -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
-                "SELECT map_hash, difficulty_name, stars, ranked, qualified,"
-                " max_pp, last_synced FROM scoresaber_leaderboards"
+                "SELECT map_hash, difficulty_name, game_mode, stars, ranked,"
+                " qualified, max_pp, last_synced FROM scoresaber_leaderboards"
                 " WHERE platform=? LIMIT ?", (platform, limit)).fetchall()
             return [_row_to_dict(r) for r in rows]
 

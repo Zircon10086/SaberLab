@@ -1,8 +1,9 @@
 """SaberLab standalone window host (Phase 3, architecture review §6.2).
 
 Responsibilities:
-1. Port probing: default 6980; if occupied, increment 6980+1..+19 (eliminates startup failure from port conflicts)
-2. Single instance: if an instance is already running, notify and exit (browser mode has no window control; simplified)
+1. Single instance: replace a verified SaberLab listener left on 6980..6999,
+   then prefer the configured port (6980 by default); unrelated occupants are
+   never killed and still cause safe fallback to the next port
 3. uvicorn runs in a daemon thread; window close → should_exit → process exits
 4. Dual modes:
    - Default (webview): pywebview 5/6 + WebView2 opens its own window without launching the system browser
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import json
 import socket
 import sys
 import threading
@@ -36,7 +38,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import uvicorn
 
-from backend.config import load_config, PROJECT_ROOT
+import os
+
+from backend import APP_INSTANCE_ID
+from backend.config import load_config, dotenv_key_names, PROJECT_ROOT
 from backend import desktop
 
 
@@ -74,6 +79,13 @@ from backend.main import app
 
 WINDOW_TITLE = "SaberLab — Beat Saber 本地分析实验室"
 PORT_RANGE = 20  # 6980..6999
+_TCP_TABLE_OWNER_PID_LISTENER = 3
+_MIB_TCP_STATE_LISTEN = 2
+_PROCESS_TERMINATE = 0x0001
+_SYNCHRONIZE = 0x00100000
+_WAIT_OBJECT_0 = 0
+_WAIT_ABANDONED = 0x00000080
+_STARTUP_MUTEX_NAME = r"Local\SaberLab.Startup.ReplaceInstance"
 
 
 def find_free_port(cfg) -> int:
@@ -89,32 +101,188 @@ def find_free_port(cfg) -> int:
     raise RuntimeError(f"端口 {start}..{start + PORT_RANGE - 1} 全部被占用")
 
 
-def find_existing_instance(cfg, own_port: int) -> str | None:
-    """Check whether a SaberLab instance is already running (sends /api/status to candidate ports).
+class _MibTcpRowOwnerPid(ctypes.Structure):
+    _fields_ = [("state", wintypes.DWORD),
+                ("local_addr", wintypes.DWORD),
+                ("local_port", wintypes.DWORD),
+                ("remote_addr", wintypes.DWORD),
+                ("remote_port", wintypes.DWORD),
+                ("pid", wintypes.DWORD)]
 
-    Parallel probe (2026-08 startup optimization): the serial loop waited up to
-    0.5s per occupied-but-not-SaberLab port (worst case ~9.5s); now all
-    candidates are probed concurrently with a shorter timeout, so startup is
-    fast even when the fallback range is partially occupied.
-    """
-    start = int(getattr(cfg, "port", 6980) or 6980)
-    candidates = [p for p in range(start, start + PORT_RANGE) if p != own_port]
 
-    def probe(port: int) -> str | None:
-        try:
-            with urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/api/status", timeout=0.4) as r:
-                if r.status == 200:
-                    return f"http://127.0.0.1:{port}"
-        except OSError:
-            pass
+def _listener_pid(port: int) -> int | None:
+    """Return the Windows PID listening on 127.0.0.1:port (stdlib only)."""
+    if sys.platform != "win32":
         return None
-
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        for found in pool.map(probe, candidates):
-            if found:
-                return found
+    size = wintypes.DWORD(0)
+    get_table = ctypes.windll.iphlpapi.GetExtendedTcpTable
+    get_table.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD),
+                          wintypes.BOOL, wintypes.ULONG, wintypes.ULONG,
+                          wintypes.ULONG]
+    get_table.restype = wintypes.DWORD
+    get_table(None, ctypes.byref(size), False, socket.AF_INET,
+              _TCP_TABLE_OWNER_PID_LISTENER, 0)
+    if not size.value:
+        return None
+    buf = ctypes.create_string_buffer(size.value)
+    if get_table(buf, ctypes.byref(size), False, socket.AF_INET,
+                 _TCP_TABLE_OWNER_PID_LISTENER, 0) != 0:
+        return None
+    count = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+    base = ctypes.addressof(buf) + ctypes.sizeof(wintypes.DWORD)
+    row_size = ctypes.sizeof(_MibTcpRowOwnerPid)
+    for i in range(count):
+        row = _MibTcpRowOwnerPid.from_address(base + i * row_size)
+        local_port = socket.ntohs(row.local_port & 0xFFFF)
+        if row.state == _MIB_TCP_STATE_LISTEN and local_port == port:
+            return int(row.pid)
     return None
+
+
+def _looks_like_saberlab_status(data) -> bool:
+    """Recognize current instances and pre-marker SaberLab releases."""
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        return False
+    if data.get("app_instance") == APP_INSTANCE_ID:
+        return True
+    # Upgrade compatibility: older releases lack app_instance/pid. Require the
+    # distinctive status shape before treating the listener as SaberLab.
+    db = data.get("db")
+    config = data.get("config")
+    ai = data.get("ai")
+    chro = data.get("chro")
+    return (isinstance(db, dict)
+            and "replays" in db and "maps" in db
+            and isinstance(data.get("replay_dir"), dict)
+            and isinstance(data.get("maps_dir"), dict)
+            and isinstance(ai, dict) and "provider" in ai
+            and isinstance(chro, dict) and "available" in chro
+            and isinstance(config, dict)
+            and "replay_dir" in config and "custom_levels_dir" in config)
+
+
+def _probe_saberlab(port: int) -> dict | None:
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/status", timeout=0.6) as r:
+            if r.status != 200:
+                return None
+            data = json.loads(r.read().decode("utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return data if _looks_like_saberlab_status(data) else None
+
+
+def _terminate_process(pid: int, timeout_ms: int = 5000) -> bool:
+    """Terminate a previously verified SaberLab process and wait for exit."""
+    if sys.platform != "win32" or pid <= 0 or pid == os.getpid():
+        return False
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
+                                     wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(_PROCESS_TERMINATE | _SYNCHRONIZE,
+                                  False, wintypes.DWORD(pid))
+    if not handle:
+        return False
+    try:
+        if not kernel32.TerminateProcess(handle, 0):
+            return False
+        return kernel32.WaitForSingleObject(handle, timeout_ms) == _WAIT_OBJECT_0
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def replace_existing_instances(cfg) -> list[tuple[int, int]]:
+    """Replace verified SaberLab listeners in the configured port range.
+
+    Identity and ownership are checked independently: /api/status must identify
+    SaberLab, and its PID (when present) must equal the Windows TCP owner PID.
+    An unrelated service on 6980 is never terminated.
+    """
+    ports = _candidate_ports(cfg)
+    owners_before = {port: _listener_pid(port) for port in ports}
+    occupied = [port for port in ports if owners_before[port]]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        statuses = dict(zip(occupied, pool.map(_probe_saberlab, occupied)))
+    replaced: list[tuple[int, int]] = []
+    for port in occupied:
+        status = statuses[port]
+        if status is None:
+            continue
+        pid = owners_before[port]
+        # Close the time-of-check/time-of-use gap: the listener that answered
+        # the SaberLab status probe must still own the port before termination.
+        if _listener_pid(port) != pid:
+            print(f"[host] listener changed during probe on {port}; ignored",
+                  flush=True)
+            continue
+        reported_pid = status.get("pid")
+        try:
+            reported_pid = (int(reported_pid)
+                            if reported_pid is not None else None)
+        except (TypeError, ValueError):
+            reported_pid = -1
+        if not pid or (reported_pid is not None and reported_pid != pid):
+            print(f"[host] ignored unverifiable SaberLab response on {port}",
+                  flush=True)
+            continue
+        if _terminate_process(pid):
+            replaced.append((port, pid))
+            print(f"[host] replaced old SaberLab instance pid={pid} port={port}",
+                  flush=True)
+        elif _listener_pid(port) == pid:
+            # Starting on a fallback port here would violate the single-window
+            # guarantee and recreate the invisible-background-instance problem.
+            raise RuntimeError(
+                f"无法终止旧 SaberLab 实例 pid={pid}（端口 {port}）")
+    return replaced
+
+
+def _candidate_ports(cfg) -> list[int]:
+    """Standard and custom port ranges that may contain an old instance."""
+    configured = int(getattr(cfg, "port", 6980) or 6980)
+    return sorted(set(range(6980, 6980 + PORT_RANGE))
+                  | set(range(configured, configured + PORT_RANGE)))
+
+
+def _acquire_startup_mutex(timeout_ms: int = 15000):
+    """Serialize concurrent launchers through instance replacement + bind."""
+    if sys.platform != "win32":
+        return None
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL,
+                                      wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateMutexW(None, False, _STARTUP_MUTEX_NAME)
+    if not handle:
+        raise RuntimeError("无法创建 SaberLab 启动锁")
+    wait = kernel32.WaitForSingleObject(handle, timeout_ms)
+    if wait not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+        kernel32.CloseHandle(handle)
+        raise RuntimeError("等待另一个 SaberLab 启动操作超时")
+    return handle
+
+
+def _release_startup_mutex(handle) -> None:
+    if handle and sys.platform == "win32":
+        kernel32 = ctypes.windll.kernel32
+        kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+        kernel32.ReleaseMutex.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.ReleaseMutex(handle)
+        kernel32.CloseHandle(handle)
 
 
 # ---------- Acrylic glass: DWM capability (scheme A/B, Windows only) ----------
@@ -463,53 +631,53 @@ def main():
     args = parser.parse_args()
     t0 = time.perf_counter()
 
-    cfg = load_config()
-    port = find_free_port(cfg)
-    url = f"http://127.0.0.1:{port}"
-    # the frontend uses this to enable the acrylic layer (browser mode/off have no shell param; appearance unchanged)
-    shell_url = url if args.acrylic_mode == "off" else url + "/?shell=webview"
+    startup_mutex = _acquire_startup_mutex()
+    try:
+        cfg = load_config()
+        replace_existing_instances(cfg)
+        port = find_free_port(cfg)
+        url = f"http://127.0.0.1:{port}"
+        # the frontend uses this to enable the acrylic layer (browser mode/off have no shell param; appearance unchanged)
+        shell_url = url if args.acrylic_mode == "off" else url + "/?shell=webview"
 
-    if not args.browser:
-        existing = find_existing_instance(cfg, port)
-        if existing:
-            print(f"SaberLab is already running ({existing}). If the window is not visible, quit the old instance first.")
-            print("(Add --browser to force opening a new browser page)")
-            return 0
+        config = uvicorn.Config(app=app, host="127.0.0.1", port=port,
+                                log_level="warning")
+        server = uvicorn.Server(config)
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
 
-    config = uvicorn.Config(app=app, host="127.0.0.1", port=port,
-                            log_level="warning")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
+        # Startup optimization (2026-08): pywebview loads the .NET runtime + WebView2
+        # only inside start(); preload them in parallel while the server warms up,
+        # so the window appears ~immediately after readiness (window mode only).
+        webview_preload = threading.Event()
 
-    # Startup optimization (2026-08): pywebview loads the .NET runtime + WebView2
-    # only inside start(); preload them in parallel while the server warms up,
-    # so the window appears ~immediately after readiness (window mode only).
-    webview_preload = threading.Event()
+        def _preload_webview():
+            try:
+                from webview.platforms import winforms  # noqa: F401  # loads clr/.NET runtime
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                webview_preload.set()
 
-    def _preload_webview():
-        try:
-            from webview.platforms import winforms  # noqa: F401  # loads clr/.NET runtime
-        except Exception:  # noqa: BLE001
-            pass
-        finally:
-            webview_preload.set()
+        if not args.browser:
+            threading.Thread(target=_preload_webview, daemon=True).start()
 
-    if not args.browser:
-        threading.Thread(target=_preload_webview, daemon=True).start()
-
-    # wait for the server to be ready (up to 15s)
-    ready = False
-    for _ in range(150):
-        try:
-            urllib.request.urlopen(url + "/api/status", timeout=0.5).read()
-            ready = True
-            break
-        except OSError:
-            time.sleep(0.1)
-    if not ready:
-        print("Server failed to start")
-        return 1
+        # wait for the server to be ready (up to 15s). The startup mutex stays
+        # held through readiness, so a concurrent launcher cannot race the bind.
+        ready = False
+        for _ in range(150):
+            try:
+                urllib.request.urlopen(url + "/api/status", timeout=0.5).read()
+                ready = True
+                break
+            except OSError:
+                time.sleep(0.1)
+        if not ready:
+            server.should_exit = True
+            print("Server failed to start")
+            return 1
+    finally:
+        _release_startup_mutex(startup_mutex)
 
     print(f"SaberLab: {url}  (replay dir: {cfg.replay_dir})")
     print(f"[host] ready in {time.perf_counter() - t0:.2f}s (server up)", flush=True)
@@ -567,6 +735,11 @@ def main():
     finally:
         dialog.register(None)
         server.should_exit = True
+        # Release the listening socket before an in-app restart spawns its
+        # successor; otherwise the child can briefly see an unresponsive 6980
+        # and relocate even though this instance is already shutting down.
+        if thread.is_alive():
+            thread.join(timeout=5)
         # active restart: the process is about to exit and the port is released → spawn the new process here (rebinds the original port)
         if getattr(_restart_app, "_armed", False):
             try:
@@ -576,7 +749,13 @@ def main():
                     cmd = [sys.executable, str(pathlib.Path(__file__).resolve()),
                            *sys.argv[1:]]
                 import subprocess
-                subprocess.Popen(cmd, cwd=str(PROJECT_ROOT),
+                # Strip .env-provided vars from the inherited environment: the
+                # child's load_dotenv never overrides existing vars, so a stale
+                # value (e.g. an API key loaded before the user saved a new one)
+                # would otherwise win forever across restarts (2026-08 fix).
+                env = {k: v for k, v in os.environ.items()
+                       if k not in dotenv_key_names()}
+                subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), env=env,
                                  creationflags=getattr(subprocess,
                                                        "CREATE_NEW_CONSOLE", 0))
                 print("[host] new process spawned", flush=True)

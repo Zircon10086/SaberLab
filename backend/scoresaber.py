@@ -179,7 +179,8 @@ def cross_validate(cfg: Config, player_id: str,
     """Validate local parsing results against ScoreSaber scores.
 
     For each (song_hash, difficulty), compare the ScoreSaber score vs the local
-    replay score. Returns {matched: [...], unmatched_local: n, score_diffs: [...]}
+    replay score (score_diff per matched row). Returns
+    {matched: [...], fetched_scores: n, matched_count: n} or {error: str}.
     """
     try:
         ss_scores = fetch_scores(cfg, player_id, limit=100, sort="recent")
@@ -190,7 +191,7 @@ def cross_validate(cfg: Config, player_id: str,
         if s.get("song_hash"):
             key = (s["song_hash"].upper(), norm_difficulty(s.get("difficulty")))
             ss_index.setdefault(key, s)
-    matched, diffs = [], []
+    matched = []
     for r in local_replays:
         key = ((r.get("map_hash") or "").upper(),
                norm_difficulty(r.get("difficulty")))
@@ -209,7 +210,6 @@ def cross_validate(cfg: Config, player_id: str,
         }
         if isinstance(row["local_score"], int) and isinstance(row["scoresaber_score"], int):
             row["score_diff"] = row["local_score"] - row["scoresaber_score"]
-            diffs.append(row["score_diff"])
         matched.append(row)
     return {"matched": matched, "fetched_scores": len(ss_scores),
             "matched_count": len(matched)}

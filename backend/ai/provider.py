@@ -26,6 +26,21 @@ class LLMClient:
         self.model = cfg.ai_model
         self.api_key = cfg.ai_api_key
 
+    def update_config(self, cfg: Config) -> None:
+        """Refresh all config-derived state after a settings save (hot reload).
+
+        The snapshots (provider/base_url/model/api_key) are bound at construction;
+        without this refresh, AI settings changed in the UI silently keep using
+        the old values until restart, and /api/status reports a stale `configured`.
+        `temperature`/`max_tokens`/`timeout` are read from self.cfg per call, so
+        updating cfg alone makes them hot-apply (schema marks them non-restart).
+        """
+        self.cfg = cfg
+        self.provider = cfg.ai_provider
+        self.base_url = (cfg.ai_base_url or "").rstrip("/")
+        self.model = cfg.ai_model
+        self.api_key = cfg.ai_api_key
+
     @property
     def configured(self) -> bool:
         return bool(self.api_key and self.base_url and self.provider != "off")

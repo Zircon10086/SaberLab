@@ -84,22 +84,42 @@ const I18N = {
     return s;
   },
 
-  /** 后端错误消息翻译：精确匹配 → {param} 模板匹配 → 原文兜底。 */
-  tErr(msg) {
+  /* Backend-message translation, shared by three sections of the language
+     tables (en/ja only; zh returns the original text):
+       err          — HTTPException / error-field messages (tErr)
+       msg          — success/info messages surfaced via {msg} interpolation
+       task.current — task progress strings shown in the KPI card
+     Matching: exact key hit -> {param} template regex -> original fallback. */
+  _translateMessage(msg, section) {
     if (!msg || this.lang === "zh-CN") return msg;
-    const err = this.dict.err || {};
-    if (err[msg]) return err[msg];
-    for (const [tmpl, en] of Object.entries(err)) {
+    const table = this.dict[section] || {};
+    if (table[msg]) return table[msg];
+    for (const [tmpl, tr] of Object.entries(table)) {
       if (!tmpl.includes("{")) continue;
       const re = new RegExp(
         "^" + tmpl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
                   .replace(/\\\{(\w+)\\\}/g, "(?<$1>.+?)") + "$");
       const m = msg.match(re);
       if (m) {
-        return en.replace(/\{(\w+)\}/g, (_, k) => m.groups?.[k] ?? "?");
+        return tr.replace(/\{(\w+)\}/g, (_, k) => m.groups?.[k] ?? "?");
       }
     }
     return msg;
+  },
+
+  /** 后端错误消息翻译：精确匹配 → {param} 模板匹配 → 原文兜底。 */
+  tErr(msg) {
+    return this._translateMessage(msg, "err");
+  },
+
+  /** Backend user-facing message (settings save / cache clear confirmations). */
+  tMsg(msg) {
+    return this._translateMessage(msg, "msg");
+  },
+
+  /** Task progress string ("Map sync: Song…") for the KPI card. */
+  tTaskCurrent(msg) {
+    return this._translateMessage(msg, "task.current");
   },
 
   setLang(lang) {
@@ -111,3 +131,5 @@ const I18N = {
 
 const t = (key, params) => I18N.t(key, params);
 const tErr = (msg) => I18N.tErr(msg);
+const tMsg = (msg) => I18N.tMsg(msg);
+const tTaskCurrent = (msg) => I18N.tTaskCurrent(msg);

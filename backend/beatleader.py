@@ -54,6 +54,11 @@ RANKED_STATUS = 3
 def classify_record(record: dict) -> dict:
     """Classify one BeatLeader record by its formal ranked status.
 
+    DEPRECATED (2026-08): not called by production code — the status/stars/pp
+    logic is inlined at the two fetch sites instead. Kept (not deleted) per
+    project convention: deprecated helpers stay for reference until an
+    intentional cleanup. New code must not use it.
+
     record: dict with difficulty.status / difficulty.stars / pp (as returned
     by fetch_scores or the raw API item).
 

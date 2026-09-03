@@ -69,7 +69,7 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 | **Official algorithm** | Faithful port of the official BSOR decoder/scorer — recomputed totals match the recorded score **note for note** (accuracy curve uses the same formula) |
 | **Note-anchored analysis** | Timeline/fatigue/summaries are anchored to real note events; mid-song density dips faithfully reflect the map layout |
 | **Multilingual** | 简体中文 / English / 日本語 UI switching (language files auto-discovered in Settings) |
-| **Standalone window** | Built-in WebView2 window with an acrylic (frosted-glass) background; auto-relocates the port if occupied |
+| **Standalone window** | Built-in WebView2 window with an acrylic background; relaunch replaces a prior SaberLab instance on 6980, while unrelated port conflicts relocate safely |
 | **3D replay** | A ChroViewer port rendering maps/replays/environments fully locally, from local data only |
 | **AI coach** | Structured metrics interpreted by an LLM for personalized guidance; can be disabled for rule-based reports (Settings → AI) |
 | **Online sync** | ScoreSaber star/PP cache rooted at local maps, with 429 rate-limit backoff and retry |
@@ -83,7 +83,7 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 
 | File | Description | Size |
 | --- | --- | --- |
-| [SaberLab-v2.0.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.0.0/SaberLab-v2.0.0-win64.zip) | **User edition**: all dependencies bundled (Python runtime + chro 3D viewer). Unzip and double-click to run | ~45 MB |
+| [SaberLab-v2.1.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.1.0/SaberLab-v2.1.0-win64.zip) | **User edition**: all dependencies bundled (Python runtime + chro 3D viewer). Unzip and double-click to run | ~45 MB |
 | [Source (saberlab-src)](https://github.com/Zircon10086/SaberLab) | **Developer edition**: repository source; install dependencies yourself as described under "Build from Source" | — |
 
 > Older versions are available on the [Releases page](https://github.com/Zircon10086/SaberLab/releases).
@@ -115,6 +115,7 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 
 ### Integration & Sync
 
+- **PP prediction**: click a ranked replay's PP value to open an "Accuracy preview" popover right below it and drag the slider to read the estimated PP at any accuracy (ScoreSaber formula replication, verified within ±0.1%; ScoreSaber data source only)
 - **ScoreSaber**: caches per-difficulty leaderboards rooted at local maps, four-tier star coloring, player PP, cross-validation; network failures never poison the cache
 - **AI Coach**: LLM provider abstraction (OpenAI-compatible protocol) fed with structured metrics, single-variable experiments, facts/inference separation; algorithm-generated basic reports even without a key
 - **NPS**: supports v2 / v3 note formats, one-click density computation for all maps
@@ -134,8 +135,10 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 py -3 -m venv --without-pip .venv
 py -3 -m pip --python .venv\Scripts\python.exe install fastapi uvicorn numpy pyyaml pywebview
 
-:: 2. chro subproject (3D replay; rebuild after changing its source)
-cd frontend\chro && pnpm build
+:: 2. Optional 3D replay plugin (external GPL-2.0 project)
+:: Build ..\Local-ChroViewer according to its README, then install its
+:: SaberLab distribution here (index.html and LICENSE must be present):
+robocopy ..\Local-ChroViewer\saberlab\chro plugins\chro /E
 
 :: 3. Run
 run.bat                 :: standalone window (acrylic)

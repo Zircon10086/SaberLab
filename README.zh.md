@@ -69,7 +69,7 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 | **官方算法** | BSOR 官方解码器/计分器逐项移植，重算总分与 Replay 记录**逐分一致**（acc 曲线同口径） |
 | **Note 锚定分析** | 时间序列/疲劳/摘要全部锚定真实 note 事件，中段密度低谷忠实呈现谱面结构 |
 | **多语言** | 简体中文 / English / 日本語 界面切换（设置页自动发现语言文件） |
-| **独立窗口** | 自带 WebView2 窗口与毛玻璃背景；端口占用自动顺延 |
+| **独立窗口** | 自带 WebView2 窗口与毛玻璃背景；重新启动会替换 6980 上的旧 SaberLab，其他程序占用端口时安全顺延 |
 | **3D 回放** | ChroViewer 移植，谱面/回放/环境全本地渲染，纯本地数据源 |
 | **AI 教练** | 结构化指标交给 LLM 解读，获取个性化指导；可关闭 AI 使用规则报告（设置 → AI） |
 | **联网同步** | ScoreSaber 星级/PP 缓存、429 限速退避重试 |
@@ -83,7 +83,7 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 
 | 文件 | 说明 | 大小 |
 | --- | --- | --- |
-| [SaberLab-v2.0.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.0.0/SaberLab-v2.0.0-win64.zip) | **用户版**：内置全部依赖（Python 运行时 + chro 3D 查看器），解压双击即用 | ~45 MB |
+| [SaberLab-v2.1.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.1.0/SaberLab-v2.1.0-win64.zip) | **用户版**：内置全部依赖（Python 运行时 + chro 3D 查看器），解压双击即用 | ~45 MB |
 | [源码（saberlab-src）](https://github.com/Zircon10086/SaberLab) | **开发者版**：仓库源码，按下方「从源码构建」自行安装依赖 | — |
 
 > 更早版本见 [Releases 页面](https://github.com/Zircon10086/SaberLab/releases)。
@@ -121,6 +121,9 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 
 ### 集成与同步
 
+- **PP 预测**：点击 ranked Replay 条目的 PP 值，在其下方弹出「准确率预览」小窗，
+  拖动滑条即可读取不同准确率下的预估 PP（ScoreSaber 公式复刻，实测 ±0.1%；
+  仅 ScoreSaber 数据源）
 - **ScoreSaber**：以本地谱面为根缓存全难度 leaderboard，
   星级四色分级、玩家 pp、交叉验证；网络失败不投毒缓存
 - **AI Coach**：LLM Provider 抽象（OpenAI 兼容协议），引用结构化指标、单变量实验、
@@ -142,8 +145,10 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 py -3 -m venv --without-pip .venv
 py -3 -m pip --python .venv\Scripts\python.exe install fastapi uvicorn numpy pyyaml pywebview
 
-:: 2. chro 子项目（3D 回放，改动源码后必须重建）
-cd frontend\chro && pnpm build
+:: 2. 可选 3D 回放插件（仓库外 GPL-2.0 独立项目）
+:: 按 ..\Local-ChroViewer 的 README 构建，再安装其 SaberLab 分发产物
+:: （plugins\chro 中必须包含 index.html 与 LICENSE）：
+robocopy ..\Local-ChroViewer\saberlab\chro plugins\chro /E
 
 :: 3. 运行
 run.bat                 :: 独立窗口（毛玻璃）

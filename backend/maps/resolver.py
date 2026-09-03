@@ -84,13 +84,23 @@ def read_level_info(folder: pathlib.Path) -> Optional[dict]:
                     if diff_path:
                         try:
                             diff_data = json.loads(diff_path.read_bytes().decode("utf-8-sig"))
-                            notes = diff_data.get("_notes") or diff_data.get("notes") or []
+                            # v2 field _notes / v3 fields colorNotes (same
+                            # extraction as compute_level_nps below — v3-only
+                            # maps used to yield song_length=0 here, silently
+                            # disabling the <98% completion check in the engine)
+                            notes = (diff_data.get("_notes") or diff_data.get("notes")
+                                     or diff_data.get("colorNotes") or [])
                             if notes:
-                                # Find the beat time of the last note
-                                last_beat = max(n.get("_time", 0) or n.get("time", 0) for n in notes)
+                                # Find the beat time of the last note (v2: _time/time; v3: b)
+                                last_beat = 0.0
+                                for n in notes:
+                                    t = n.get("_time", n.get("time", n.get("b", 0)))
+                                    if t:
+                                        last_beat = max(last_beat, float(t))
                                 # Estimate song length (seconds) = (last_beat / bpm) * 60
-                                song_length = (last_beat / bpm) * 60
-                                break
+                                if last_beat > 0:
+                                    song_length = (last_beat / bpm) * 60
+                                    break
                         except (json.JSONDecodeError, OSError):
                             continue
     
@@ -343,9 +353,11 @@ class MapResolver:
         # -> fail fast, never run concurrent/duplicate full scans (86 orphan cover
         # requests on the history page once triggered multiple concurrent full scans,
         # saturating the thread pool and freezing all APIs for minutes).
+        # Debounced requests are NOT added to the negative cache: the map was
+        # never actually searched, so caching it would poison resolution forever
+        # (a level downloaded moments later would never be found until restart).
         with self._scan_lock:
             if self._scanning or time.time() - self._last_scan < 30:
-                self._negative_cache.add(key)
                 return None
             self._scanning = True
         try:
@@ -380,9 +392,9 @@ class MapResolver:
             return None   # no DB row: do not trigger a scan (row creation belongs to map_scan)
         if key in self._negative_cache:
             return None
+        # Debounced requests are not negatively cached (see resolve())
         with self._scan_lock:
             if self._scanning or time.time() - self._last_scan < 30:
-                self._negative_cache.add(key)
                 return None   # scanning now / scanned within 30s: don't repeat, don't block
             self._scanning = True
         try:
@@ -431,8 +443,15 @@ class MapResolver:
             if p and p.exists():
                 return p
         # Fallback 3: any image file (largest first)
+        def _size(f: pathlib.Path) -> int:
+            # a file may vanish between iterdir() and stat(); an unguarded
+            # stat() here once had a path to a 500 on the cover endpoint
+            try:
+                return f.stat().st_size
+            except OSError:
+                return 0
         imgs = sorted(
             (f for f in folder.iterdir()
              if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png")),
-            key=lambda f: f.stat().st_size, reverse=True)
+            key=_size, reverse=True)
         return imgs[0] if imgs else None

@@ -38,7 +38,11 @@ Current dependencies: fastapi / uvicorn / numpy / pyyaml / pywebview 6.2.1 / pyi
 | `backend\host.py --acrylic-mode off` | Window without acrylic (visual comparison) |
 | `backend\host.py --acrylic-mode backdrop\|acrylic` | Experimental: DWM backdrop board (known client-area grey limitation) |
 
-- Port 6980, auto-relocates to 6981..6999 if occupied; single instance: prompts and exits if another instance is running
+- Port 6980 by default. If the standard/configured range contains an old SaberLab,
+  startup verifies both its `/api/status` identity and TCP owner PID, terminates
+  it, and binds 6980 again. Unrelated port occupants are never killed and still
+  cause safe fallback to 6981..6999. A Windows named mutex serializes concurrent
+  launchers through server readiness, preventing double-launch races.
 - Closing the window → graceful exit (uvicorn should_exit, no leftover processes)
 
 ## 4. Directory Layout
@@ -76,7 +80,10 @@ _tmp/          temporary test area (probes/screenshot scripts, safe to wipe)
 ### 5.1 Config System (schema-driven)
 - `config/schema.py` defines every config item (key/label/type/group/hidden/restart_required); the frontend generates the settings UI from it and the backend reads/validates against it
 - Path derivation: `game.instance_root` → replay / custom_levels / songcore (`config/service.py` DERIVED_PATHS, standard Beat Saber relative paths); `hidden: True` items are handled by the "Game Path" card (native folder dialog + automatic validation)
-- Atomic writes: tmp → flush → os.replace; a corrupt config.yaml is auto-backed up as `.corrupt-<ts>`
+- Atomic writes: tmp → flush → os.replace; a corrupt config.yaml is auto-backed
+  up as `.corrupt-<ts>`. Check the warning's **absolute path** first: test
+  fixtures commonly live under `_tmp` and must not be mistaken for the user's
+  real `config/config.yaml`
 - Key items: `ai.ai_report_enabled` ("Use AI for Reports" — unchecked short-circuits `run_ai_report` to the rule report, no LLM calls); `analysis.slope_group_notes` (note-group size); `analysis.window_seconds/window_step_seconds` (deprecated, hidden, kept for compatibility)
 
 ### 5.2 dialog.py Bridge (important)
@@ -163,6 +170,10 @@ SQLite opens a new connection per call (WAL, 30s timeout); all SQL lives in `db/
 ```bat
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+- **Final UI/E2E acceptance must use the standalone WebView2 window**, launched
+  by `run.bat` or `backend/host.py` without `--browser`. Browser mode is allowed
+  for narrow diagnostics, but browser rendering does not count as final UI/E2E
+  verification. Target the window title `SaberLab — Beat Saber 本地分析实验室`.
 - Golden Fixture #001: SECRET BOSS Expert (`tests/test_bsor_parser.py`, 2069 notes, full assertions)
 - `_tmp/` probes (reusable): `probe_transparent.py` / `probe_dwm.py` (acrylic capabilities), `probe_kpi*.py` (KPI/task card styles), `probe_layout.py` (detail chart height), `probe_height.py`
 - `_tmp/shot.ps1` screenshots by window title; `_tmp/pngstats.py` numpy pixel statistics (for validating the UI without a vision model)

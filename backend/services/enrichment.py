@@ -20,21 +20,55 @@ from __future__ import annotations
 
 import json
 
+from ..analysis.pp_predict import predict_pp, ss_accuracy
+
+
+def _mode_name(mode: str) -> str:
+    """Normalize a leaderboard game mode to its core name.
+
+    ScoreSaber stores "SoloStandard" while BeatLeader stores "Standard";
+    stripping the "Solo" prefix lets both hit the same tiebreak. Without this,
+    the SoloStandard preference below was dead: the snapshot SELECT did not
+    even carry game_mode (fixed 2026-08) and the literal never matched BL rows.
+    """
+    m = (mode or "").strip()
+    return m[4:] if m.lower().startswith("solo") else m
+
 
 def _lb_better(a: dict, b: dict) -> bool:
-    """Whether a is better than b (ranked first > SoloStandard first > has stars first)."""
+    """Whether a is better than b (ranked first > SoloStandard first > has stars first).
+
+    The SoloStandard tiebreak matters when several characteristics share a
+    difficulty name (90°/OneSaber/Lightshow "ExpertPlus"): without it an
+    arbitrary row wins, and BeatLeader — which stores stars on unranked maps —
+    could attach Lightshow stars to the Standard leaderboard.
+    """
 
     def score(lb):
         s = 0
         if lb.get("ranked"):
             s += 100
-        if (lb.get("game_mode") or "") == "SoloStandard":
+        if _mode_name(lb.get("game_mode")) == "Standard":
             s += 10
         if (lb.get("stars") or 0) > 0:
             s += 1
         return s
 
     return score(a) > score(b)
+
+
+def pick_leaderboard(rows: list[dict]) -> dict | None:
+    """Pick the leaderboard row representing one (map_hash, difficulty) key.
+
+    Same tie-break as the snapshot fold in _ensure_snapshot (ranked first >
+    Standard first > has stars first); exposed so single-key lookups (e.g. the
+    PP preview endpoint) cannot drift from the list enrichment semantics.
+    """
+    best: dict | None = None
+    for lb in rows:
+        if best is None or _lb_better(lb, best):
+            best = lb
+    return best
 
 
 class EnrichmentService:
@@ -52,16 +86,19 @@ class EnrichmentService:
 
     def __init__(self, repo):
         self._repo = repo
-        self._platform: str | None = None
-        self._snapshot: tuple[dict, dict, dict] | None = None
+        # (platform, snapshot) stored as ONE tuple: two separate fields had a
+        # torn-read window during a platform switch, where a concurrent reader
+        # could enrich one response with the other platform's stars/pp.
+        self._snapshot: tuple[str, tuple[dict, dict, dict]] | None = None
 
     def invalidate(self) -> None:
         """Call after data changes (rescan / ranked sync / NPS update / cache clear / platform switch)."""
         self._snapshot = None
 
     def _ensure_snapshot(self, platform: str) -> tuple[dict, dict, dict]:
-        if self._snapshot is not None and self._platform == platform:
-            return self._snapshot
+        entry = self._snapshot
+        if entry is not None and entry[0] == platform:
+            return entry[1]
         key_map: dict[str, dict] = {}
         for m in self._repo.list_maps(limit=100000):
             try:
@@ -81,9 +118,8 @@ class EnrichmentService:
         rc: dict[tuple, dict] = {}
         for r in self._repo.list_ranked_cache(platform=platform):
             rc[(r["map_hash"], r["difficulty"])] = r
-        self._snapshot = (key_map, lb_map, rc)
-        self._platform = platform
-        return self._snapshot
+        self._snapshot = (platform, (key_map, lb_map, rc))
+        return self._snapshot[1]
 
     def enrich(self, days: list[dict], platform: str = "scoresaber") -> None:
         """Attach beatmap_key / stars / pp / nps to the per-day grouped replay lists."""
@@ -111,9 +147,24 @@ class EnrichmentService:
                 if r.get("stars") in (None, 0, 0.0):
                     r["stars"] = None
                     r["ranked"] = False
-                # pp: player score index (personal play records)
+                # PP is platform-specific:
+                # - ScoreSaber: map_ranked_cache.pp is the player's CLOUD BEST
+                #   for this difficulty, not this local replay. Derive each
+                #   completed local play independently from leaderboard maxPP
+                #   and its deterministic accuracy. This avoids painting one
+                #   cloud best PP onto every local attempt (Cyaegha Expert).
+                # - BeatLeader: its PP formula is intentionally not implemented
+                #   yet; preserve the existing platform cache behavior.
                 c = rc.get((mh, diff))
-                pp = c.get("pp") if c else None
+                if platform == "scoresaber":
+                    max_pp = lb.get("max_pp") if lb else None
+                    accuracy = ss_accuracy(r.get("accuracy"), r.get("score"),
+                                           r.get("score_effective"))
+                    pp = (predict_pp(float(max_pp), float(accuracy))
+                          if lb and lb.get("ranked") and max_pp
+                          and accuracy is not None else None)
+                else:
+                    pp = c.get("pp") if c else None
                 # ---- pp fallback strategy ----
                 # 1. A quit-in-progress play (incomplete) cannot have produced pp
                 # 2. 0 stars or no stars = the level is not ranked, so no pp is produced

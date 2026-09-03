@@ -49,7 +49,14 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
     fps_median = float(np.median(replay.frames["fps"])) if replay.frame_count else 0.0
 
     counts = acc["counts"]
-    full_combo = counts["bad"] == 0 and counts["miss"] == 0
+    # Full combo = no combo-breaker events. Bombs break the combo exactly like
+    # bad cuts/misses do (compute_score treats them as penalty events, as the
+    # real game does), and counts["bomb"] counts only bombs actually CUT —
+    # untouched bombs produce no note event in the BSOR scoring stream
+    # (bomb events were excluded from FC before 2026-08: a run that hit a bomb
+    # used to be flagged FC while max_combo proved the combo broke).
+    full_combo = (counts["bad"] == 0 and counts["miss"] == 0
+                  and counts["bomb"] == 0)
 
     # 6) Completion status determination
     # Priority: filename exit (mid-run exit, authoritative) > modifiers contain NF (auto-enabled after Fail) > fail_time > duration

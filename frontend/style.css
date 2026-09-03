@@ -23,6 +23,9 @@
   --text: #e9edf5;
   --text-2: #b9c2d0;
   --muted: #7f8ba0;
+  --scrollbar-track: rgba(10, 13, 19, 0.58);
+  --scrollbar-thumb-a: rgba(255, 61, 90, 0.48);
+  --scrollbar-thumb-b: rgba(61, 155, 255, 0.48);
 
   /* 品牌色（Beat Saber 红蓝 saber） */
   --red: #ff3d5a;
@@ -72,6 +75,11 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+html {
+  color-scheme: dark;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(127, 139, 160, 0.72) var(--scrollbar-track);
+}
 body {
   background: var(--bg);
   color: var(--text);
@@ -93,9 +101,23 @@ body::before {
   pointer-events: none;
 }
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 5px; border: 2px solid var(--bg); }
-::-webkit-scrollbar-track { background: transparent; }
+/* Document and nested scroll areas share the app's dark acrylic/brand palette.
+   The transparent thumb border creates a quiet inset without exposing the
+   native WebView2 white track that appeared around the old scrollbar. */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb {
+  min-height: 36px;
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--scrollbar-thumb-a), var(--scrollbar-thumb-b));
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  --scrollbar-thumb-a: rgba(255, 61, 90, 0.72);
+  --scrollbar-thumb-b: rgba(61, 155, 255, 0.72);
+}
+::-webkit-scrollbar-corner { background: var(--scrollbar-track); }
 
 /* ============================================================
    App Shell：Header + Sidebar + Main
@@ -281,7 +303,10 @@ h3 {
   padding: var(--space-4) var(--space-5);
   transition: background-size .3s ease;
 }
-.kpi .kpi-k { font-size: var(--fs-xs); color: var(--muted); letter-spacing: 0.4px; }
+.kpi .kpi-k {
+  display: flex; align-items: center; min-height: 17px;
+  font-size: var(--fs-xs); color: var(--muted); letter-spacing: 0.4px;
+}
 .kpi .kpi-v {
   font-size: var(--fs-2xl); font-weight: 600; font-variant-numeric: tabular-nums;
   margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -336,9 +361,11 @@ select, input[type="text"], input:not([type]) {
 @keyframes spin { to { transform: rotate(360deg); } }
 /* 任务状态卡片标题旁加载动画（有任务运行时显示） */
 .kpi-spinner {
-  width: 17px; height: 17px; margin: 0 0 0 6px;
-  vertical-align: -3px; flex: none;
+  display: none; width: 13px; height: 13px; margin: 0 0 0 7px;
+  border-color: rgba(127, 139, 160, 0.38);
+  border-top-color: var(--blue); flex: none;
 }
+.kpi[data-task="running"] .kpi-spinner { display: inline-block; }
 
 /* ============================================================
    Replay 条目（表格化）
@@ -473,6 +500,7 @@ select, input[type="text"], input:not([type]) {
 .pill.fail { color: var(--red); border-color: rgba(255, 61, 90, 0.5); }
 .pill.nf { color: var(--yellow); border-color: rgba(245, 197, 66, 0.5); }
 .pill.pending { color: var(--muted); border-color: rgba(140, 148, 170, 0.5); }
+.pill.missing { color: var(--red); border-color: rgba(255, 61, 90, 0.5); }
 .pill.diff-ExpertPlus { color: var(--purple); border-color: rgba(160, 107, 255, 0.5); }
 .pill.diff-Expert { color: var(--red); border-color: rgba(255, 61, 90, 0.5); }
 .pill.diff-Hard { color: var(--yellow); border-color: rgba(245, 197, 66, 0.5); }
@@ -508,15 +536,15 @@ mark {
    ranked (status != 3; BL's star algorithm is public) — yellow pill + hover
    hint "该歌曲尚未认证，无 pp 得分" */
 .star-unranked {
-  background: rgba(245, 197, 66, 0.18);
-  border: 1px solid rgba(245, 197, 66, 0.45);
+  background: rgba(245, 197, 66, 0.08);
+  border: 1px solid rgba(245, 197, 66, 0.24);
   border-radius: 7px;
   padding: 0 6px;
   cursor: help;
 }
 .hero-kpi .v.star-unranked {
-  background: rgba(245, 197, 66, 0.15);
-  border: 1px solid rgba(245, 197, 66, 0.4);
+  background: rgba(245, 197, 66, 0.07);
+  border: 1px solid rgba(245, 197, 66, 0.22);
   border-radius: 10px;
   padding: 2px 12px;
 }
@@ -579,6 +607,16 @@ mark {
 .detail-hero h2 { font-size: var(--fs-xl); margin: 0 0 4px; font-weight: 600; }
 .detail-hero .sub { color: var(--muted); font-size: var(--fs-sm); }
 .detail-hero .badges { margin-top: var(--space-2); }
+/* 原始回放文件缺失警告条（2026-09：详情页 hero 下方，DB 数据仍可查看） */
+.detail-file-missing {
+  display: flex; align-items: center; gap: var(--space-3);
+  margin: 0 0 var(--space-4); padding: 12px 18px;
+  border: 1px solid rgba(255, 61, 90, 0.45);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(90deg, rgba(255, 61, 90, 0.14), rgba(255, 61, 90, 0) 65%), var(--surface);
+  color: var(--text-2); font-size: var(--fs-sm); line-height: 1.6;
+}
+.detail-file-missing .dmf-icon { font-size: 22px; flex: none; }
 /* v1.6.0：顶栏 KPI 由 5 个扩到 8 个（+GOOD/MISS-BAD/NOTE），间距收紧防溢出 */
 .hero-kpis { display: flex; gap: 20px; flex: none; }
 .hero-kpi { text-align: right; }
@@ -773,19 +811,117 @@ mark {
   background: rgba(8, 10, 16, 0.55); border-radius: 5px;
 }
 
-/* 弹窗（通用能力保留，切割细节已改卡片内展开，不再使用） */
-.slice-modal-overlay {
-  position: fixed; inset: 0; z-index: 100;
-  background: rgba(0, 0, 0, 0.55);
-  display: flex; align-items: center; justify-content: center;
-}
-.slice-modal {
-  background: var(--surface); border: 1px solid var(--border-strong);
+/* 锚定弹出小窗（2026-08 通用组件，app.js openPopover/closePopover）：
+   轻量浮动卡片，锚定触发元素下方弹出（空间不足翻转上方，--pop-drop 反转入场方向），
+   不加遮罩、不阻断页面交互；点击外部 / Escape / 滚动 / 缩放关闭。
+   全屏 .modal-overlay 保留为强提醒接口，二者语义不同。 */
+.popover {
+  position: fixed; z-index: 200;   /* 浮层：高于 header(100)/sidebar(90)，低于 toast(1000) */
+  /* 玻璃卡片材质（2026-08 优化）：复用项目 acrylic 预设 ——
+     底色 = body.acrylic 的 --surface 半透明值 rgba(20,22,30,0.66)
+     （浏览器/毛玻璃 webview 模式统一，不再吃 var(--surface) 的不透明灰底，
+     否则弹出层会变成盖在内容上的"实心白板"）；
+     模糊 = header 同款 blur(14px) saturate(150%)（项目的浮层玻璃配方）。
+     底层列表/壁纸经模糊透出，文字仍保持可读。 */
+  background: rgba(20, 22, 30, 0.66);
+  backdrop-filter: blur(14px) saturate(150%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg); padding: var(--space-5);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  opacity: 0; transform: translateY(var(--pop-drop, -6px)) scale(0.96);
+  transform-origin: top center;
 }
-.slice-modal-title { font-size: var(--fs-md); font-weight: 600; margin-bottom: var(--space-4); text-align: center; }
-.slice-modal-close { margin-top: var(--space-4); text-align: center; }
+.popover.open { animation: popIn 0.18s ease-out forwards; }
+.popover.closing { animation: popOut 0.15s ease-in forwards; }
+@keyframes popIn { to { opacity: 1; transform: translateY(0) scale(1); } }
+/* 淡出（2026-08 修复：原先 popOut 只有 to 关键帧，动画起点取元素基础值
+   opacity:0 → 实际是 0→0，关闭时卡片瞬间消失而非淡出）。
+   from 显式 = 入场完成态；to 的位移取 --pop-drop 反向（正常弹出向下滑出、
+   翻转弹出向上滑出，与入场方向对称）。 */
+@keyframes popOut {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(calc(var(--pop-drop, -6px) * -1)) scale(0.96); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .popover { opacity: 1; transform: none; }
+  .popover.open, .popover.closing { animation: none; }
+}
+
+/* PP 预测卡片（v2.1.0 准确率预览：pp = maxPP × curve(acc)，ScoreSaber 公式复刻；
+   布局对齐 ScoreSaber 官方 Accuracy preview 卡片：黄色滑条 + acc 框 + PP 结果行） */
+.pp-preview { min-width: 340px; }
+.pp-head { display: flex; align-items: center; justify-content: space-between; }
+.pp-title { font-size: var(--fs-md); font-weight: 600; }
+.pp-reset {
+  background: transparent; border: none; color: var(--muted);
+  font-size: 18px; line-height: 1; cursor: pointer; padding: 2px 6px;
+}
+.pp-reset:hover { color: var(--yellow); }
+.pp-sub { color: var(--muted); font-size: var(--fs-xs); margin-bottom: var(--space-4); }
+.pp-slider-row { display: flex; align-items: center; gap: var(--space-4); }
+/* 自绘滑块（v2.1.0 打磨）：track / fill / thumb 三元素共用同一 --pct 百分比坐标，
+   天然重合——原生 input[type=range] 在 WebKit 下 thumb 与渐变 track 的几何各自
+   计算，圆钮与进度条边界难以对齐（用户决策：手动重写，不复用原生外观）。
+   原生 input 仅留作无痕交互层（定位、拖拽、点击、键盘全部走浏览器原生行为）。 */
+.pp-slider { position: relative; flex: 1; height: 22px; }
+.pp-track {
+  position: absolute; left: 0; right: 0; top: 50%; height: 6px;
+  transform: translateY(-50%); border-radius: 3px;
+  background: rgba(255, 255, 255, 0.14);
+}
+.pp-fill {
+  position: absolute; left: 0; top: 0; height: 100%; border-radius: 3px;
+  background: var(--yellow); width: 50%;   /* 初始值；实际宽度由 app.js update() 按像素设置 */
+}
+.pp-thumb {
+  position: absolute; top: 50%; left: 50%;
+  width: 18px; height: 18px; border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: #fff; border: 2px solid var(--yellow);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.pp-range {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+  opacity: 0; cursor: pointer; outline: none;
+  appearance: none; -webkit-appearance: none;
+}
+.pp-acc-box {
+  min-width: 104px; text-align: right; padding: 8px 12px; border-radius: 10px;
+  display: flex; align-items: baseline; justify-content: flex-end; gap: 4px;
+  background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border);
+  font-size: var(--fs-md); font-weight: 600; font-variant-numeric: tabular-nums;
+}
+/* 精确 ACC 输入框（2026-08 打磨）：滑条右侧 acc 显示改为可编辑——输入百分比、
+   回车即刻生效（联动滑条/fill/thumb/PP 值）。输入中由 .pp-acc-box:focus-within
+   高亮 chip 边框。
+   注意：必须用 .pp-acc-box .pp-acc-input 提升特异性——style.css 的全局
+   input[type="text"] 规则（line 322，surface-2 背景 + border-strong 边框）
+   特异性 (0,1,1) 高于裸 .pp-acc-input (0,1,0)，否则输入框会显示自己的灰框
+   （与 chip 形成"两层框"）。appearance:none 同时清掉 UA 默认外观。 */
+.pp-acc-box .pp-acc-input {
+  appearance: none; -webkit-appearance: none;
+  background: transparent; border: none; outline: none; box-shadow: none;
+  min-width: 0; width: 58px; padding: 0;
+  color: var(--text); font: inherit; font-weight: 600;
+  font-variant-numeric: tabular-nums; text-align: right;
+}
+.pp-acc-box:focus-within {
+  border-color: var(--border-strong);
+  background: rgba(255, 255, 255, 0.08);
+}
+.pp-unit { color: var(--muted); font-size: var(--fs-sm); font-weight: 400; }
+.pp-result-row {
+  margin-top: var(--space-4); display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border);
+}
+.pp-result-row .k { color: var(--muted); font-size: var(--fs-sm); }
+.pp-result-row .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pp-note { margin-top: var(--space-3); color: var(--muted); font-size: var(--fs-xs); }
+/* replay 列表里可点击的 PP 值 */
+.pp-click { cursor: pointer; border-radius: 8px; }
+.pp-click:hover .v { color: var(--yellow); text-decoration: underline dotted; }
 /* 同谱历史与上方卡片间距 */
 .same-map-history { margin-top: var(--space-4); }
 
@@ -1041,31 +1177,87 @@ button.danger-armed:hover { border-color: var(--green); background: rgba(56, 209
 }
 
 /* ============================================================
+   通用弹窗（全局强提醒接口，app.js openModal/closeModal）——
+   顶层浮层组件，专门用于需要用户显式关注/确认的强提醒内容
+   （警示、不可撤销操作、结构化长内容等）；与轻量 popover
+   （锚定、不阻断交互、点击外部即关）语义不同，各自独立。
+   ============================================================ */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg); padding: var(--space-5);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.modal-title { font-size: var(--fs-md); font-weight: 600; margin-bottom: var(--space-4); text-align: center; }
+.modal-close { margin-top: var(--space-4); text-align: center; }
+
+/* ============================================================
    toast（替代原生 alert 的轻提示）
+   2026-08 改版：右下角 → 顶部居中向下弹出；入场从上方 14px 落下；
+   卡片顶部全宽进度条（显示剩余时间：左端固定、右端从右向左缩短到最左端，
+   归零触发淡出）；淡出向上收起（与入场对称）。
    ============================================================ */
 #toast-root {
   position: fixed;
-  right: 20px; bottom: 20px;
+  top: 14px; left: 50%;
+  transform: translateX(-50%);
   display: flex; flex-direction: column; gap: 8px;
+  align-items: center;
   z-index: 1000;
   pointer-events: none;
 }
 .toast {
-  max-width: 380px;
-  padding: 10px 14px;
+  position: relative;
+  overflow: hidden;   /* 进度条/圆角裁剪在卡片内 */
+  max-width: 440px;
+  padding: 14px 22px;   /* 2026-08 加大：卡片背景面积明显增大（原 10px 14px） */
   border-radius: var(--radius-md);
   background: var(--surface-2);
-  border: 1px solid var(--border);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   color: var(--text);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);   /* 文字适当增大：13.5 → 15px */
   opacity: 0;
-  transform: translateY(8px);
+  transform: translateY(-14px);   /* 基础态在上方：入场向下落下 / 淡出向上收起 */
   transition: opacity 0.25s ease, transform 0.25s ease;
 }
-.toast:not(.leaving) { opacity: 1; transform: none; }
-.toast-error { border-left: 3px solid var(--red); }
-.toast-info { border-left: 3px solid var(--blue); }
+.toast.in { opacity: 1; transform: none; }             /* 插入后第二帧添加（双 rAF），保证过渡从基础态开始 */
+.toast.leaving { opacity: 0; transform: translateY(-14px); }  /* 覆盖 .in：向上收起淡出 */
+/* 语义色渐变背景（2026-08 改版）：替代最早的左侧纵向色带 —— 与 replay-item
+   status 卡片同款：语义色 16% 透明度从左侧渐变，65% 处淡出，叠在 surface-2 上。
+   kind 体系：success=绿（成功）/ error=红（失败、警告）/ info=蓝 */
+.toast-success {
+  background: linear-gradient(90deg, rgba(56, 209, 124, 0.16), rgba(56, 209, 124, 0) 65%), var(--surface-2);
+}
+.toast-error {
+  background: linear-gradient(90deg, rgba(255, 61, 90, 0.16), rgba(255, 61, 90, 0) 65%), var(--surface-2);
+}
+.toast-info {
+  background: linear-gradient(90deg, rgba(61, 155, 255, 0.16), rgba(61, 155, 255, 0) 65%), var(--surface-2);
+}
+/* 顶部进度条：全宽覆盖卡片顶部起始，3s 内从右向左缩短到最左侧
+   （左端固定、右端缩回；origin left），归零触发淡出 */
+.toast-bar {
+  position: absolute; top: 0; left: 0;
+  width: 100%; height: 3px;
+  transform: scaleX(1);
+  transform-origin: left center;
+  animation: toastBar 3s linear forwards;
+}
+.toast-success .toast-bar { background: var(--green); }
+.toast-error .toast-bar { background: var(--red); }
+.toast-info .toast-bar { background: var(--blue); }
+@keyframes toastBar {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast-bar { display: none; }          /* 进度条隐藏，离场走 JS setTimeout 兜底 */
+  .toast { transition: none; }           /* leaving 时基础态（透明+上移）立即生效 */
+}
 
 /* ============================================================
    毛玻璃（webview 窗口模式，?shell=webview）

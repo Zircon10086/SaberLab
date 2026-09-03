@@ -106,7 +106,7 @@
       <div class="kpi-row" id="kpi-row">
         <div class="kpi" style="--kpi-accent: var(--red)"><div class="kpi-k" data-i18n="kpi.replays">REPLAY 总数</div><div class="kpi-v" id="kpi-replays">–</div><div class="kpi-sub" id="kpi-replays-sub">–</div></div>
         <div class="kpi" style="--kpi-accent: var(--blue)"><div class="kpi-k" data-i18n="kpi.maps">本地谱面</div><div class="kpi-v" id="kpi-maps">–</div><div class="kpi-sub" id="kpi-maps-sub">–</div></div>
-        <div class="kpi" id="kpi-task-card" style="--kpi-accent: var(--green)"><div class="kpi-k" data-i18n="kpi.task">任务状态 <span id="kpi-task-spinner" class="spinner kpi-spinner" style="display:none"></span></div><div class="kpi-v" id="kpi-task">–</div><div class="kpi-sub" id="kpi-task-sub">–</div></div>
+        <div class="kpi" id="kpi-task-card" style="--kpi-accent: var(--green)"><div class="kpi-k"><span data-i18n="kpi.task">任务状态</span><span id="kpi-task-spinner" class="spinner kpi-spinner" aria-hidden="true"></span></div><div class="kpi-v" id="kpi-task">–</div><div class="kpi-sub" id="kpi-task-sub">–</div></div>
         <div class="kpi" style="--kpi-accent: var(--purple)"><div class="kpi-k" data-i18n="kpi.ai">AI 引擎</div><div class="kpi-v" id="kpi-ai">–</div><div class="kpi-sub" id="kpi-ai-sub">–</div></div>
       </div>
 
@@ -133,7 +133,7 @@
                不同数量 replay 不再影响分页位置） -->
           <div id="pagination" class="pagination"></div>
         </div>
-        <div id="recent-replays" class="day-groups">加载中…</div>
+        <div id="recent-replays" class="day-groups" data-i18n="common.loading">加载中…</div>
       </div>
     </section>
 
@@ -164,7 +164,7 @@
         <input id="hist-filter" data-i18n-placeholder="history.filter" placeholder="按歌名筛选…" />
         <button id="btn-hist-refresh" class="mini" data-i18n="history.refresh">刷新</button>
       </div>
-      <div id="history-list" class="replay-list">加载中…</div>
+      <div id="history-list" class="replay-list" data-i18n="common.loading">加载中…</div>
     </section>
 
     <!-- ====== 对比 ====== -->

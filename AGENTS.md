@@ -1036,6 +1036,18 @@ For UI changes, verify both:
 * normal state
 * empty/loading/error state
 
+All SaberLab UI and end-to-end acceptance testing MUST use the standalone
+WebView2 window started by `run.bat` (or `backend/host.py` without `--browser`).
+Browser mode may be used for narrow diagnostics, but browser rendering does
+not count as final UI/E2E verification.
+
+During development and testing, if port 6980 is occupied by a process verified
+as SaberLab through both `/api/status` identity and the TCP owner PID, that
+process may be terminated immediately so testing can continue on 6980. Never
+terminate an unrelated port occupant. If a corrupt-config warning appears,
+inspect the absolute path first: test fixtures under `_tmp` must not be mistaken
+for the user's real `config/config.yaml`.
+
 
 
 For network-dependent functionality, test failure paths as well as successful responses.

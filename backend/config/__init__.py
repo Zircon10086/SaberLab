@@ -33,12 +33,40 @@ def load_dotenv(path: pathlib.Path | None = None) -> None:
             os.environ[k] = v
 
 
+def dotenv_key_names(path: pathlib.Path | None = None) -> set[str]:
+    """Names of the variables .env defines (without loading them).
+
+    Used by the in-app restart: the spawned child inherits this process's
+    environment, and since load_dotenv never overrides existing vars, a stale
+    value (e.g. an old API key loaded before the user saved a new one) would
+    win forever. The host strips these names from the child's env so .env is
+    re-read fresh on startup.
+    """
+    path = path or (PROJECT_ROOT / ".env")
+    names: set[str] = set()
+    if not path.exists():
+        return names
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k = line.partition("=")[0].strip()
+        if k:
+            names.add(k)
+    return names
+
+
 @dataclass
 class Config:
     instance_root: str = ""
     replay_dir: str = ""
     custom_levels_dir: str = ""
     songcore_cache: str = ""
+    # Optional second replay source (LocalLeaderboard mod, 2026-09):
+    # derived from instance_root, auto-enabled when the directory exists;
+    # it stores one copy per session (no exit replays) and doubles as a
+    # safety copy for missing-file repair (HANDOFF §4.25 待办 2).
+    local_leaderboard_dir: str = ""
     scoresaber_id: str = ""
     player_name_fallback: str = ""
     star_palette: str = "community"   # star rating color scheme (schema player.star_palette)
@@ -104,11 +132,18 @@ def load_config(path: pathlib.Path | None = None) -> Config:
     network = raw.get("network") or {}
 
     provider = str(ai.get("provider") or "deepseek").lower()
+    # Optional second replay source path (derived from the game root for
+    # old config.yaml without the key; zero-config auto detection).
+    ll_dir = game.get("local_leaderboard_dir", "")
+    if not ll_dir and game.get("instance_root"):
+        ll_dir = str(pathlib.Path(str(game.get("instance_root")))
+                     / "UserData" / "LocalLeaderboard" / "Replays").replace("\\", "/")
     cfg = Config(
         instance_root=game.get("instance_root", ""),
         replay_dir=game.get("replay_dir", ""),
         custom_levels_dir=game.get("custom_levels_dir", ""),
         songcore_cache=game.get("songcore_cache", ""),
+        local_leaderboard_dir=ll_dir,
         scoresaber_id=str(player.get("scoresaber_id", "")),
         player_name_fallback=player.get("player_name_fallback", ""),
         star_palette=str(player.get("star_palette", "community")),
