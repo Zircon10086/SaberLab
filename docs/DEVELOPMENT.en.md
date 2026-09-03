@@ -202,6 +202,12 @@ SQLite opens a new connection per call (WAL, 30s timeout); all SQL lives in `db/
    "dev-convenience" path that differs from the user edition must be evaluated
    for behavioral divergence; prefer copying/placing artifacts to the same
    location the user edition uses over adding dev-only fallbacks.
+4. **Every version must ship a RELEASE_NOTES.md**: after each packaged export
+   (`GitHub_Build\<version>\` produced by `_tools/export_github_pkg.ps1`), write
+   `GitHub_Build\<version>\RELEASE_NOTES.md` — a concise bilingual user-facing
+   change log (headline + What's in this version + Quick Start + Full Changelog
+   links, following the previously published release notes). It is published
+   with the GitHub Release; never skip or backfill it.
 
 ## 10. Common Pitfalls Quick Reference
 
