@@ -31,8 +31,14 @@ SCORING_NAMES = {
     7: "burst_slider_element",
 }
 
+# noteID -> NoteParams memo (2026-09 perf). A replay has a few hundred distinct
+# noteIDs while the analysis passes decode them ~40k times per large replay.
+# Bounded by the number of distinct noteIDs seen in a process; entries are tiny
+# frozen dataclasses. See NoteParams.decode.
+_PARAMS_CACHE: dict[int, "NoteParams"] = {}
 
-@dataclass
+
+@dataclass(frozen=True)
 class NoteParams:
     """noteID decode result (official ReplayStatisticUtils.NoteParams).
 
@@ -58,6 +64,23 @@ class NoteParams:
 
     @staticmethod
     def decode(note_id: int) -> "NoteParams":
+        """Decode a noteID into its grid/scoring parameters.
+
+        Memoized (2026-09 perf): a single replay only contains a few hundred
+        distinct noteIDs, but the analysis passes (accuracy / scoring / note
+        groups / energy) together called this ~40k times for one large replay
+        (measured 0.18 µs each ⇒ ~6 s across the library). The result is a frozen
+        value object returned to read-only callers, so caching is safe.
+        """
+        cached = _PARAMS_CACHE.get(note_id)
+        if cached is not None:
+            return cached
+        params = NoteParams._decode_uncached(note_id)
+        _PARAMS_CACHE[note_id] = params
+        return params
+
+    @staticmethod
+    def _decode_uncached(note_id: int) -> "NoteParams":
         if note_id < 0:
             return NoteParams(-1, -1, -1, -1, -1)
         if note_id < 100_000:
@@ -118,10 +141,27 @@ class NoteEvent:
     event_type: int                # effective type (bombs re-tagged per the official rule)
     raw_event_type: int            # raw type as stored in the file
     cut: Optional[NoteCutInfo] = None
+    # Decoded noteID params, filled by the parser (2026-09 perf). Kept as a plain
+    # optional attribute with a default so positional construction elsewhere stays
+    # valid; the `params` accessor below falls back to decoding when absent.
+    _params: Optional[NoteParams] = None
+    # Memo for scoring.cut_scores (pure function of the cut + noteID): the scoring
+    # pass and the note-group pass both need it for every good/bad note, and they
+    # used to compute it twice (2026-09 perf). None = not computed yet.
+    _cut_scores: Optional[tuple] = None
 
     @property
     def params(self) -> NoteParams:
-        return NoteParams.decode(self.note_id)
+        """noteID decode result (cached: the passes read it ~40k times per replay).
+
+        The parser fills `_params` once; anything constructing a NoteEvent by hand
+        still gets the correct value through this fallback.
+        """
+        p = self._params
+        if p is None:
+            p = NoteParams.decode(self.note_id)
+            self._params = p
+        return p
 
     @property
     def is_bomb(self) -> bool:

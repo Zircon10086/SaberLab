@@ -1,5 +1,13 @@
 # ScoreSaber 玩家实力与曲目颜色分级算法
 
+> ⚠️ **已被取代（2026-09）**：本文件描述的"按 PP 前 20 条取 Q25/Q50 推黄色基准"的
+> 个人色谱算法**已退役**，由 `docs/ACC_WEIGHTED_SKILL_MODEL.md`（模型）与
+> `docs/ACC_WEIGHTED_SKILL_MODEL_VALIDATION.md`（证据门 / 数据不足口径）取代；
+> 实现从 `backend/analysis/player_palette.py` 迁到 `backend/analysis/skill_model.py`
+> （三条基准 `personal80` / `personal94` / `personal96`，见 DEVELOPMENT §5.13）。
+> **保留本文件仅为记录历史决策**（曲目颜色的语义、平台隔离、离线缓存等结论仍然有效）——
+> 新需求请以上述两篇规范为准，不要照本文件的伪代码实现。
+
 版本：1.1（2026-08 修订）
 
 > v1.1 修订：① 玩家 ID 来源明确为 **BSOR Replay 自动解析**（config 中的
@@ -215,10 +223,8 @@ player_palette_cache（按 平台+玩家 缓存 yellow_stars / stage / 样本数
 
 ## 10. 实现位置
 
-- 算法纯函数：`backend/analysis/player_palette.py`（classify_player /
-  build_tiers / round_to_quarter / percentile；确定性、无 LLM、无网络）
+- 算法纯函数（**已迁移**）：`backend/analysis/skill_model.py`（三条基准的能力模型）；
+  被取代的旧实现 `backend/analysis/player_palette.py` 仅存 `build_tiers` 在用
 - 缓存：`player_palette_cache` 表（db/models.py SCHEMA + repository）
-- 拉取与注入：`backend/main.py`（/api/scoresaber/refresh 顺带计算、
-  /api/status 注入 personal 预设）
-- 展示：ScoreSaber 页玩家卡片（黄字黄色基准 + 五色色带）、列表/详情
-  STARS 颜色（复用 tiers 机制）
+- 拉取与注入：`backend/main.py`（云端页刷新时顺带计算、`/api/status` 注入可选色板）
+- 展示：云端数据页三档基准行 + 五色色带、列表/详情 STARS 颜色（复用 tiers 机制）

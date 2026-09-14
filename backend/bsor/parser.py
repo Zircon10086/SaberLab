@@ -22,7 +22,7 @@ import numpy as np
 from .models import (
     MAGIC_V1, MAGIC_QUEST, GOOD, BAD, BOMB,
     Replay, ReplayInfo, NoteEvent, NoteCutInfo, WallEvent,
-    HeightEvent, Pause, ControllerOffsets, Transform,
+    HeightEvent, Pause, ControllerOffsets, Transform, NoteParams,
 )
 
 FRAME_DTYPE = np.dtype([
@@ -194,6 +194,16 @@ def _decode_frames(r: _Reader) -> np.ndarray:
     return arr
 
 
+def _skip_frames(r: _Reader) -> None:
+    """Advance past the frames section without decoding it (see parse_bytes)."""
+    count = r.i32()
+    if count < 0:
+        raise BsorError(f"非法 frame 数量 {count}", r.p - 4)
+    need = count * FRAME_BYTES
+    r._need(need)
+    r.p += need
+
+
 def _decode_cut_info(r: _Reader) -> NoteCutInfo:
     c = NoteCutInfo()
     c.speed_ok = r.bool_()
@@ -232,7 +242,8 @@ def _decode_notes(r: _Reader) -> list[NoteEvent]:
         if note_id == -1 or note_id % 10 == 9:
             event_type = BOMB
         notes.append(NoteEvent(note_id, event_time, spawn_time,
-                                event_type, raw_type, cut))
+                                event_type, raw_type, cut,
+                                NoteParams.decode(note_id)))
     return notes
 
 
@@ -270,8 +281,15 @@ def _decode_controller_offsets(r: _Reader) -> ControllerOffsets:
     return ControllerOffsets(left, right)
 
 
-def parse_bytes(data: bytes, file_path: str = "", file_sha256: str = "") -> Replay:
-    """Parse a BSOR v1 byte stream. Raises a BsorError subclass on failure."""
+def parse_bytes(data: bytes, file_path: str = "", file_sha256: str = "",
+                skip_frames: bool = False) -> Replay:
+    """Parse a BSOR v1 byte stream. Raises a BsorError subclass on failure.
+
+    skip_frames=True skips the frames section (by far the largest) without
+    building its array — for callers that only need info/notes/walls/pauses,
+    e.g. rebuilding the energy curve for the timeline (2026-09). The reader
+    still advances correctly, so the remaining sections parse normally.
+    """
     if len(data) < 5:
         raise BsorError(f"文件过小 ({len(data)} bytes)", 0)
     r = _Reader(data)
@@ -294,7 +312,10 @@ def parse_bytes(data: bytes, file_path: str = "", file_sha256: str = "") -> Repl
         if tag == 0:
             replay.info = _decode_info(r)
         elif tag == 1:
-            replay.frames = _decode_frames(r)
+            if skip_frames:
+                _skip_frames(r)
+            else:
+                replay.frames = _decode_frames(r)
         elif tag == 2:
             replay.notes = _decode_notes(r)
         elif tag == 3:
@@ -327,6 +348,20 @@ def parse_file(path: str | Path) -> Replay:
     digest = hashlib.sha256(data).hexdigest()
     replay = parse_bytes(data, file_path=str(path), file_sha256=digest)
     return replay
+
+
+def parse_file_light(path: str | Path) -> Replay:
+    """Parse everything except the frames section.
+
+    For callers that need info/notes/walls/pauses only (e.g. rebuilding the
+    energy curve for the timeline): skips the largest section, so it costs a
+    fraction of a full parse and allocates no frame array. `frames` is left
+    empty — do NOT use for motion/kinematics.
+    """
+    path = Path(path)
+    data = path.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    return parse_bytes(data, file_path=str(path), file_sha256=digest, skip_frames=True)
 
 
 def parse_metadata_only(path: str | Path) -> Replay:

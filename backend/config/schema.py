@@ -18,7 +18,7 @@ SETTINGS_SCHEMA: list[dict] = [
         "key": "game.instance_root",
         "label": "游戏根目录",
         "type": "directory",
-        "description": "Beat Saber 安装根目录（自动派生谱面/Replay/SongCore 相对路径）",
+        "description": "Beat Saber 安装根目录",
         "restart_required": True,
         "required": True,
         "sensitive": False,
@@ -85,8 +85,12 @@ SETTINGS_SCHEMA: list[dict] = [
         "key": "player.star_palette",
         "label": "星级色谱",
         "type": "enum",
-        "enum": ["community", "personal"],
-        "description": "按星级为 Replay 条目与详情页 STARS 数字配色的方案：社区惯例（固定阈值）或个人动态（按玩家自己的 ScoreSaber 成绩计算黄色基准，颜色 = 曲目难度相对玩家当前水平的位次）。个人动态在 ScoreSaber 页点击「拉取数据并计算动态水平」后生效，离线时沿用上次结果；从未拉取过（无缓存）时自动回退社区惯例",
+        # community plus the three skill-rating tracks (see
+        # backend/analysis/skill_model.py). A track only becomes selectable once the
+        # model produced a rating for it; options without enough data are disabled by
+        # the settings UI (availability ships via /api/status and /api/settings/schema).
+        "enum": ["community", "personal80", "personal94", "personal96"],
+        "description": "按星级为 Replay 条目与详情页 STARS 数字配色的方案：社区惯例（固定阈值），或按玩家自己的成绩估计的基准——80% 基准看能打过的高难图，94% 基准看常规水平，96% 基准看高准度水平。个人基准在云端数据页点「拉取数据并计算动态水平」后生效，离线时沿用上次结果；数据不足的基准无法选择",
         "restart_required": False,
         "required": False,
         "sensitive": False,
@@ -144,6 +148,19 @@ SETTINGS_SCHEMA: list[dict] = [
         "default": 50,
     },
     {
+        "key": "ui.session_gap_minutes",
+        "label": "游玩段间隔（分钟）",
+        "type": "integer",
+        "description": "总览页「按游玩段」分页的阈值：相邻两次 Replay 的时间间隔超过该值，就判定为两段不同的游玩（期间没玩）。默认 60 分钟——远大于一首歌的时长（含重开/暂停），因此半夜跨天、或同一天上午/下午各玩一段都能正确分段，而不会被「按天」切成两天或搅成一天。调小会让长间隔的连续游玩被拆开，调大则可能把两段并成一段",
+        "restart_required": False,
+        "required": False,
+        "sensitive": False,
+        # 注意：必须留在 ui.* 而不是 analysis.*——后者一变更就会清空分析缓存
+        # （metrics/motion_series 清空 + replay 全部转 pending），而它不参与任何分析计算
+        "group": "界面",
+        "default": 60,
+    },
+    {
         "key": "analysis.fatigue_edge_seconds",
         "label": "疲劳对比边缘（秒）",
         "type": "float",
@@ -185,7 +202,7 @@ SETTINGS_SCHEMA: list[dict] = [
         "label": "AI Provider",
         "type": "enum",
         "enum": ["off", "deepseek", "qwen", "openai", "custom"],
-        "description": "AI 引擎提供方（off = 关闭，使用规则报告兜底）",
+        "description": "AI 引擎提供方",
         "restart_required": True,
         "required": False,
         "sensitive": False,
@@ -217,7 +234,10 @@ SETTINGS_SCHEMA: list[dict] = [
         "key": "ai.api_key",
         "label": "API Key",
         "type": "secret",
-        "description": "AI API Key（存储于 .env，前端仅显示脱敏状态）",
+        "description": "AI API Key（保存在程序目录的 .env 文件里；界面仅显示脱敏值）",
+        # restart_required: the key is read from the file on every access, so a saved key
+        # takes effect at once; the flag only marks that the AI client re-reads it on
+        # reload. Keep it until the provider hot-reload path is re-verified.
         "restart_required": True,
         "required": False,
         "sensitive": True,

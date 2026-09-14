@@ -6,6 +6,7 @@ settled. No resident high-frequency watcher (watchdog is a later option).
 """
 from __future__ import annotations
 
+import concurrent.futures as cf
 import hashlib
 import json
 import pathlib
@@ -20,6 +21,37 @@ from .config import Config
 from .db.repository import Repository
 from .maps.resolver import MapResolver
 from .analysis.engine import analyze_replay
+
+# ---- batch parallelism (2026-09) ----
+# Analysis threads do not help (GIL-bound hot loops measured at 1.04-1.24x), so a
+# large batch is spread over PROCESSES. 4 is the deliberate design point: SaberLab
+# targets a 6-core machine where 4 workers reach ~2x while leaving room for the
+# UI, and on very high-core machines the extra processes buy little (I/O bound).
+BATCH_WORKERS = 4
+# Below this many candidates the pool's spawn/import cost outweighs the gain.
+BATCH_PARALLEL_MIN = 24
+
+
+def _analyze_worker(path: str, force: bool) -> dict:
+    """Worker entry point: one full parse+match+analyze+persist unit.
+
+    A fresh ReplayPipeline per spawned process keeps every worker's sqlite handle,
+    resolver cache and progress state independent; the connection is closed on the
+    way out so the process does not linger holding the database file. The wiring
+    mirrors main.py's module-level construction (same three collaborators).
+    """
+    from .config import load_config
+    cfg = load_config()
+    repo = Repository(cfg.db_path)
+    resolver = MapResolver(cfg.custom_levels_dir, repo, cfg.songcore_cache)
+    pipeline = ReplayPipeline(cfg, repo, resolver, map_scan=False)
+    try:
+        return pipeline.process_file(path, force=force)
+    finally:
+        try:
+            repo.close()
+        except Exception:                                # noqa: BLE001 — best effort
+            pass
 
 # LocalLeaderboard stores the same session as BeatLeader but with a `_<tick>`
 # suffix: `<player>-<song>-<diff>-<mode>-<hash>-<ts>_<tick>.bsor` (the tick is
@@ -79,10 +111,14 @@ def _wait_stable_if_fresh(p: pathlib.Path, max_age: float = 5.0) -> bool:
 
 
 class ReplayPipeline:
-    def __init__(self, cfg: Config, repo: Repository, resolver: MapResolver):
+    def __init__(self, cfg: Config, repo: Repository, resolver: MapResolver,
+                 map_scan: bool = True):
         self.cfg = cfg
         self.repo = repo
         self.resolver = resolver
+        # map_scan=False: never trigger a full CustomLevels rescan from resolve()
+        # (batch workers set this; the batch does one scan up front instead).
+        self.map_scan = map_scan
 
     def update_config(self, cfg: Config) -> None:
         """Hot config update (called after saving settings; path-type settings take effect immediately, no restart needed)."""
@@ -142,13 +178,19 @@ class ReplayPipeline:
         if existing and existing.get("analysis_status") == "analyzed" and not force:
             return {"status": "duplicate", "replay_id": rid,
                     "song_name": existing.get("song_name"),
-                    "error": "该 Replay 已分析过（按内容 sha256 去重）"}
+                    "error": "该 Replay 已分析过"}
 
-        # Map matching
+        # Map matching. `self.map_scan` is off for batch workers (see __init__):
+        # a full CustomLevels rescan costs ~14 s on a 1000-map library, and a batch
+        # of 400 replays each missing from the DB used to trigger one per debounce
+        # window PER WORKER PROCESS — that is what turned a ~30 s batch into
+        # ~4 minutes (2026-09 perf work). Interactive single-file analysis keeps
+        # scanning, so a freshly downloaded map still gets picked up.
         map_row = None
         map_status = "not_found"
         if replay.info.map_hash:
-            map_row = self.resolver.resolve(replay.info.map_hash)
+            map_row = self.resolver.resolve(replay.info.map_hash,
+                                            trigger_scan=self.map_scan)
             if map_row:
                 map_status = "matched"
                 # Ranked metadata is handled centrally by the "map sync task"
@@ -277,7 +319,7 @@ class ReplayPipeline:
         if existing and existing.get("analysis_status") == "analyzed" and not force:
             return {"status": "duplicate", "replay_id": rid,
                     "song_name": existing.get("song_name"),
-                    "error": "该 Replay 已分析过（按内容 sha256 去重）"}
+                    "error": "该 Replay 已分析过"}
 
         # Map matching (pure local DB query; does not trigger a full scan —
         # that is a heavy operation left to "rescan map library" or full
@@ -423,12 +465,19 @@ class ReplayPipeline:
         res["total_files"] = scan["total_files"]
         return res
 
-    def analyze_all_new(self, progress_cb=None, limit: int = 0) -> list[dict]:
+    def analyze_all_new(self, progress_cb=None, limit: int = 0, force: bool = False) -> list[dict]:
         """Background precompute: analyze files newly found by scan + all ingested-but-pending replays.
 
         Never generates reports (v2.1.0 decision): a post-clear full batch used
         to call the LLM once per replay (~20s each, hours for 300+ plays).
         Reports are generated on demand from the detail page instead.
+
+        force=True re-analyses every ingested replay regardless of its current
+        analysis_status (2026-09). It exists because analysis output changes when
+        the engine gains new metrics (e.g. the energy/fail-time module) while the
+        normal batch only touches new/changed/pending rows — without it, adding a
+        metric would require wiping the whole analysis cache just to recompute
+        numbers that are deterministic anyway.
         """
         scan = self.scan()
         candidates = scan["new"] + scan["changed"]
@@ -437,22 +486,81 @@ class ReplayPipeline:
         for r in self.repo.list_pending_replays():
             if r.get("file_path"):
                 candidates.append({"path": r["file_path"]})
-        # Dedup (the same file may be both changed and pending)
+        if force:
+            # Re-analyze everything that still has its source file (raw data is
+            # read-only, derived rows are rewritten in place).
+            for r in self.repo.list_replays(limit=100000):
+                if r.get("file_path"):
+                    candidates.append({"path": r["file_path"]})
+        # Dedup (the same file may be both changed and pending) and drop rows whose
+        # source file is gone: a deleted/renamed .bsor leaves a DB row behind
+        # (ingest is add-only by design), and re-trying it every batch only
+        # produced "文件不存在" noise (2026-09).
         seen: set[str] = set()
         uniq = []
         for c in candidates:
-            if c["path"] not in seen:
-                seen.add(c["path"])
-                uniq.append(c)
+            path = c.get("path")
+            if not path or path in seen:
+                continue
+            if not pathlib.Path(path).exists():
+                continue
+            seen.add(path)
+            uniq.append(c)
         candidates = uniq
         candidates.sort(key=lambda c: c.get("mtime") or 0)
         if limit > 0:
             candidates = candidates[:limit]
+        if len(candidates) >= BATCH_PARALLEL_MIN:
+            return self._analyze_batch_parallel(candidates, progress_cb, force)
         results = []
         for i, c in enumerate(candidates):
             if progress_cb:
                 progress_cb(i + 1, len(candidates), pathlib.Path(c["path"]).name)
-            results.append(self.process_file(c["path"]))
+            results.append(self.process_file(c["path"], force=force))
+        return results
+
+    def _analyze_batch_parallel(self, candidates: list[dict], progress_cb, force: bool):
+        """Analyze a large batch across worker PROCESSES (2026-09).
+
+        Measured on the 2026-09 pipeline (407 replays, whole library):
+        serial batch 13.4 s of work vs 6.9 s with 4 workers (~1.95x) — threads are
+        useless here (1.04-1.24x, GIL-bound hot loops), processes are not.
+        Persistence stays inside each worker running the same `process_file` unit,
+        so nothing large is pickled back to the parent.
+
+        One map scan runs HERE, up front: a full CustomLevels walk costs ~14 s and
+        every worker resolving a missing hash would otherwise trigger its own copy
+        (4x 14 s, fighting over the disk — that alone made a batch 3x SLOWER than
+        serial before the 2026-09 fix).
+        """
+        paths = [c["path"] for c in candidates]
+        total = len(paths)
+        try:
+            self.resolver.scan()          # once, in the parent (workers never rescan)
+        except Exception as e:                             # noqa: BLE001
+            print(f"[batch] 前置地图扫描失败（继续，未匹配的谱面将记为 not_found）: {e}", flush=True)
+        results: list[dict] = []
+        workers = min(BATCH_WORKERS, total)
+        try:
+            with cf.ProcessPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(_analyze_worker, p, force): p for p in paths}
+                for i, fut in enumerate(cf.as_completed(futures), start=1):
+                    path = futures[fut]
+                    try:
+                        results.append(fut.result())
+                    except Exception as e:                 # noqa: BLE001 — one file must not kill the batch
+                        results.append({"status": "error", "path": path, "error": repr(e)})
+                    if progress_cb:
+                        progress_cb(i, total, pathlib.Path(path).name)
+        except Exception as e:                             # noqa: BLE001
+            # Pool creation itself can fail (e.g. a frozen/restricted environment):
+            # fall back to the serial path rather than reporting a failed batch.
+            print(f"[batch] 并行分析不可用，回退串行: {e}", flush=True)
+            results = []
+            for i, p in enumerate(paths):
+                if progress_cb:
+                    progress_cb(i + 1, total, pathlib.Path(p).name)
+                results.append(self.process_file(p, force=force))
         return results
 
     def ingest_all_new(self, progress_cb=None, limit: int = 0) -> list[dict]:

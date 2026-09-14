@@ -190,22 +190,48 @@ CREATE TABLE IF NOT EXISTS scoresaber_cache (
     PRIMARY KEY (platform, player_id)
 );
 
--- Per-player dynamic star palette (yellow baseline etc., 2026 spec):
--- computed from the player's own records on the ACTIVE platform (top-20 by pp),
--- stored so the palette works offline after one successful fetch. See
--- backend/analysis/player_palette.py.
+-- Per-player skill ratings (ACC-weighted model, 2026-09 spec):
+-- computed from the player's own ranked records on the ACTIVE platform, stored so the
+-- palette works offline after one successful fetch. See
+-- backend/analysis/skill_model.py and docs/ACC_WEIGHTED_SKILL_MODEL.md.
+--   r80/r94/r96  = "stars this player can hold at 80% / 94% / 96% accuracy"
+--                  (NULL when that track has too little direct evidence;
+--                   skill_fallback_count then reports the lower bound instead)
+--   yellow_stars = the anchor actually used for colouring = the best track with
+--                  sufficient evidence (kept for the existing tier mechanism)
+--   stage/sample_count/method/valid_count/nf_excluded = legacy columns of the
+--                  replaced classifier, kept until the new feature has settled
 CREATE TABLE IF NOT EXISTS player_palette_cache (
     platform      TEXT NOT NULL DEFAULT 'scoresaber',
     player_id     TEXT NOT NULL,   -- ScoreSaber ID (= Steam ID, parsed from BSOR; shared by both platforms)
     computed_at   TEXT,            -- last computation time (UTC)
-    stage         TEXT,            -- 初级/休闲 | 进阶/高阶 | 竞技向
-    max_single_pp REAL,
-    fallback_stars REAL,
-    yellow_stars  REAL,            -- the yellow baseline (star rating)
-    sample_count  INTEGER,         -- records used (top-20 by pp, capped)
-    method        TEXT,            -- top20 | blend8-19 | fallback | unknown
-    valid_count   INTEGER,
-    nf_excluded   INTEGER,
+    stage         TEXT,            -- legacy: 初级/休闲 | 进阶/高阶 | 竞技向
+    max_single_pp REAL,            -- legacy: best single-play pp in the evidence
+    fallback_stars REAL,           -- legacy
+    yellow_stars  REAL,            -- colour anchor (= the selected track's rating)
+    sample_count  INTEGER,         -- legacy: records used by the replaced classifier
+    method        TEXT,            -- legacy: top20 | blend8-19 | fallback | unknown
+    valid_count   INTEGER,         -- legacy
+    nf_excluded   INTEGER,         -- legacy
+    -- Column names stay short on purpose: these are cache columns, while the
+    -- selectable palette ids are personal80/personal94/personal96 (config enum,
+    -- /api payloads, i18n). main.py translates between the two.
+    -- ACC-weighted skill model (2026-09). Values are NULL when the track has less
+    -- than the minimum direct evidence; the UI shows "insufficient data" for those
+    -- instead of a number, and offers only the tracks that produced a value.
+    r80           REAL,
+    r94           REAL,
+    r96           REAL,
+    r80_direct    INTEGER,
+    r94_direct    INTEGER,
+    r96_direct    INTEGER,
+    r80_lower_bound REAL,
+    r94_lower_bound REAL,
+    r96_lower_bound REAL,
+    r80_confidence  TEXT,
+    r94_confidence  TEXT,
+    r96_confidence  TEXT,
+    skill_params  TEXT,            -- JSON: model parameter set actually used
     PRIMARY KEY (platform, player_id)
 );
 

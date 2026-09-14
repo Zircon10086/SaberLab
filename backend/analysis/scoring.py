@@ -26,7 +26,24 @@ def clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 
 def cut_scores(note: NoteEvent) -> tuple[int, int, int]:
-    """Return (before, center, after). Port of the official CutScoresForNote."""
+    """Return (before, center, after). Port of the official CutScoresForNote.
+
+    Memoized on the note object (2026-09 perf): this is a pure function of the cut
+    info and noteID, and both the scoring pass and the note-group/fatigue pass need
+    it for every good/bad note — they used to compute it twice per note.
+    """
+    cached = getattr(note, "_cut_scores", None)
+    if cached is not None:
+        return cached
+    result = _cut_scores_uncached(note)
+    try:
+        note._cut_scores = result
+    except AttributeError:          # non-dataclass stand-ins (tests) stay uncached
+        pass
+    return result
+
+
+def _cut_scores_uncached(note: NoteEvent) -> tuple[int, int, int]:
     st = note.params.scoring_type
     c = note.cut
     before = after = center = 0

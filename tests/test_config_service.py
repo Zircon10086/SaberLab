@@ -45,8 +45,12 @@ class TestCheckPaths(unittest.TestCase):
             self.skipTest("开发机路径不存在")
         results = check_paths(root)
         self.assertTrue(results[0].ok)          # 根目录
-        self.assertEqual(len(results), 5)       # 根 + 4 派生（含可选 LL 目录，2026-09）
-        self.assertTrue(all(r.ok for r in results))
+        # 根 + 4 派生（含可选 LL 目录，2026-09）+ 回放留存检测行（2026-09，非路径项）
+        self.assertEqual(len(results), 6)
+        self.assertEqual(results[-1].key, "replay_retention")
+        self.assertTrue(all(r.ok for r in results[:-1]))
+        # 该行是"顾问级"警告：由本机 mod 设置决定，可能为 note/bad，不参与 valid
+        self.assertIn(results[-1].status, ("ok", "bad", "note"))
 
     def test_invalid_root(self):
         results = check_paths("D:/__nonexistent_root__")

@@ -114,7 +114,11 @@ def _iso_time(timepost) -> str | None:
 
 def fetch_profile(cfg, player_id: str) -> dict:
     """Player profile, field-aligned with scoresaber.fetch_profile (the
-    frontend cloud page reads name/country/rank/countryRank/pp/scoreStats)."""
+    frontend cloud page reads name/country/rank/countryRank/pp/scoreStats).
+
+    `avatarUrl` (added 2026-09) carries the Steam CDN avatar URL so the sidebar
+    player card can cache it locally; it is part of the snapshot like any other
+    profile field (NOT a local cache path - see services/avatars.py)."""
     p = _get(cfg, f"{BASE}/player/{player_id}")
     stats = p.get("scoreStats") or {}
     avg_acc = stats.get("averageRankedAccuracy")
@@ -124,6 +128,7 @@ def fetch_profile(cfg, player_id: str) -> dict:
         "rank": p.get("rank"),
         "countryRank": p.get("countryRank"),
         "pp": p.get("pp"),
+        "avatarUrl": p.get("avatar"),
         "scoreStats": {
             # BeatLeader returns 0-1; the frontend divides by 100 (ScoreSaber
             # convention), so normalize to percent here.
@@ -161,6 +166,11 @@ def fetch_scores(cfg, player_id: str, limit: int = 100,
                 "time_set": _iso_time(item.get("timepost")),
                 "timepost": item.get("timepost"),
                 "score": item.get("modifiedScore") or item.get("baseScore"),
+                # Skill model inputs (see backend/analysis/skill_model.py): BeatLeader
+                # reports accuracy directly and has no per-leaderboard max score.
+                "accuracy": item.get("accuracy"),
+                "base_score": item.get("baseScore"),
+                "max_score": None,
                 "pp": item.get("pp"),
                 "weight": item.get("weight"),
                 "rank": item.get("rank"),

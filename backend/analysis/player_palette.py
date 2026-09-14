@@ -1,4 +1,15 @@
-"""Personal star palette: relative-to-player difficulty coloring (2026-08 spec).
+"""DEPRECATED (2026-09) -- replaced by backend/analysis/skill_model.py.
+
+The ACC-weighted skill model (three ratings at 80% / 94% / 96% target accuracy)
+replaced this pp-top-20 percentile baseline. Nothing in the runtime calls
+``classify_player()`` any more; the code and its tests are kept for one cycle so the
+replacement can be compared against it, then removed (user decision 2026-09-14:
+disable first, delete later, no need to preserve it).
+``build_tiers()`` is still live: it builds the frontend's colour tiers for whichever
+skill track is selected.
+
+Original specification (kept below for reference): personal star palette,
+relative-to-player difficulty coloring (2026-08 spec).
 
 Core idea: color means "map difficulty relative to THIS player's current
 level", not absolute difficulty:
@@ -77,7 +88,13 @@ _FALLBACK_BY_PP: list[tuple[float, str, float]] = [
 
 
 def classify_player(records: list[dict]) -> dict:
-    """Estimate the player's yellow baseline from their ScoreSaber records.
+    """DEPRECATED -- not called by the runtime any more (see the module docstring).
+
+    Kept only so the replaced baseline stays available for comparison until the
+    ACC-weighted model has settled; new code must use
+    ``backend.analysis.skill_model.rate_player()`` instead.
+
+    Estimates the player's yellow baseline from their records.
 
     records: list of dicts with at least stars / pp / time_set / modifiers /
              ranked (any order; time is ignored for the sample selection).

@@ -9,6 +9,8 @@ data/saberlab.sqlite*
 data/parsed/
 data/raw_replays/
 data/logs/
+# 玩家卡片图片缓存（头像/国旗，v2.2.0）——运行时产物，可随时重新下载
+data/assets/
 reports/
 __pycache__/
 *.pyc

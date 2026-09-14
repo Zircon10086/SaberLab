@@ -58,6 +58,22 @@ CREATE TABLE notes (
 """
 
 
+def _close_repos(case) -> None:
+    """Close every Repository a test left open, then drop the temp dir.
+
+    Repository caches one long-lived connection per thread (2026-09 perf work),
+    so a test that holds a Repository also holds the sqlite file handle and
+    Windows refuses to delete the temp directory until it is closed.
+    """
+    for obj in list(vars(case).values()):
+        if hasattr(obj, "close") and obj.__class__.__name__ == "Repository":
+            try:
+                obj.close()
+            except Exception:                        # noqa: BLE001 — best effort
+                pass
+    case.tmp.cleanup()
+
+
 class TestFreshDatabase(unittest.TestCase):
     """全新数据库：建库后常规读写全链路可用。"""
 
@@ -66,7 +82,7 @@ class TestFreshDatabase(unittest.TestCase):
         self.db_path = pathlib.Path(self.tmp.name) / "fresh.sqlite"
 
     def tearDown(self):
-        self.tmp.cleanup()
+        _close_repos(self)
 
     def test_fresh_db_full_workflow(self):
         repo = Repository(self.db_path)
@@ -124,7 +140,7 @@ class TestLegacyDatabaseUpgrade(unittest.TestCase):
         self.db_path = pathlib.Path(self.tmp.name) / "legacy.sqlite"
 
     def tearDown(self):
-        self.tmp.cleanup()
+        _close_repos(self)
 
     def _create_legacy_db(self):
         conn = sqlite3.connect(self.db_path)
@@ -167,6 +183,18 @@ class TestLegacyDatabaseUpgrade(unittest.TestCase):
         })
         repo.upsert_ranked_cache("BB" * 20, "ExpertPlus", 6.0, 200.0, "now")
         self.assertEqual(len(repo.list_ranked_cache()), 1)
+        # ACC-weighted skill columns are added to the palette cache (2026-09):
+        # additive only, so an old cache row survives with NULL ratings
+        repo.save_player_palette("scoresaber", "p1", {
+            "yellow_stars": 8.75, "r80": 8.75, "r94": None, "r96": None,
+            "r80_direct": 40, "r94_direct": 1, "r96_direct": 0,
+            "r94_lower_bound": None, "r80_confidence": "high",
+            "skill_params": {"lambda": 0.09},
+        })
+        cached = repo.get_player_palette("scoresaber", "p1")
+        self.assertEqual(cached["r80"], 8.75)
+        self.assertIsNone(cached["r94"])
+        self.assertEqual(cached["r80_direct"], 40)
         # 幂等：再次打开不出错
         repo2 = Repository(self.db_path)
         self.assertEqual(repo2.get_map("bb" * 20)["beatmap_key"], "16633")

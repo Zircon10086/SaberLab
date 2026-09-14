@@ -79,6 +79,22 @@ CREATE INDEX idx_ssl_hash_diff
 """
 
 
+def _close_repos(case) -> None:
+    """Close every Repository a test left open, then drop the temp dir.
+
+    Repository caches one long-lived connection per thread (2026-09 perf work),
+    so a test that holds a Repository also holds the sqlite file handle and
+    Windows refuses to delete the temp directory until it is closed.
+    """
+    for obj in list(vars(case).values()):
+        if hasattr(obj, "close") and obj.__class__.__name__ == "Repository":
+            try:
+                obj.close()
+            except Exception:                        # noqa: BLE001 — best effort
+                pass
+    case.tmp.cleanup()
+
+
 class TestPlatformMigration(unittest.TestCase):
     """旧库（无 platform 列）打开即迁移：数据保留、新结构可用、幂等。"""
 
@@ -87,7 +103,7 @@ class TestPlatformMigration(unittest.TestCase):
         self.db_path = pathlib.Path(self.tmp.name) / "legacy.sqlite"
 
     def tearDown(self):
-        self.tmp.cleanup()
+        _close_repos(self)
 
     def _create_legacy_cache_db(self):
         conn = sqlite3.connect(self.db_path)
@@ -136,8 +152,9 @@ class TestPlatformMigration(unittest.TestCase):
         self.assertEqual(repo.count_ss_leaderboards(platform="scoresaber"), 1)
         self.assertEqual(repo.count_ss_leaderboards(platform="beatleader"), 0)
         # idempotent reopen
-        repo2 = Repository(self.db_path)
-        self.assertIsNotNone(repo2.get_player_cache("scoresaber", "p1"))
+        with Repository(self.db_path) as repo2:
+            self.assertIsNotNone(repo2.get_player_cache("scoresaber", "p1"))
+        repo.close()   # cached connection holds the file handle (see _close_repos)
 
     def test_fresh_db_has_platform_columns(self):
         repo = Repository(self.db_path)
@@ -154,7 +171,7 @@ class TestPlatformIsolation(unittest.TestCase):
         self.repo = Repository(pathlib.Path(self.tmp.name) / "t.sqlite")
 
     def tearDown(self):
-        self.tmp.cleanup()
+        _close_repos(self)
 
     def test_leaderboards_and_pp_isolated(self):
         # same map, two platforms, different stars/pp
@@ -240,7 +257,7 @@ class TestEnrichmentPlatform(unittest.TestCase):
                                           platform=platform)
 
     def tearDown(self):
-        self.tmp.cleanup()
+        _close_repos(self)
 
     def test_enrich_reads_active_platform(self):
         svc = EnrichmentService(self.repo)

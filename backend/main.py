@@ -5,10 +5,12 @@ Panel:  http://127.0.0.1:6980
 """
 from __future__ import annotations
 
+import base64
 import json
 import math
 import os
 import pathlib
+import subprocess
 import sys
 import threading
 import time
@@ -29,11 +31,13 @@ from backend.config import Config, load_config, PROJECT_ROOT
 from backend import APP_INSTANCE_ID
 from backend.config.schema import STAR_PALETTES, get_star_palette
 from backend.config.service import ConfigService, check_paths
-from backend.analysis.player_palette import build_tiers, classify_player
+from backend.analysis.player_palette import build_tiers
+from backend.analysis import skill_model
 import backend.beatleader as beatleader
 from backend.db.repository import Repository
 from backend.maps.resolver import MapResolver
 from backend.services.enrichment import EnrichmentService
+from backend.services import player_assets
 from backend.watcher import ReplayPipeline
 from backend.analysis.compare import compare_metrics
 from backend.ai.provider import LLMClient
@@ -131,10 +135,9 @@ def _require_db_populated() -> None:
     """
     if _db_empty():
         raise HTTPException(
-            400, "数据库为空：请先点击总览「⚡ 一键刷新」完成首次扫描"
-                 "（入库 + 谱面库 + NPS + 联网星级同步）")
+            400, "数据库为空：请先点击总览「⚡ 一键刷新」完成首次扫描")
 
-app = FastAPI(title="SaberLab", version="2.1.0",
+app = FastAPI(title="SaberLab", version="2.2.0",
               description="Beat Saber 本地 Replay 分析实验室")
 
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
@@ -172,6 +175,10 @@ class NoCacheStaticFiles(StaticFiles):
 _task_lock = threading.Lock()
 # kind -> task dict; each kind has its own slot: same-kind conflicts 409, different kinds run in parallel
 _tasks: dict[str, dict] = {}
+
+# timeline energy curve cache (2026-09): replay_id -> (ts, vals) or [] when
+# unavailable. Bounded wholesale clear; see _energy_curve_for.
+_energy_curve_cache: dict[str, tuple] = {}
 
 
 def _set_task(kind: str, **kw):
@@ -223,7 +230,7 @@ def _wait_ingest_done(kind: str):
         time.sleep(0.5)
 
 
-def _run_batch(limit: int):
+def _run_batch(limit: int, force: bool = False):
     try:
         _wait_ingest_done("batch")
         def cb(i, n, name):
@@ -231,7 +238,7 @@ def _run_batch(limit: int):
         # No reports (v2.1.0 decision): the batch used to call the LLM once per
         # replay (~20s each — hours after a cache clear). Reports are generated
         # on demand from the detail page via /api/ai/analyze/{id}.
-        results = pipeline.analyze_all_new(progress_cb=cb, limit=limit)
+        results = pipeline.analyze_all_new(progress_cb=cb, limit=limit, force=force)
         _set_task("batch", running=False, results=results, current="")
     except Exception as e:  # noqa: BLE001
         _set_task("batch", running=False, error=f"{e}\n{traceback.format_exc()}")
@@ -399,7 +406,8 @@ def api_status():
         tasks = [dict(t) for t in _tasks.values()]
     maps_dir = {"exists": _path_ok(cfg.custom_levels_dir)}
     platform = _active_platform()
-    personal = _personal_palette_entry(platform)
+    palette_cache = _palette_cache_for(platform)
+    palette_entries = _palette_entries(palette_cache)
     return {
         "ok": True,
         "app_instance": APP_INSTANCE_ID,
@@ -423,15 +431,18 @@ def api_status():
             "provider": cfg.ai_provider,
             "model": cfg.ai_model,
             "configured": llm.configured,
+            # 'env' (inherited environment variable) | 'env_file' (.env) | ''
+            "api_key_source": cfg.ai_api_key_source(),
         },
         "chro": {"available": CHRO_AVAILABLE},
-        # Star rating color scheme: current selection + full palette definitions
-        # (single source for the frontend's starColor tiers). "personal" is
-        # computed from the current player's records on the ACTIVE platform
-        # (cached; absent offline -> the active id falls back to "community").
+        # Star rating colour scheme: current selection + palette definitions (single
+        # source for the frontend's starColor tiers). The selectable set is the skill
+        # tracks whose rating exists on the ACTIVE platform (cached; absent offline ->
+        # the active id falls back to "community").
         "ui": {
-            "star_palette": _active_palette_id(personal),
-            "star_palettes": STAR_PALETTES + ([personal] if personal else []),
+            "star_palette": _active_palette_id(palette_cache),
+            "star_palettes": STAR_PALETTES + palette_entries,
+            "star_palette_options": _palette_availability(palette_cache),
         },
     }
 
@@ -471,10 +482,14 @@ def api_analyze_latest(body: AnalyzeBody | None = None):
 # DEPRECATED (2026-08): not used by the frontend (one-click refresh covers it);
 # kept for API compatibility, intentional no-delete.
 @app.post("/api/analyze/all")
-def api_analyze_all(body: AnalyzeBody | None = None, limit: int = Query(0)):
+def api_analyze_all(body: AnalyzeBody | None = None, limit: int = Query(0),
+                    force: bool = Query(False)):
+    """Batch analyze. force=true re-analyzes every ingested replay, not just
+    new/changed/pending ones — needed after the analysis engine gains a metric
+    (e.g. energy/fail time, 2026-09) without wiping the cache."""
     _require_db_populated()   # empty-DB guard (all tasks rejected except one-click refresh)
     _require_replay_dir()   # reject directly when path is unavailable (frontend already guards, backend fallback)
-    _start_task("batch", _run_batch, (limit,))
+    _start_task("batch", _run_batch, (limit, force))
     return {"status": "started"}
 
 
@@ -565,6 +580,10 @@ def api_replays(page: int = Query(1, ge=1),
     """Paginated list.
 
     mode=day (default): grouped by day, same-day records share one page.
+    mode=session: grouped into play sessions (a gap longer than
+    ui.session_gap_minutes starts a new session) - solves the two cases
+    "by day" gets wrong: a midnight run split across two days, and two separate
+    blocks in the same day merged into one.
     mode=count: paginate by count (20 per page, flat list) - the Overview
     page's "by count" mode.
     flat=1 returns a flat list (for compare/history scenarios needing all data).
@@ -585,6 +604,15 @@ def api_replays(page: int = Query(1, ge=1),
         _attach_file_available(chunk)
         return {"replays": chunk, "total": total, "page": page,
                 "pages": pages, "mode": "count"}
+    if mode == "session":
+        data = repo.list_replays_by_session(
+            page=page, gap_seconds=max(60, int(cfg.session_gap_minutes) * 60),
+            map_hash=map_hash, days=days)
+        data["mode"] = "session"
+        enrichment.enrich(data.get("days", []), _active_platform())
+        for session in data.get("days", []):
+            _attach_file_available(session.get("replays", []))
+        return data
     data = repo.list_replays_by_day(page=page, map_hash=map_hash, days=days)
     # attach beatmap_key + ranked stars + pp (services/enrichment.py, cached)
     enrichment.enrich(data.get("days", []), _active_platform())
@@ -624,6 +652,106 @@ def api_replay_metrics(replay_id: str):
     return repo.get_metrics(replay_id)
 
 
+# ---------- OS integration for the replay's source file (2026-09, right-click menu) ----------
+# Both endpoints act on the ORIGINAL .bsor only and never touch the database: ingest is
+# add-only by design, so a removed file simply shows up as file_available=false
+# (the existing "file missing" badge/notice) while analysis stays readable.
+
+def _run_hidden(args: list[str], wait: bool = False, timeout: int = 30) -> int:
+    """Run a Windows helper invisibly (no console flash) and return its exit code.
+
+    Used for shell integration (Explorer / recycle bin). `pythonw` has no console,
+    but spawning a console program from it would still flash a window, hence
+    CREATE_NO_WINDOW.
+    """
+    CREATE_NO_WINDOW = 0x08000000
+    if wait:
+        proc = subprocess.run(args, capture_output=True, creationflags=CREATE_NO_WINDOW,
+                              timeout=timeout)
+        return proc.returncode
+    subprocess.Popen(args, creationflags=CREATE_NO_WINDOW,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return 0
+
+
+@app.post("/api/replays/{replay_id}/reveal")
+def api_replay_reveal(replay_id: str):
+    """Open the OS file browser with the replay file selected.
+
+    Falls back to the containing folder when the file no longer exists, so the
+    action stays useful after a deletion.
+    """
+    row = repo.get_replay(replay_id)
+    if not row:
+        raise HTTPException(404, "replay 不存在")
+    fp = row.get("file_path")
+    if not fp:
+        raise HTTPException(409, "该回放没有记录文件路径")
+    target = pathlib.Path(fp)
+    # NOTE (2026-09 bugfix): the switch and the path MUST be two separate argv
+    # entries ("/select," then the path). Passing them as one argument
+    # ("/select,C:\...") makes explorer fail to parse the switch and fall back to
+    # opening the user's Documents folder — verified by enumerating Explorer
+    # windows through Shell.Application. Do not "tidy" this into one string.
+    if target.exists():
+        _run_hidden(["explorer.exe", "/select,", str(target)])
+        return {"status": "opened", "mode": "select", "path": str(target)}
+    folder = target.parent
+    if folder.exists():
+        _run_hidden(["explorer.exe", str(folder)])
+        return {"status": "opened", "mode": "folder", "path": str(folder)}
+    raise HTTPException(410, "文件与所在文件夹都不存在")
+
+
+@app.post("/api/replays/{replay_id}/recycle")
+def api_replay_recycle(replay_id: str):
+    """Delete a replay: move its .bsor to the OS recycle bin AND drop the record.
+
+    Two explicit steps, in this order (2026-09, user decision):
+      1. the file goes to the OS recycle bin — never a permanent delete, so the
+         user can always pull it back out;
+      2. SaberLab removes the replay record and all its derived data (the user
+         deleted the replay; keeping the local analysis is not what they asked for).
+         Cloud-side data is untouched.
+    A missing file is tolerated (step 1 skipped) so a stale record can still be
+    cleaned up; if step 1 fails, step 2 does NOT run, so we never end up with a
+    record removed while the file is still sitting in the folder.
+    """
+    row = repo.get_replay(replay_id)
+    if not row:
+        raise HTTPException(404, "replay 不存在")
+    fp = row.get("file_path")
+    target = pathlib.Path(fp) if fp else None
+    name = row.get("file_name") or (target.name if target else "")
+    file_recycled = False
+
+    if target is not None and target.exists():
+        # Microsoft.VisualBasic.FileIO.FileSystem is the documented way to send a file
+        # to the recycle bin; it needs no extra dependency and never hard-deletes.
+        # The path is base64-encoded so any character (quotes, unicode, spaces)
+        # survives the PowerShell command line intact.
+        b64 = base64.b64encode(str(target).encode("utf-8")).decode("ascii")
+        script = (
+            "Add-Type -AssemblyName Microsoft.VisualBasic; "
+            f"$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64}')); "
+            "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
+            "$p,'OnlyErrorDialogs','SendToRecycleBin')"
+        )
+        try:
+            rc = _run_hidden(["powershell.exe", "-NoProfile", "-NonInteractive",
+                              "-Command", script], wait=True)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "回收站操作超时")
+        if rc != 0:
+            raise HTTPException(500, f"移动到回收站失败（退出码 {rc}）")
+        file_recycled = True
+
+    counts = repo.delete_replay(replay_id)
+    _energy_curve_cache.pop(replay_id, None)      # derived cache must not outlive the record
+    return {"status": "deleted", "file_name": name, "path": str(target) if target else "",
+            "file_recycled": file_recycled, "removed": counts}
+
+
 @app.get("/api/replays/{replay_id}/timeline")
 def api_replay_timeline(replay_id: str):
     """Chart data (note-anchored; the fixed time-window mode is retired, 2026):
@@ -631,6 +759,7 @@ def api_replay_timeline(replay_id: str):
              + saber speed (±7 good-cut local mean, smoothed jumps)
              + local density (±5 note neighborhood + ±2 note rounding, natural
                valleys in map gaps - faithful to the data)
+             + energy_t/energy: the simulated energy bar (white line, 2026-09)
     - events: miss/bad event timestamps (event step lines)
     - note_range: first/last note times (timeline trim bounds)
     - windows: reserved field (legacy history/empty arrays, backward compat;
@@ -654,10 +783,67 @@ def api_replay_timeline(replay_id: str):
     ts_all = [e["event_time"] for e in events if e["event_type"] != BOMB]
     notes["density_t"] = ts_all
     notes["density"] = moving_average(density_series(ts_all, 5), 5)
+    # energy bar (2026-09): rebuilt from the replay on demand rather than
+    # persisted — the energy module is a pure function of the note/wall events,
+    # so a lightweight parse (skip frames, the large section) + simulate costs
+    # ~1 ms and keeps the DB free of a redundant derived series. Failures are
+    # non-fatal: a missing/broken file simply yields no energy series.
+    en = _energy_curve_for(replay_id)
+    if en:
+        notes["energy_t"], notes["energy"] = en
     return {"windows": repo.get_windows(replay_id),
             "events": repo.get_miss_bad_events(replay_id),
             "notes": notes,
             "note_range": repo.get_note_time_range(replay_id)}
+
+
+def _energy_curve_for(replay_id: str):
+    """[(t, energy)] step-line samples for the timeline, or None when unavailable.
+
+    Cached per replay id (bounded, cleared wholesale when it grows past a small
+    cap) — the detail page redraws the chart on every toggle, and re-parsing the
+    file each time would be waste.
+    """
+    global _energy_curve_cache
+    cached = _energy_curve_cache.get(replay_id)
+    if cached is not None:
+        return cached or None
+    row = repo.get_replay(replay_id)
+    path = (row or {}).get("file_path")
+    if not path or not pathlib.Path(path).exists():
+        _energy_curve_cache[replay_id] = []
+        return None
+    try:
+        from backend.analysis.energy import EnergyConfig, simulate_energy
+        from backend.bsor import parser as bsor_parser
+        rep = bsor_parser.parse_file_light(path)
+        res = simulate_energy(rep.notes, rep.walls,
+                              EnergyConfig.from_modifiers(rep.info.modifiers))
+    except Exception as e:                             # noqa: BLE001 — never break the chart
+        print(f"[timeline] energy curve unavailable for {replay_id[:12]}: {e}", flush=True)
+        _energy_curve_cache[replay_id] = []
+        return None
+    # Step line: emit (t, value_before) then (t, value_after) per change so the
+    # bar reads as flat-then-jump, exactly like the miss/bad event lines.
+    ts: list[float] = [0.0]
+    vals: list[float] = [res.start_energy]
+    for ev in res.events:
+        if ev.reason == "fail":
+            ts.append(ev.t)
+            vals.append(0.0)
+            continue
+        ts.append(ev.t)
+        vals.append(round(ev.energy - ev.delta, 6))
+        ts.append(ev.t)
+        vals.append(round(ev.energy, 6))
+    if len(ts) > 20000:                                # safety cap (chart readability)
+        step = len(ts) // 20000 + 1
+        ts, vals = ts[::step], vals[::step]
+    result = (ts, vals)
+    if len(_energy_curve_cache) > 256:                 # bounded: detail view is user-driven
+        _energy_curve_cache.clear()
+    _energy_curve_cache[replay_id] = result
+    return result
 
 
 @app.get("/api/replays/{replay_id}/series")
@@ -742,7 +928,16 @@ def api_replay_pp_preview(replay_id: str):
 
 @app.get("/api/history")
 def api_history(map_hash: Optional[str] = None, days: Optional[int] = None,
-                limit: int = Query(200, le=2000)):
+                limit: int = Query(2000, le=50000)):
+    """Flat replay list for the history page.
+
+    `limit` upper bound is 50000 (2026-09): the history page fetches the whole
+    library when a search term is present, because searching only the newest N
+    rows silently hides older matches (measured: with a 2000 cap on a 6000-replay
+    library, 67% of matches were invisible). The client filters and pages locally —
+    measured 2 ms to filter+sort 6000 rows and 13 ms to render a 300-row page,
+    so the fetch size is the only real constraint (~1083 bytes/row).
+    """
     replays = repo.list_replays(limit=limit, map_hash=map_hash, days=days)
     # attach beatmap_key / nps / stars / pp (the history list's highlight search needs the key)
     enrichment.enrich_flat(replays, _active_platform())
@@ -933,65 +1128,233 @@ def api_report(replay_id: str):
     return rep
 
 
-# ---------- dynamic star palette (personal, 2026 spec) ----------
-def _personal_palette_entry(platform: str | None = None) -> dict | None:
-    """Build the "personal" palette preset for the ACTIVE platform from its
-    per-player cache (offline-capable after one successful fetch); None when
-    unavailable."""
+# ---------- ACC-weighted skill ratings -> star palettes (2026-09) ----------
+# Each track (80% / 94% / 96% accuracy) becomes its own selectable palette, but only
+# when the model could actually produce a rating for it. A track with insufficient
+# direct evidence stays out of the selectable set entirely (the settings UI shows
+# "数据不足" and disables it) -- the model never guesses a number to fill the gap.
+PALETTE_TRACK_KEYS = ("personal96", "personal94", "personal80")     # best track first
+# The public ids are `personal<target>` (config enum, /api payloads, i18n). The cache
+# columns kept short names (r80/r94/r96) -- they are a storage detail and the live
+# database already has them that way -- so this map is the single translation point.
+TRACK_CACHE_COLUMNS = {"personal96": "r96", "personal94": "r94", "personal80": "r80"}
+
+
+def _track_column(key: str) -> str:
+    return TRACK_CACHE_COLUMNS[key]
+
+
+def _track_label(key: str) -> str:
+    return {"personal80": "80% 基准", "personal94": "94% 基准", "personal96": "96% 基准"}[key]
+
+
+def _palette_cache_for(platform: str | None = None) -> dict | None:
     platform = platform or _active_platform()
     pid = _scoresaber_id()
     if not pid:
         return None
     cached = repo.get_player_palette(platform, pid)
-    if not cached or cached.get("yellow_stars") is None:
+    if not cached:
         return None
+    if not any(cached.get(_track_column(k)) is not None for k in PALETTE_TRACK_KEYS):
+        return None
+    return cached
+
+
+def _palette_meta(key: str, cached: dict) -> dict:
+    column = _track_column(key)
     return {
-        "id": "personal",
-        "tiers": build_tiers(cached["yellow_stars"]),
-        "meta": {
-            "yellow_stars": cached["yellow_stars"],
-            "stage": cached["stage"],
-            "max_single_pp": cached["max_single_pp"],
-            "sample_count": cached["sample_count"],
-            "method": cached["method"],
-            "computed_at": cached["computed_at"],
-        },
+        "stars": cached.get(column),
+        "direct_count": cached.get(f"{column}_direct"),
+        "lower_bound": cached.get(f"{column}_lower_bound"),
+        "confidence": cached.get(f"{column}_confidence"),
+        "computed_at": cached.get("computed_at"),
     }
 
 
-def _active_palette_id(personal: dict | None) -> str:
-    """Selected palette id with safe fallback: unknown ids -> community;
-    "personal" needs a computed cache entry, else falls back to community."""
+def _palette_entries(cached: dict | None) -> list[dict]:
+    """Palette definitions for every track that produced a rating."""
+    entries: list[dict] = []
+    for key in PALETTE_TRACK_KEYS:
+        stars = cached.get(_track_column(key)) if cached else None
+        if stars is None:
+            continue
+        entries.append({
+            "id": key,
+            "label": _track_label(key),
+            "tiers": build_tiers(stars),
+            "meta": _palette_meta(key, cached),
+        })
+    return entries
+
+
+def _available_palette_keys(cached: dict | None) -> list[str]:
+    return [e["id"] for e in _palette_entries(cached)]
+
+
+def _palette_availability(cached: dict | None) -> dict:
+    """Per-option availability for the settings UI.
+
+    A track without a rating is reported as unavailable with a short factual reason,
+    so the dropdown can grey it out instead of offering a choice that cannot work.
+    """
+    available = _available_palette_keys(cached)
+    options: dict = {"community": {"available": True}}
+    for key in PALETTE_TRACK_KEYS:
+        if key in available:
+            options[key] = {"available": True, "meta": _palette_meta(key, cached or {})}
+        else:
+            options[key] = {"available": False, "reason": skill_model.INSUFFICIENT_LABEL}
+    return options
+
+
+def _active_palette_id(cached: dict | None) -> str:
+    """Selected palette id with safe fallback.
+
+    Historic configs stored ``personal`` (the replaced classifier's single palette);
+    it now means "whichever track is available", best first, so an existing choice
+    keeps working instead of silently reverting to the community palette.
+    """
     want = cfg.star_palette
+    available = _available_palette_keys(cached)
     if want == "personal":
-        return "personal" if personal else "community"
+        want = available[0] if available else "community"
+    if want in PALETTE_TRACK_KEYS:
+        return want if want in available else (available[0] if available else "community")
     return want if get_star_palette(want) else "community"
 
 
 def _palette_result(platform: str, pid: str) -> dict | None:
-    """/api payload of the cached personal palette for a player/platform."""
+    """/api payload of the cached palette for a player/platform (public ids)."""
     cached = repo.get_player_palette(platform, pid)
-    if not cached or cached.get("yellow_stars") is None:
+    if not cached:
         return None
-    return {"status": "known",
-            "yellow_stars": cached["yellow_stars"],
-            "stage": cached["stage"],
-            "max_single_pp": cached["max_single_pp"],
-            "sample_count": cached["sample_count"],
-            "method": cached["method"],
-            "computed_at": cached["computed_at"]}
+    if not any(cached.get(_track_column(k)) is not None for k in PALETTE_TRACK_KEYS):
+        return None
+    return _palette_public_payload(cached)
+
+
+def _score_record_from_payload(s: dict) -> skill_model.ScoreRecord | None:
+    """One cloud score row -> model record.
+
+    ACC follows the data source: ScoreSaber exposes baseScore / leaderboard.maxScore,
+    BeatLeader reports accuracy as a percentage. Rows without a positive pp / max_pp
+    are unranked or unranked-with-stars; the model rejects them anyway, so they are
+    skipped here to keep the evidence list honest.
+    """
+    max_score = s.get("max_score")
+    base_score = s.get("base_score")
+    acc = s.get("accuracy")
+    if isinstance(acc, (int, float)) and acc > 1.0:
+        acc = acc / 100.0
+    if acc is None and base_score and max_score:
+        acc = base_score / max_score
+    stars = s.get("stars")
+    pp = s.get("pp")
+    if not stars or not pp or not max_score or acc is None:
+        return None
+    timestamp = s.get("timepost")
+    if timestamp is None:
+        raw = s.get("time_set") or ""
+        try:
+            timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            timestamp = 0.0
+    return skill_model.ScoreRecord(
+        stars=float(stars),
+        acc=float(acc),
+        timestamp=float(timestamp or 0.0),
+        leaderboard_key=f"{s.get('leaderboard_id')}|{s.get('song_hash')}",
+        pp=float(pp),
+        max_pp=float(max_score),
+        modifiers=s.get("modifiers") or "",
+    )
+
+
+def _palette_public_payload(cached: dict) -> dict:
+    """Cache row -> API payload, translating cache columns to public ids.
+
+    Cache stores ratings in short columns (r80/r94/r96); every API consumer sees them
+    as `personal80/personal94/personal96` (plus `_direct` / `_lower_bound` /
+    `_confidence` suffixes). ``method`` carries the selected track in public form.
+    """
+    payload: dict = {
+        "status": "known" if cached.get("yellow_stars") is not None else "unknown",
+        "yellow_stars": cached.get("yellow_stars"),
+        "computed_at": cached.get("computed_at"),
+        "skill_params": cached.get("skill_params"),
+    }
+    for key in PALETTE_TRACK_KEYS:
+        column = _track_column(key)
+        payload[key] = cached.get(column)
+        payload[f"{key}_direct"] = cached.get(f"{column}_direct")
+        payload[f"{key}_lower_bound"] = cached.get(f"{column}_lower_bound")
+        payload[f"{key}_confidence"] = cached.get(f"{column}_confidence")
+    method = cached.get("method")
+    if method not in PALETTE_TRACK_KEYS:
+        # a cache row written before the ids were renamed still names the track "r80";
+        # map it so the UI can still tell which baseline is in effect
+        method = next((k for k in PALETTE_TRACK_KEYS if _track_column(k) == method), None)
+    payload["method"] = method
+    return payload
+
+
+def _skill_palette_payload(platform: str, pid: str, scores: list) -> dict:
+    """Run the ACC-weighted skill model over freshly fetched scores and cache it.
+
+    ``yellow_stars`` stays the colour anchor: the best track that produced a rating
+    (personal96 > personal94 > personal80). Tracks without enough direct evidence stay
+    NULL, which the settings UI turns into "数据不足" and a disabled option -- the model
+    is not allowed to guess a number there.
+    """
+    records = [r for r in (_score_record_from_payload(s) for s in scores) if r is not None]
+    ratings = skill_model.rate_player(records, time.time())
+    available = skill_model.available_track_keys(ratings)      # personal96, personal94, personal80 order
+
+    payload: dict = {
+        "stage": None,
+        "max_single_pp": max((r.pp for r in records), default=None),
+        "fallback_stars": None,
+        "yellow_stars": None,
+        "sample_count": len(records),
+        "method": "skill_model",
+        "valid_count": len(records),
+        "nf_excluded": None,
+        "skill_params": skill_model.parameters(),
+    }
+    for track in skill_model.TRACKS:
+        rating = ratings[track.key]
+        column = _track_column(track.key)          # cache columns are short (r80...)
+        payload[column] = rating.stars
+        payload[f"{column}_direct"] = rating.direct_count
+        payload[f"{column}_lower_bound"] = rating.lower_bound_stars
+        payload[f"{column}_confidence"] = rating.confidence if rating.stars is not None else None
+
+    anchor = skill_model.best_available_track(ratings)
+    if anchor is not None:
+        visible = ratings[anchor.key]
+        payload["yellow_stars"] = visible.stars
+        payload["fallback_stars"] = visible.potential
+        payload["method"] = anchor.key          # public id (personalNN)
+    payload["computed_at"] = datetime.now(timezone.utc).isoformat()
+    repo.save_player_palette(platform, pid, payload)
+    # callers and the API see public ids; only the cache keeps the short columns
+    return _palette_public_payload(payload)
 
 
 def _compute_and_cache_palette(platform: str, pid: str, scores: list) -> dict:
-    """classify_player() over freshly fetched scores, persist, return payload."""
-    result = classify_player(scores)
-    repo.save_player_palette(platform, pid, result)
-    if result["status"] == "unknown":
-        return {"status": "unknown"}
-    return {**result, "computed_at": datetime.now(timezone.utc).isoformat()}
+    """Skill-model palette over freshly fetched scores, persisted, returned."""
+    return _skill_palette_payload(platform, pid, scores)
 
 
 # ---------- cloud data page (platform-scoped: /api/scoresaber | /api/beatleader) ----------
+# How much score history the cloud sync pulls. The skill model rates a player at three
+# target accuracies, so it needs plays spread over the accuracy range, not just the most
+# recent page (the API caps one page at 100 rows).
+CLOUD_SCORE_LIMIT = 300
+CLOUD_SCORE_PAGES = 3
+
+
 def _cloud_page_get(platform: str):
     """Shared GET logic: serve the cached profile/scores (+ personal palette)
     for a platform, or fetch on first visit."""
@@ -1004,24 +1367,48 @@ def _cloud_page_get(platform: str):
 
 def _cloud_page_refresh(platform: str):
     """Shared POST logic: fetch profile + scores for the platform, compute and
-    cache the personal palette in one step ("拉取数据并计算动态水平")."""
+    cache the personal palette in one step ("拉取数据并计算动态水平").
+
+    The score fetch is deliberately wider than one page: the skill model needs plays
+    near each target accuracy (80% / 94% / 96%), and a player's recent page alone can
+    miss whole bands. For ScoreSaber the recent and top lists are merged (both are
+    capped by the API at 100 rows per page); BeatLeader is paged by date.
+    """
     pid = _scoresaber_id()
     if not pid:
         raise HTTPException(400, "库中无 Replay 数据，无法解析玩家 ID")
     if platform == "beatleader":
         try:
             profile = beatleader.fetch_profile(cfg, pid)
-            scores = beatleader.fetch_scores(cfg, pid, limit=100)
+            scores = beatleader.fetch_scores(cfg, pid, limit=CLOUD_SCORE_LIMIT,
+                                             max_pages=CLOUD_SCORE_PAGES)
         except beatleader.BeatLeaderError as e:
             raise HTTPException(502, str(e))
     else:
         try:
             profile = scoresaber.fetch_profile(cfg, pid)
-            scores = scoresaber.fetch_scores(cfg, pid, limit=100,
-                                             sort="recent", max_pages=2)
+            merged: dict = {}
+            for sort in ("recent", "top"):
+                for row in scoresaber.fetch_scores(cfg, pid, limit=CLOUD_SCORE_LIMIT,
+                                                   sort=sort, max_pages=CLOUD_SCORE_PAGES):
+                    key = row.get("score_id") or (row.get("song_hash"), row.get("difficulty"))
+                    merged.setdefault(key, row)
+            scores = list(merged.values())
+            scores.sort(key=lambda r: r.get("time_set") or "", reverse=True)
         except scoresaber.ScoreSaberError as e:
             raise HTTPException(502, str(e))
     repo.save_player_cache(platform, pid, profile, scores)
+    # Sidebar player card images (avatar + country flag): downloaded here so the
+    # card works offline afterwards. Best effort on purpose - a CDN failure must
+    # not fail the sync (the cached snapshot and any previously cached image stay
+    # valid); it only means the card keeps the old image or falls back to the
+    # name initial / country code. Keys whose source URL is missing are skipped
+    # (no attempt, no log).
+    for kind, attempted in player_assets.sync_player_assets(
+            cfg, platform, pid, profile).items():
+        if attempted and not attempted.stored:
+            print(f"[player] {kind} download failed ({platform})"
+                  " — keeping cached image", flush=True)
     palette = _compute_and_cache_palette(platform, pid, scores)
     return {"fetched_at": datetime.now(timezone.utc).isoformat(),
             "profile": profile, "scores": scores, "palette": palette}
@@ -1040,6 +1427,58 @@ def refresh_scoresaber():
 @app.get("/api/beatleader")
 def api_beatleader():
     return _cloud_page_get("beatleader")
+
+
+# ---------- sidebar player card (2026-09) ----------
+# Both endpoints are read-only and serve local data only: the sync
+# (_cloud_page_refresh) is what talks to the network, so opening the app
+# offline still renders the card from the last snapshot.
+
+@app.get("/api/player/card")
+def api_player_card():
+    """Card fields (name / country / global rank / country rank / image URLs).
+
+    `profile` is None when that platform has never been synced - a normal state
+    (fresh install, or the other data source selected), not an error: the
+    frontend keeps the block hidden instead of showing a failure."""
+    pid = _scoresaber_id()
+    platform = _active_platform()
+    cached = repo.get_player_cache(platform, pid) if pid else None
+    profile = (cached or {}).get("profile")
+    return {"platform": platform,
+            "profile": player_assets.card_payload(cfg, platform, pid, profile)}
+
+
+def _cached_image(payload: tuple[bytes, str, float] | None, missing: str) -> Response:
+    """Serve one locally cached player image (no network access).
+
+    404 when it was never downloaded - the frontend then falls back to the
+    player's name initial / country code instead of showing a broken image."""
+    if payload is None:
+        raise HTTPException(404, missing)
+    data, mime, _mtime = payload
+    # The URL carries ?v=<file mtime>, so the bytes for a given URL never change:
+    # let the WebView cache them hard instead of re-fetching on every page load.
+    return Response(content=data, media_type=mime,
+                    headers={"Cache-Control": "public, max-age=604800"})
+
+
+@app.get("/api/player/avatar")
+def api_player_avatar():
+    """Cached avatar of the current player on the active platform."""
+    return _cached_image(
+        player_assets.read_avatar(cfg, _active_platform(), _scoresaber_id()),
+        "未缓存玩家头像")
+
+
+@app.get("/api/player/flag")
+def api_player_flag():
+    """Cached country flag of the current player (shared by both platforms)."""
+    platform = _active_platform()
+    pid = _scoresaber_id()
+    cached = repo.get_player_cache(platform, pid) if pid else None
+    country = str(((cached or {}).get("profile") or {}).get("country") or "")
+    return _cached_image(player_assets.read_flag(cfg, country), "未缓存国家旗帜")
 
 
 @app.post("/api/beatleader/refresh")
@@ -1190,10 +1629,27 @@ def api_settings():
 
 @app.get("/api/settings/schema")
 def api_settings_schema():
-    """Return the schema + current values (secrets masked) so the frontend can dynamically generate the settings UI."""
+    """Return the schema + current values (secrets masked) so the frontend can dynamically generate the settings UI.
+
+    The star-palette option list is enriched with per-option availability: tracks the
+    skill model could not rate are marked unavailable (with a factual reason) and the
+    settings dropdown disables them rather than offering an unusable choice.
+    """
     from backend.config.schema import get_schema
+    schema = get_schema()
+    palette_cache = _palette_cache_for()
+    availability = _palette_availability(palette_cache)
+    for item in schema:
+        if item.get("key") == "player.star_palette":
+            item["option_meta"] = availability
+            break
     values = config_svc.get_all_values()
-    return {"schema": get_schema(), "values": values}
+    # Historic configs stored "personal" for the replaced classifier's single palette.
+    # Resolve it to the track that is actually available so the settings form shows a
+    # real selection instead of an option that no longer exists in the enum.
+    if values.get("player.star_palette") == "personal":
+        values["player.star_palette"] = _active_palette_id(palette_cache)
+    return {"schema": schema, "values": values}
 
 
 @app.post("/api/settings/validate")
@@ -1202,7 +1658,11 @@ def api_settings_validate(body: SettingsBody | None = None):
 
     valid = root AND maps directories exist (core check, shown as the badge
     next to the title); results lists each path's details (root / Replay /
-    maps / SongCore).
+    maps / SongCore / local replay retention).
+
+    The last item is not a path: it reports the BeatLeader mod's
+    "keep latest only" replay setting (which deletes older local .bsor files,
+    see HANDOFF §4.25). It is advisory only — it never affects `valid`.
     """
     root = (body.instance_root if body else "").strip() or cfg.instance_root
     results = []
@@ -1210,6 +1670,7 @@ def api_settings_validate(body: SettingsBody | None = None):
         results.append({
             "key": s.key, "label": s.label, "path": s.path,
             "exists": s.exists, "ok": s.ok, "note": s.note,
+            "status": s.status,
         })
     by_key = {r["key"]: r for r in results}
     valid = bool(by_key.get("instance_root", {}).get("ok") and

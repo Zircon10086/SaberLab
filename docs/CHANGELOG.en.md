@@ -2,7 +2,366 @@
 
 > Version format: `vX.Y (date)` — change summary. Parts of this document were described with AI assistance.
 
-## v2.1.0 (2026-09-02, pending release)
+## v2.2.0 (in development, unreleased)
+
+> Status: **current development version**. Entries are added below as work lands;
+> a final pass (release date, bilingual RELEASE_NOTES, test counts) happens before
+> release. Until then, every current-version reference in the docs means `v2.2.0`.
+
+### Performance
+- **Analysis computation is 26.6% faster (serial batch 13.4 s → 9.8 s; 33 → 24.2 ms
+  per replay)** (2026-09, step 3):
+  1. **`NoteParams.decode` memoized + decoded once at parse time**: the accuracy,
+     scoring, notes and energy passes each decoded the same notes — 40531 decodes per
+     full analysis (1.02 ms of pure decoding for one large replay). The parser now
+     decodes once into `NoteEvent._params`; warm cost 0.38 ms and the 40531 property
+     accesses are gone
+  2. **`cut_scores` memoized**: both the scoring pass and the note-group pass need it
+     (twice per good/bad note). It is a pure function of the cut info and noteID, so
+     it is cached on the note object
+  3. **`_group_metrics` counts in one pass**: it used to run four `_attr()`
+     classification calls per note (~40k function calls per analysis); the NoteEvent
+     path now counts in a single loop with **the metric expressions and names
+     unchanged, character for character**
+- Numerical safety: step 3 treats "metric values must not change" as a hard red line —
+  re-analysing 12 replays produced **zero row-level differences** in `metrics` and
+  `notes` (including energy/fail_time), all 311 tests pass, and after a full recompute
+  the row counts and sampled metrics (accuracy/score/fail_time/min_energy/total_drain)
+  match the baseline
+- **Batch analysis is ~12x faster (246 s → 20.4 s for all 416 replays)** (2026-09,
+  approved plan):
+  1. **Merged database writes**: `Repository` now reuses one connection per thread
+     and wraps a replay's whole set of writes in a **single transaction**
+     (`Repository.session()`). It used to open 4 connections and commit 4 separate
+     transactions per replay; measured 18.7 ms for a fresh connection vs 2.2 ms
+     reused. Per-replay persistence went **59.3 ms → 9.5 ms**, and a replay's rows
+     are now **atomic** (a failure rolls the whole replay back instead of leaving it
+     half-written)
+  2. **Removed repeated full map-library rescans**: `resolve()` triggers a full
+     CustomLevels walk on a DB miss (1032 map folders here, **13.8 s each**). A batch
+     requested one for every unmatched replay, and each of the 4 worker processes did
+     it again — **that was the real bottleneck**. Batch paths now scan **once up
+     front** and workers never rescan (`map_scan=False`); interactive single-file
+     analysis still rescans, so a freshly downloaded map is still picked up
+  3. **Batch analysis runs on 4 processes**: threads are useless here (1.04–1.24x,
+     GIL-bound Python loops), processes measured **1.95x** — the rest of the gain
+     comes from the two items above
+- **Batch analysis skips replays whose source file is gone**: DB rows outlive files
+  (ingest is add-only), and every batch used to produce a round of "file not found"
+  errors for them
+
+### Added
+- **API key source display** (2026-09, key-exposure investigation): when an API key is
+  configured, the settings page now labels where it came from — "Source: environment
+  variable <name>" or "Source: .env". A machine-wide environment variable set by other
+  tools reaches SaberLab through double-click launches and was previously
+  indistinguishable from a self-saved key; `/api/status` ai section gains an
+  `api_key_source` field (`env` / `env_file` / empty). The unconfigured state still
+  shows "Not configured"; key handling behavior is unchanged
+- **Replay right-click menu implemented** (2026-09, specified by the user): the items are
+  **Open details · Attempts on this map · —— · Show in folder · Delete replay file**
+  - **Attempts on this map** now puts the **song name** into the history search box
+    (it used to put the map_hash, but the history search only matches song names and the
+    5-character beatmap_key, so a hash never matched anything)
+  - **Show in folder**: opens the OS file browser with the .bsor selected; when the file
+    is gone it falls back to opening the containing folder (and says so)
+  - **Delete replay file**: a **confirmation dialog** → the file is **moved to the OS
+    recycle bin** (not permanently deleted, restorable from there); a success toast says
+    so explicitly, and on failure the dialog stays open with the button re-enabled so
+    nobody believes it was deleted. SaberLab's analysis data is kept — the original file
+    is the only thing moved. Both file actions are disabled when the file is gone
+  - **Copy replay ID was removed** (the ID is a per-device sha256 with no value to the
+    user); the now-unused `copyText()` and the `[data-copy]` fallback entry were removed
+    with it, leaving no dead code
+- **Modal action buttons** (`openModal({actions})`, 2026-09): a button row (cancel /
+  destructive action) for confirmations like deleting a replay. Clicking does **not**
+  auto-close — the caller closes it after the request succeeds, so the UI cannot claim
+  success the backend did not confirm
+- **Context menu framework** (2026-09, framework first): right-clicking any registered
+  element opens a menu that matches the project's look (acrylic material, enter/exit
+  animation, Escape / outside-click / scroll dismissal) by reusing the existing
+  `openPopover` overlay, which gained an `at: {x, y}` coordinate mode.
+  **Adding a right-click feature means adding one entry to the `CTX_MENUS` registry**
+  — no framework changes. Two entries are registered:
+  - `.replay-item` (shared by overview / history / detail same-map history):
+    open details, attempts on this map, copy replay ID
+  - `[data-copy]`: generic "Copy", for future elements to hang off
+  Details: the native menu is allowed through inside inputs; so is a matched element
+  whose `items()` returns nothing; items support a danger colour and a disabled state;
+  the menu closes before the action runs and a throwing action reports a toast;
+  `copyText()` has a three-step fallback (Clipboard API → retry after focusing →
+  textarea + execCommand) and reports an empty value explicitly instead of failing
+  silently
+- **Local fail-time computation** (2026-09): the `.bsor` `failTime` field is **never
+  written by the mod** (498/498 local replays are 0.0), so the energy curve and the
+  fail moment are recomputed locally with the **official algorithm recovered by
+  decompilation** (`GameEnergyCounter`). Official constants (identical in 1.39.0,
+  1.40.8 and 1.44.1): good note +0.01 / bad −0.10 / miss −0.15 / bomb hit −0.15 /
+  burst slider element +0.002 / −0.025 / −0.03 / obstacle −1.3 per second; Bar mode
+  starts at 0.5, Battery and instaFail at 1.0 (4 cells), cap 1.0; energy ≤1e-5 means
+  a fail. Implemented in `backend/analysis/energy.py` (deterministic pure functions,
+  no network, no LLM) and it **also derives more telemetry in the same pass**: the
+  energy event stream (re-playable timeline), drain per cause, charge/drain per hand,
+  obstacle-hit checkpoints, minimum energy, time spent in the danger zone — all
+  persisted under the `metrics` `energy` scope, readable by existing paths with **no
+  new table**. **UI**: the detail page gained an energy summary (lowest energy, fail
+  time, drain broken down by cause, obstacle hits) and the timeline draws the
+  **fail-time red line** (pixel-checked: 0.04px from the axis mapping). **Fail time is
+  deliberately kept apart from the completion classification** — finishing after
+  failing, quitting before failing and quitting after failing are all shown as facts,
+  never guessed. `completion_status` semantics are **unchanged** (switching it to the
+  computed value is a separate product decision)
+- **Forced batch recompute**: `POST /api/analyze/all?force=true` re-analyzes every
+  replay regardless of `analysis_status` — for backfilling history after the engine
+  gains a metric, instead of wiping the analysis cache for a few new numbers
+- **New "By Session" paging on the overview** (2026-09, user request): replays are
+  grouped by the **time gap between neighbouring plays** — a gap longer than the
+  threshold (new setting `analysis.session_gap_minutes`, default **60 minutes**, far
+  longer than a song) starts a new play session. This fixes the two things "By Day"
+  gets wrong: **a midnight run split across two days**, and **a morning plus an
+  afternoon block merged into one day**. Measured on the local 425 replays: 44 day
+  groups vs 48 sessions — `2026-09-07 23:24 – 09-08 00:03` (19 records) was split
+  into two days before, and 4 days that showed as one group actually hold 2–3
+  sessions. Pagination unit = one session, with matching labels ("N sessions /
+  Previous session / Next session") in all three languages. **It sits leftmost in
+  the tab row and is the default selection** ("By Day" moves to second place and
+  stays selectable; "By Count" is unchanged). **Session headers always carry the
+  date** (single-day: `2026-09-03 18:49 – 19:50`; cross-midnight: both ends dated,
+  `2026-09-07 23:24 – 2026-09-08 00:03`) — clock times alone would not tell the
+  player which day they played
+- **Sidebar player card**: the bottom-left corner (above "Server running") now shows
+  the current player — avatar, name, global rank and country rank with its flag. It
+  reads the same player profile snapshot as the cloud data page, written by
+  "Fetch data & compute dynamic level" (or the cloud sync stage of Quick Refresh);
+  the card itself is read-only local cache and makes no network requests. The avatar
+  is **downloaded into the local cache during the sync** and served by a backend
+  endpoint afterwards (visible offline, no external domain exposed to the WebView,
+  honours the configured proxy); without a cached avatar the card falls back to the
+  player's name initial, and a missing flag falls back to the country code text —
+  never a broken image. With no cloud data synced yet the card stays hidden (a
+  normal state, not an error). New read-only endpoints: `GET /api/player/card`,
+  `GET /api/player/avatar`, `GET /api/player/flag`
+- **Sidebar player section (card -> divider)**: the bottom-left corner now holds
+  **two sections** — player info (avatar + name + global/country rank) on top and
+  the server status below — separated by the same 1px grey line that already sits
+  above "Server running"; the rounded card background is gone, so the block
+  matches the existing footer's visual language. Both sections ride one
+  `margin-top: auto` container to the bottom (with the auto margin on each, the
+  free space gets split evenly and the block floats to the middle)
+- **New "replay retention" row in the Game Path card** (2026-09, follows the §4.25
+  root cause): after entering/picking the game root, the check now also reads the
+  BeatLeader mod's "keep latest only" setting (`OverrideOldReplays` in
+  `UserData/BeatLeader.json`) — **enabled → red ❌ warning** (telling the user to
+  turn it off in-game so new saves stop deleting older .bsor files of the same map
+  & difficulty); **disabled → green ✅**. With the mod absent, the key missing, or
+  the config unparsable it shows a **neutral note** (neither green nor an alarm, to
+  avoid false warnings); the row is advisory only and **never changes the
+  "verified" badge** (the path itself is fine; the fix happens inside the game).
+  All three languages covered
+- **Ranks on one line (wrapping only when needed)**: global and country rank sit
+  side by side (~8px to spare), and drop to a second line only when their
+  combined width exceeds the text column — `flex-wrap` breaks at an item
+  boundary, never inside a number, and nothing gets clipped. Measured: local
+  values 55.3+45.8+8 gap = 109.1px < 117px available -> one line; synthetic long
+  values -> two lines with no overflow
+
+### Documentation / conventions
+- **New product rule: user-facing text** (2026-09, recorded in `AGENTS.md` section 9.1):
+  every string SaberLab renders has **the ordinary player** as its reader — **state only
+  what will happen, never explain why**; no implementation details (tables/fields/tasks,
+  how paths are derived, cache or file-copy behaviour, token wording); **parentheses that
+  explain a technical term are kept** (units, ranges, score parts, parameter names such as
+  `Center (0-15)`, `Pre / Center / Post`, `(x0.5)`, `(ms)`, `(B - A)`); avoid internal
+  jargon (fallback/rollback/caliber-like wording); "why" belongs in developer docs;
+  `title` tooltips and `aria-label`s follow the same rule
+
+### Changed
+- **The AI key is read from the local config file only** (2026-09, requested): the key was
+  also read from the system environment, so a machine-wide `DEEPSEEK_API_KEY` set for
+  another tool made a never-configured SaberLab report "configured" and use it. The key is
+  now read **only from the `.env` inside the program directory**; environment variables
+  have no effect. A key saved in the settings applies immediately, and the source is
+  always labelled "local config file"
+- **Player skill estimate reworked into three baselines (80% / 94% / 96%)** (2026-09,
+  requested): the star palette no longer derives one yellow baseline from your best PP
+  or an average star rating. It answers "which star rating can this player hold at a
+  given accuracy": the **80% baseline** is what you can clear on hard maps, the
+  **94% baseline** is your regular level, the **96% baseline** is your high-accuracy
+  level. Settings → Star Palette lets you pick any of them for colouring the STARS
+  numbers in lists and on the detail page. **A baseline without enough data shows no
+  number and cannot be selected**: it is greyed out with "Not enough data" in the
+  settings, the cloud page shows "Not enough data" for that column too, and a
+  baseline that only has a lower bound says so explicitly ("shown N★") instead of
+  presenting an unverified range as a precise rating
+- **3D replay pauses when you leave its page** (2026-09, requested):
+  the "Data / AI analysis / Replay" tabs on the detail page are one page moved by
+  transform, so a replay kept playing in the background after you switched away —
+  audio and scene included — and only reset when another replay was opened. Now
+  playback pauses on leaving and keeps its position. **Coming back does not resume
+  it automatically** — press play inside the replay to continue from where it stopped
+- **Scope-2 text pass applied (7 more strings)** (2026-09):
+  - Main table: `settings.datasource.desc` (dropped the "auto-resolved from Replay /
+    cached data is kept" mechanics), `detail.file_missing_desc` (dropped "already
+    persisted / needs the original file" and now only states what still works),
+    `settings.game.retention_warn` (first clause was too long -> "Older replays will be
+    deleted - turn off \"keep latest only\" in the in-game BeatLeader replay settings")
+  - Backend error strings (4) — **the backend original AND the en/ja mapping keys must
+    change together**, otherwise the mapping stops matching:
+    "This Replay was already analyzed (sha256 dedup)" -> "already analyzed";
+    the empty-database message lost its internal pipeline list; the retention-status
+    notes now state the outcome ("older replays are kept" / "can be ignored")
+  - `index.html`'s static placeholder for `settings.datasource.desc` realigned (it had
+    drifted from its i18n value)
+  - Test updated with the wording: `test_config_absent_is_neutral` asserted the old phrase
+    ("not installed"); it now asserts "can be ignored" plus `ok=False`, keeping the real
+    intent (neutral note, never a warning)
+  - **Kept untouched by the rule**: `detail.acc_hint`, `reversal.hint`, `compare.hint`
+    (ranges/direction/colour meaning = technical notes), the other 36 `err` entries,
+    3 `msg` entries and 7 `task.current` entries
+- **User-facing text optimised per the new rule (15 strings)** (2026-09):
+  - **Cause/mechanism explanations removed**: `NF (auto-enabled after fail)` -> `NF`;
+    `No Fail auto-enabled after fail; effective score halved` -> `No Fail - effective score
+    halved`; `Not configured (rule-based fallback)` -> `Not enabled`; `Rule-based report
+    (LLM not called)` -> `Rule-based report`; `Rule fallback` -> `Rule-based report`;
+    `No cached avatar (fetched on the next cloud sync)` -> `No cached avatar`;
+    `Config could not be parsed (other checks unaffected)` -> `Config could not be parsed`;
+    the "non-zero diffs usually mean..." paragraph -> "The cloud entry is a personal best,
+    so it can differ from a single local play."
+  - **Internal mechanics/jargon turned into user language**: the path-derivation sentence
+    -> "other paths are found automatically"; "Original Replay files and the map library
+    are untouched" removed (implementation detail); "Game path applies immediately; port/AI
+    changes need a restart" -> "Port / AI changes take effect after a restart";
+    `Fallback estimate` -> `Estimate`
+  - Backend settings descriptions in `config/schema.py` trimmed the same way
+  - Two static placeholders in `index.html` realigned with their i18n values (they had
+    kept the older, longer text, which would reappear if i18n failed to load)
+  - All three languages (zh / en / ja) updated; **the 16 technical parentheses were kept**
+  - Out of scope by the user's decision: `settings.datasource.desc`,
+    `detail.file_missing_desc`, `settings.game.retention_warn`, `detail.acc_hint`,
+    `reversal/compare.hint`, plus the `err`/`msg`/`task` backend-message tables
+    (error hints deserve their own pass)
+- **History paging position and default behaviour aligned with the overview** (2026-09,
+  user request): (1) the pagination control **moved up into the filter row and now matches
+  the overview exactly** — it reuses the same three-column symmetric grid
+  (`minmax(0,1fr) auto minmax(0,1fr)`: filters left, paging centre, empty right), measured
+  **0 px** centring offset; the history content is wrapped in a `.surface` and the filters
+  moved into `.title-left`; (2) **paging is now shown by default (no query)** — previously
+  the no-query view fetched only 300 rows and had no paging control, so "300 shown but no
+  way to page" was simply wrong; the default view now also fetches everything and pages
+  (verified: 424 rows → page 1 has 300, page 2 has 124, with correct highlights)
+- **History page gained count-based paging (300 rows/page) and full-library search**
+  (2026-09, proposed by the user): it reuses the **overview's pagination buttons**
+  (`unit=count`, same component, same styles, same ellipsis logic), driven by the history
+  page's own loader; changing the query or the date range returns to page 1
+- **Search fetch cap raised 2000 → 10000, and `/api/history`'s ceiling 2000 → 50000**
+  (2026-09, per the user's request to simulate scale first): measurements show **the fetch
+  cap is the only real constraint** — the server returns ~1083 bytes/row (424 rows =
+  448 KB / 23 ms), while client-side filtering+sorting of 6000 rows takes **2 ms** and
+  rendering a 300-row page **13 ms**. The old 2000 cap **missed 67% of hits** on a
+  6000-replay library (4527 hits, only 1512 found). Extrapolated to 10800 rows that is
+  ~11.4 MB over loopback, which is acceptable
+- **Settings now auto-save when focus leaves a field** (2026-09, user request):
+  editing a value and moving focus away (Tab / clicking elsewhere) saves
+  automatically; dropdowns and checkboxes save as soon as their value changes.
+  Success is reported by a **toast**, and the old "Save All Settings" button plus
+  its hint text are **removed**. It reuses the single save path
+  (`collectSettings()` submits only genuinely changed fields), so no per-field save
+  logic was needed; with nothing changed it stays silent (clicking blank space
+  shows no prompt).
+- **Session-gap setting renamed `analysis.session_gap_minutes` →
+  `ui.session_gap_minutes`** (2026-09 fix): it is only the overview's "By Session"
+  grouping threshold and takes part in no analysis, but living under `analysis.*`
+  made the "analysis parameter changed → reset cache" rule fire — **changing it
+  once wiped the whole library's analysis data** (metrics/motion_series cleared,
+  every replay back to pending). It now lives under `ui.*` (Settings → Interface)
+  with a one-shot migration: reading an old config moves the key to the new group
+  and drops it from the file, so no duplicate key lingers in two places
+- **Enum dropdowns in Settings restyled to frosted glass** (2026-09, user request):
+  a native `<select>`'s popup list is drawn by the OS and cannot be styled by the
+  page, so it is now a "glass trigger button + the generic anchored popover
+  `openPopover` that the PP prediction uses" — same material
+  (`rgba(20,22,30,0.66)` + `blur(14px) saturate(150%)`), same enter/exit animations
+  (`popIn`/`popOut`), same anchoring (flips up when there is no room, clamped
+  sideways) and the same dismissal paths (outside click / Escape / scroll / zoom).
+  The value still lives in a hidden `input[data-key]`, so **the save and
+  dirty-field detection paths are untouched**. Covers every enum in Settings
+  (star palette, data source, AI provider, ...). Custom-dropdown ARIA added too
+- **Deleting a replay now also removes its record** (2026-09, user decision): if the user
+  deletes the file, keeping the local analysis around is not what they asked for.
+  `Repository.delete_replay()` removes the `replays` row and all derived data
+  (`notes` / `metrics` / `windows` / `motion_series` / `accuracy_curve` / `ai_reports`)
+  in a **single transaction**; baseline/candidate references inside `experiments` are
+  nulled rather than deleting the experiment record. The order is safe: **the record is
+  only removed after the file reached the recycle bin**, so a mid-way failure can never
+  leave "record gone but file still there"; a file that is already missing still allows
+  cleaning up the record. Cloud-side data is untouched
+- **Delete confirmation dialog** (2026-09, user request): added **fade in/out animations**
+  (same parameters as the context menu: 0.18 s ease-out in, 0.15 s ease-in out with a
+  slight scale); **overlay dimming lowered** from 0.55 to 0.42; the redundant
+  **"Close" button was removed** when action buttons are present (a plain informational
+  modal keeps it, being its only exit)
+- **Confirmation copy now states only what will happen** (2026-09, user's rule): title
+  "Delete replay", buttons "Cancel / Delete", hint "The file will be moved to the system
+  recycle bin, SaberLab will remove this record, and data on the cloud site is kept." —
+  no parenthetical asides and no explaining why. The success toast likewise reads
+  "Deleted "<name>" — the file was moved to the recycle bin"
+  (`aria-haspopup/expanded`, `role=listbox/option`). **Clicking the same trigger
+  again closes it** (it no longer replays the enter animation), matching the
+  toggle semantics of the PP prediction popover
+
+### Fixed
+- **Two i18n mapping mismatches** (2026-09) — failures that raise nothing; they only make
+  translations silently ineffective:
+  - **Replay-retention warning** (`err` section): the backend message is an **implicit
+    two-line concatenation**, so last round's whole-string replacement never matched. The
+    backend kept the old wording while the i18n key had already been updated, so all three
+    languages lost the translation. The backend string now carries the new wording and the
+    en/ja keys were moved with it
+  - **Orphan entry `当前未联网`**: the frontend uses the dotted key `t("err.offline")`
+    (zh wording "当前未联网，无法更新在线数据"), so `tErr()` can never receive that
+    message — the en/ja entry was dead → removed
+  - **New regression test `tests/test_i18n_mapping.py` (5 cases)** pins both conventions:
+    (1) every `err` key must correspond to a real backend message (literals extracted via
+    AST, so Python adjacent-string concatenation and f-string placeholders are handled);
+    (2) every dotted key the frontend references must exist in all three languages;
+    (3) en/ja must cover the zh baseline key set; (4) message sections must have the same
+    size across languages
+  - Note: the "3 pre-existing failures" reported last round came from a **crude regex
+    check**; proper template matching shows `「{kind}」任务已在运行` and
+    `谱面文件夹过大 ({size}MB)` were fine all along — the real problems were the two
+    above (the flaw in my checker is fixed by using AST in the new test)
+- **History search missed older records** (2026-09; the user reported "I can see a Noob
+  record in the overview but the history search cannot find it"): the history page always
+  fetched only the newest **300** rows while the library holds 424 — **the oldest 124 are
+  all from the pre-login period under the default name "Noob"**, so they were cut off at
+  fetch time and it looked like player-based filtering. The search itself
+  (`histScore`) **only matches song names and the 5-character beatmap_key and never the
+  player name**, and that stays as is (one machine usually has one player, and the
+  default pre-login name is the same person — filtering by player name would only make
+  one person's records hide from each other). Now: **no query → 300 rows (keeps first
+  paint fast); any query → full fetch** (`limit=2000`, plenty for a local library).
+  Verified: previously unfindable old records such as `Toxic` and `Twisted Drop Party`
+  are searchable again
+- **"Show in folder" opened the Documents folder instead** (2026-09, reported by the
+  user): explorer's `/select,` switch and the path **must be two separate argv entries**;
+  passed as one argument (`/select,<path>`) explorer fails to parse the switch and falls
+  back to opening the user's Documents folder. Now
+  `["explorer.exe", "/select,", path]`, verified by enumerating Explorer windows through
+  Shell.Application (it really opens `file:///D:/.../BeatLeader/Replays`).
+  **Lesson**: the previous check only verified that explorer *started*, not *which folder
+  it opened*
+
+### Internal
+- Avatar/CDN image caching consolidated in `backend/services/player_assets.py`
+  (download once -> local cache -> served locally; a failed download never breaks
+  the sync, and the read path never touches the network); cache lives in `data/assets/`
+- Fixed `_tmp/shot.ps1` screenshot-by-window-title: it only matched `python`, while
+  `run.bat`/`run-browser.bat` launch `pythonw.exe` (both are accepted now); it also
+  uses **PrintWindow + PW_RENDERFULLCONTENT** to render the window itself instead of
+  `CopyFromScreen`, which captured **another application** whenever the window was not
+  foreground / was occluded (this caused a UI-verification misdiagnosis once)
+
+## v2.1.0 (2026-09-02, released 2026-09-03)
 
 ### Added
 - **PP prediction (accuracy preview)**: click a ranked replay's PP value to open
@@ -78,7 +437,15 @@
   automatically repairs that session's `file_path` to point at the surviving
   LocalLeaderboard twin (analysis data untouched); sessions only stored by
   LocalLeaderboard are ingested as normal rows; the ingest toast reports
-  recovered / newly-ingested counts.
+  recovered / newly-ingested counts. Background: the BeatLeader mod's replay
+  setting "keep latest only" (on by default; config key `OverrideOldReplays`)
+  **deletes older .bsor files of the same map & difficulty whenever it saves a
+  new replay** (confirmed via game logs) — this feature is the second source
+  against exactly that loss (exit replays have no LocalLeaderboard copy;
+  disabling that in-game setting stops the deletion entirely). Measured
+  2026-09-11 across every `Logs/*.log(.gz)`: 217 deletions / 213 distinct files /
+  2025-12-13..2026-09-07, **78% of them exit replays**. **Turn that setting off
+  in-game** — that alone stops the loss, no SaberLab change required.
 
 ### Changed
 - **Launching replaces an old SaberLab instance**: when port 6980 (or the
@@ -332,8 +699,11 @@
   wallpaper via the backdrop-ready notification)
 - Settings page crashed on boolean items (local variable shadowing the global
   i18n function)
-- NF fail-time red-line marker: implemented but **paused** — BeatLeader 0.9.33
-  writes failTime=0 in every local .bsor
+- NF fail-time red-line marker: implemented but **paused** — the local .bsor
+  `failTime` field is 0 in every sample (326/326). Corrected 2026-09-11: this is a
+  **missing feature of the replay (writer) component** (the field is simply never
+  written), so the plan is now to compute the fail time locally in SaberLab
+  (see HANDOFF §4.11)
 
 ## v1.4 (2026-08-21)
 

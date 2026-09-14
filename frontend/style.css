@@ -226,7 +226,8 @@ body::before {
   background: linear-gradient(180deg, var(--red), var(--blue));
 }
 .sidebar-footer {
-  margin-top: auto; padding: var(--space-3);
+  /* margin-top 不用 auto：父级 .sidebar-bottom 已把整块压到底部 */
+  padding: 10px var(--space-3) var(--space-3);
   border-top: 1px solid var(--border);
   font-size: var(--fs-xs); color: var(--muted);
   display: flex; flex-direction: column; gap: 6px;
@@ -235,6 +236,103 @@ body::before {
 .sidebar-footer-tagline { font-size: 10.5px; color: var(--muted); opacity: 0.8; line-height: 1.4; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: none; }
 .status-dot.offline { background: var(--red); }
+
+/* ---------- 侧栏底部（玩家信息 + 服务器状态，2026-09） ----------
+   `.sidebar-bottom` 独占 `margin-top: auto`，把两栏作为一整块压到侧栏底部
+   （若两者各自 auto，剩余空间会被平分、玩家栏飘到中间）。
+   两栏之间用与「服务器运行中」上方同款的分割线（1px --border）分隔——设计语言
+   与原有 footer 保持一致（曾用圆角卡片，2026-09-10 按要求改为分割线）。 */
+.sidebar-bottom {
+  margin-top: auto;
+  display: flex; flex-direction: column;
+}
+
+/* ---------- 玩家信息栏（侧栏左下角，2026-09） ----------
+   与云数据页的玩家档案同源（头像 + 名称 + 全球/国家排名，布局参考 ScoreSaber
+   个人页）；侧栏仅 208px，故用 42px 头像 + 双行文字，超长名称省略号截断。
+   无卡片背景：仅顶部一条分割线（与 .sidebar-footer 同款），左右内边距与
+   footer 对齐，使两栏文字左缘对齐。
+   （类名沿用 player-card：已被 scripts/样式引用，改名属无谓改动。）
+   未同步云端数据 / 缓存失败 / 请求失败时整块 hidden，不干扰原有布局。 */
+.player-card {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px var(--space-3) 8px;
+  border-top: 1px solid var(--border);
+}
+.pc-avatar {
+  position: relative; width: 42px; height: 42px; flex: none;
+  border-radius: 50%; overflow: hidden;
+  background: rgba(127, 139, 160, 0.18);
+  border: 1px solid var(--border);
+}
+.pc-avatar img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.pc-avatar img.hidden { display: none; }
+/* 首字母兜底（未缓存头像或图片加载失败）：不显示破图图标 */
+.pc-avatar-fallback {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 17px; font-weight: 600; color: var(--text-2);
+}
+.pc-avatar-fallback.hidden { display: none; }
+.pc-info { min-width: 0; flex: 1; }
+.pc-name {
+  font-size: var(--fs-md); font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pc-ranks { display: flex; flex-wrap: wrap; gap: 2px 8px; margin-top: 3px; }
+/* 排名并排显示，**放不下才换行**：flex-wrap 在条目边界换行（不会从文字中间断开），
+   两段长度之和超过文字列宽度时自动落到第二行，放得下就保持一行。
+   （原先强制 flex-direction: column 固定两行是过度修正——实测本地数据两段
+   固有宽度 55.3 + 45.8 + 8 间距 = 109px < 可用 117px，本就该一行。） */
+.pc-rank {
+  font-size: var(--fs-xs); color: var(--muted);
+  white-space: nowrap; min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+/* 国旗：用本地缓存的图片而不是旗帜 emoji——WebView2（Chromium/Windows）不渲染
+   区域指示符字形，emoji 会退化成「CN」两个字母（2026-09-10 实测）。未缓存旗帜时
+   退回国家代码文本，仍然可读，绝不显示破图图标。 */
+.pc-flag-img {
+  width: 16px; height: 11px; border-radius: 2px;
+  object-fit: cover; vertical-align: -1px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+.pc-flag-code {
+  font-size: 10px; letter-spacing: 0.5px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 3px; padding: 0 3px;
+}
+
+/* ---------- 能量 / 失败时间小结（详情页时间轴卡片下方，2026-09） ----------
+   只呈现事实：最低能量、是否归零（归零时刻）、扣血来源分解、撞墙次数。
+   与 completion_status（完成度分类）刻意分离，不替玩家解释意图。 */
+.energy-line {
+  display: flex; flex-wrap: wrap; gap: 6px 16px;
+  margin-top: 8px; font-size: var(--fs-xs); color: var(--muted);
+}
+.energy-line .en-item { display: inline-flex; align-items: baseline; gap: 6px; }
+.energy-line .en-item .k { color: var(--muted); }
+.energy-line .en-item .v { color: var(--text-2); font-variant-numeric: tabular-nums; }
+.energy-line .en-item .v.danger { color: var(--red); }
+/* 近似性标注：只在含撞墙数据的回放上出现（能量/失败时间的不确定性提示）。
+   用次级警示色，不与真正的失败红抢焦点。 */
+.energy-line .en-item.approx .v { color: #e2a33c; }
+
+/* ---------- 右键菜单（context menu，2026-09） ----------
+   材质/H 动画/Escape/外部点击/滚动关闭全部继承 .popover，这里只做列表形态：
+   去掉 popover 的默认内边距，改为紧凑的菜单行；危险动作（删除/覆盖）用红色。 */
+.popover.ctx { padding: 6px; min-width: 168px; max-width: 280px; }
+.ctx-menu { display: flex; flex-direction: column; }
+.ctx-item {
+  display: block; width: 100%; text-align: left;
+  padding: 8px 12px; border: 0; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text);
+  font-size: var(--fs-sm); font-family: inherit; line-height: 1.4;
+  cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctx-item:hover:not(.disabled) { background: var(--surface-2); color: var(--text); }
+.ctx-item.danger { color: var(--red); }
+.ctx-item.danger:hover:not(.disabled) { background: rgba(255, 61, 90, 0.12); }
+.ctx-item.disabled { color: var(--muted); cursor: default; opacity: 0.6; }
+.ctx-sep { height: 1px; margin: 5px 8px; background: var(--border); }
 
 /* ---------- Main ---------- */
 .main-content {
@@ -277,6 +375,17 @@ body::before {
   align-items: center; gap: 8px;
 }
 #tab-overview .title-left {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  min-width: 0;
+}
+/* 历史页（2026-09）：与总览完全一致的三栏对称 grid —— 分页置顶且严格水平居中。
+   左栏=时间范围/搜索/刷新（.title-left 内再包一层 .filters），中栏=分页，右栏空占位。 */
+#tab-history .surface-title {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center; gap: 8px;
+}
+#tab-history .title-left {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   min-width: 0;
 }
@@ -843,6 +952,48 @@ mark {
   from { opacity: 1; transform: translateY(0) scale(1); }
   to { opacity: 0; transform: translateY(calc(var(--pop-drop, -6px) * -1)) scale(0.96); }
 }
+/* ---------- enum 下拉（设置页，2026-09）----------
+   原生 <select> 的展开列表由操作系统绘制，页面无法做成毛玻璃，故改为
+   「玻璃触发按钮 + popover 列表」：材质/动画/锚定全部复用上面的 .popover，
+   这里只补两端的形状与列表条目样式（保持一条代码路径）。 */
+.enum-select { display: inline-block; min-width: 190px; }
+.enum-trigger {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; text-align: left;
+  background: rgba(20, 22, 30, 0.66);          /* = body.acrylic 的 --surface 半透明值 */
+  backdrop-filter: blur(14px) saturate(150%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  padding: 8px 12px; font-size: var(--fs-md); color: var(--text);
+}
+.enum-trigger:hover { border-color: var(--border-strong); background: rgba(28, 31, 41, 0.72); }
+.enum-trigger.open { border-color: var(--blue); }
+.enum-trigger .enum-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.enum-trigger .enum-caret { flex: none; opacity: 0.7; transition: transform var(--t-fast); }
+.enum-trigger.open .enum-caret { transform: rotate(180deg); }
+/* 列表变体：复用 .popover 的全部定位/材质/动画，只把大卡片的 padding 与圆角
+   换成适合条目列表的紧凑规格（PP 预览等其它 popover 不受影响） */
+.popover:has(.popover-list) { padding: 6px; border-radius: var(--radius-md); }
+.popover-list { display: flex; flex-direction: column; min-width: 170px; max-height: 280px; overflow-y: auto; }
+.popover-opt {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; text-align: left;
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
+  padding: 8px 10px; font-size: var(--fs-sm); color: var(--text-2);
+}
+.popover-opt:hover { background: var(--surface-2); color: var(--text); }
+.popover-opt .popover-opt-check { visibility: hidden; color: var(--blue); flex: none; }
+.popover-opt.active { color: var(--text); }
+.popover-opt.active .popover-opt-check { visibility: visible; }
+/* 不可用选项（如"数据不足"的个人基准）：置灰、不可点，右侧写原因 */
+.popover-opt.disabled,
+.popover-opt.disabled:hover {
+  background: transparent;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+.popover-opt .popover-opt-reason { font-size: 12px; color: var(--muted); flex: none; }
 @media (prefers-reduced-motion: reduce) {
   .popover { opacity: 1; transform: none; }
   .popover.open, .popover.closing { animation: none; }
@@ -1124,6 +1275,13 @@ mark {
 .settings-check.set-bad {
   background: linear-gradient(90deg, rgba(255, 61, 90, 0.16), rgba(255, 61, 90, 0) 65%), var(--surface-2);
 }
+/* 中性态（2026-09）：可选项缺失 / 无法判定——不是问题也不代表确认，
+   因此既不给绿底也不给红底（例如未安装的 mod、缺字段的附加检测项） */
+.settings-check.set-note {
+  background: var(--surface-2);
+  opacity: 0.8;
+}
+.settings-check.set-note > span:first-child { color: var(--muted); }
 /* 存储管理 */
 .storage-actions { display: flex; align-items: center; }
 button.danger {
@@ -1155,6 +1313,8 @@ button.danger-armed:hover { border-color: var(--green); background: rgba(56, 209
 }
 .settings-desc-row td { padding: 4px 0 8px; }
 .settings-desc { color: var(--muted); font-size: var(--fs-xs); }
+/* Secret 来源标注渲染在控件单元格内部（app.js settingsControl），与输入框留出间距 */
+.settings-control .settings-desc { margin-top: 4px; }
 
 /* ============================================================
    页面切换动画（克制）
@@ -1184,15 +1344,35 @@ button.danger-armed:hover { border-color: var(--green); background: rgba(56, 209
    ============================================================ */
 .modal-overlay {
   position: fixed; inset: 0; z-index: 100;
-  background: rgba(0, 0, 0, 0.55);
+  /* 遮罩透明度 2026-09 下调（0.55 → 0.42）：原值把背后内容压得太黑，
+     与右键菜单的观感不一致；现在与浮层玻璃的"背景仍可见"取向一致。 */
+  background: rgba(0, 0, 0, 0.42);
   display: flex; align-items: center; justify-content: center;
+  animation: modalFadeIn 0.18s ease-out both;          /* 与 popover 入场同参 */
 }
+.modal-overlay.closing,
+.modal-overlay.closing .modal { animation: modalFadeOut 0.15s ease-in both; }
 .modal {
   background: var(--surface); border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg); padding: var(--space-5);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: modalPopIn 0.18s ease-out both;
 }
+.modal-overlay.closing .modal { animation: modalPopOut 0.15s ease-in both; }
+/* 出入场与 .popover 同源参数（0.18s ease-out 入 / 0.15s ease-in 出、轻微缩放），
+   让"右键菜单 → 二次确认弹窗"的过渡观感统一。 */
+@keyframes modalFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modalFadeOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes modalPopIn { from { opacity: 0; transform: scale(0.96); } to { opacity: 1; transform: scale(1); } }
+@keyframes modalPopOut { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(0.96); } }
 .modal-title { font-size: var(--fs-md); font-weight: 600; margin-bottom: var(--space-4); text-align: center; }
+/* 弹窗动作区（2026-09，为"删除回放"这类需确认的危险操作加入）：
+   右对齐按钮组，危险动作走 .danger（项目已有的红按钮样式）。 */
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: var(--space-3);
+  margin-top: var(--space-5);
+}
+.modal-actions button { min-width: 96px; }
 .modal-close { margin-top: var(--space-4); text-align: center; }
 
 /* ============================================================
@@ -1330,6 +1510,25 @@ body.acrylic #app-shell {
   border-top: 1px solid var(--border);
 }
 .ss-level-info { flex: none; max-width: 46%; }
+/* 三档技能基准：每行一个基准（96% / 94% / 80%），数据不足的档只写"数据不足" */
+.ss-track {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+  padding: 2px 0;
+}
+.ss-track-active .ss-track-value { color: var(--yellow); }
+.ss-track-name { flex: none; min-width: 76px; }
+.ss-track-value {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 0.5px;
+  font-variant-numeric: tabular-nums;
+}
+.ss-track-sub { font-size: 12px; color: var(--muted); }
+.ss-track-missing { font-size: 13px; color: var(--muted); }
 .ss-level-line {
   font-size: 14px;
   color: var(--text-2);

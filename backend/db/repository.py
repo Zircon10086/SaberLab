@@ -1,10 +1,13 @@
 """SQLite access layer. Each operation opens its own connection to avoid cross-thread issues (the overhead is negligible at local scale)."""
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import pathlib
+import threading
 import uuid
+import weakref
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -40,33 +43,126 @@ def _moving_average(values: list[float], window: int = 5) -> list[float]:
     return out
 
 
-class _ConnCtx:
-    """A with-wrapper around sqlite3.Connection: commits/rolls back and truly closes on exit.
+def _close_thread_local(local) -> None:
+    """weakref.finalize target: close a Repository's cached thread connection.
 
-    (sqlite3's built-in __exit__ only handles the transaction, it does not close the connection.)
+    Holds only the threading.local (not the Repository), so it cannot keep the
+    repository alive, and it runs as soon as the repository is collected.
+    """
+    conn = getattr(local, "conn", None)
+    if conn is not None:
+        try:
+            local.conn = None
+            conn.close()
+        except Exception:                            # noqa: BLE001 — finalizers never raise
+            pass
+
+
+class _ConnCtx:
+    """A with-wrapper around a Repository connection.
+
+    close=False (the normal case since 2026-09): only the transaction is settled,
+    the connection stays cached on the thread — closing a short-lived connection
+    was the dominant cost of per-replay writes. The session that opened a
+    connection is also the one that commits it.
+    owned=True keeps the historical standalone behaviour (commit + close) for
+    callers that explicitly create their own connection.
     """
 
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: sqlite3.Connection, close: bool = True,
+                 commit: bool = True):
         self.conn = conn
+        self.close = close
+        self.commit = commit
 
     def __enter__(self) -> sqlite3.Connection:
         return self.conn
 
     def __exit__(self, exc_type, exc, tb):
         try:
-            if exc_type is None:
-                self.conn.commit()
-            else:
-                self.conn.rollback()
+            if self.commit:
+                if exc_type is None:
+                    self.conn.commit()
+                else:
+                    self.conn.rollback()
         finally:
-            self.conn.close()
+            if self.close:
+                self.conn.close()
         return False
+
+
+def _session_label(start: int, end: int) -> str:
+    """Label for one play session as a time range that always carries the date.
+
+    The date is kept even for a single-day session: with only clock times the
+    player cannot tell which day they played (2026-09 requirement). A session
+    crossing midnight keeps both dates, which is exactly the case "by day" gets
+    wrong — the label makes that visible instead of hiding it.
+    """
+    s = datetime.fromtimestamp(start)
+    e = datetime.fromtimestamp(end)
+    if s.strftime("%Y-%m-%d") == e.strftime("%Y-%m-%d"):
+        return f"{s:%Y-%m-%d %H:%M} – {e:%H:%M}"
+    return f"{s:%Y-%m-%d %H:%M} – {e:%Y-%m-%d %H:%M}"
+
+
+def group_replays_by_session(rows: list[dict], gap_seconds: int) -> list[dict]:
+    """Group timestamp-ordered replays into play sessions.
+
+    A session ends when neighbouring replays are further apart than
+    `gap_seconds`: the player was not playing in between, so the next replay
+    starts a new session. This is deliberately independent of the calendar day,
+    which is what the "by day" mode cannot express — midnight sessions would be
+    split, and a morning plus an afternoon block would be merged.
+
+    `rows` must be ordered the way list_replays returns them (timestamp DESC);
+    the returned groups keep that order, so group[0] is the newest session.
+    Rows without a usable timestamp are appended to the current group instead of
+    forming a bogus session far away in time.
+    """
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    previous_ts = 0
+    for r in rows:
+        ts = r.get("timestamp") or 0
+        # A row without a usable timestamp inherits the previous timestamp
+        # instead of forming a bogus session far away in time (ts=0 would look
+        # like a multi-decade gap).
+        if ts:
+            if current and abs(previous_ts - ts) > gap_seconds:
+                groups.append(current)
+                current = []
+            previous_ts = ts
+        current.append(r)
+    if current:
+        groups.append(current)
+
+    out = []
+    for g in groups:
+        times = [r.get("timestamp") or 0 for r in g]
+        timed = [t for t in times if t]
+        out.append({
+            "date": _session_label(min(timed), max(timed)) if timed else "未知时间",
+            "start": min(timed) if timed else 0,
+            "end": max(timed) if timed else 0,
+            "replays": g,
+        })
+    return out
 
 
 class Repository:
     def __init__(self, db_path: pathlib.Path | str):
         self.db_path = str(db_path)
         pathlib.Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        # Per-thread write session (2026-09, performance): when `session()` is
+        # active on this thread, every _conn() joins that one connection and
+        # transaction instead of opening its own. The analysis pipeline used to
+        # pay 4 connect/commit round-trips per replay (~48 ms, 74% of the whole
+        # per-replay cost); one transaction makes it one.
+        self._local = threading.local()
+        # Release the cached connection when this Repository is collected, without
+        # defining __del__ (which would create a reference cycle and delay cleanup).
+        self._finalizer = weakref.finalize(self, _close_thread_local, self._local)
         with self._conn() as c:
             c.executescript(SCHEMA)
             self._migrate(c)
@@ -158,6 +254,20 @@ class Repository:
                 "SELECT 'scoresaber', player_id, computed_at, stage, max_single_pp,"
                 " fallback_stars, yellow_stars, sample_count, method, valid_count,"
                 " nf_excluded FROM player_palette_cache")
+
+        # --- player_palette_cache: ACC-weighted skill ratings (2026-09) ---
+        # Additive only: NULL means "that track has insufficient direct evidence",
+        # which the UI turns into "数据不足" and a disabled palette option.
+        cols = {row["name"] for row in c.execute("PRAGMA table_info(player_palette_cache)")}
+        for column, decl in (
+            ("r80", "REAL"), ("r94", "REAL"), ("r96", "REAL"),
+            ("r80_direct", "INTEGER"), ("r94_direct", "INTEGER"), ("r96_direct", "INTEGER"),
+            ("r80_lower_bound", "REAL"), ("r94_lower_bound", "REAL"), ("r96_lower_bound", "REAL"),
+            ("r80_confidence", "TEXT"), ("r94_confidence", "TEXT"), ("r96_confidence", "TEXT"),
+            ("skill_params", "TEXT"),
+        ):
+            if column not in cols:
+                c.execute(f"ALTER TABLE player_palette_cache ADD COLUMN {column} {decl}")
         cols = {row["name"] for row in c.execute("PRAGMA table_info(map_ranked_cache)")}
         if "platform" not in cols:
             self._rebuild_with_platform(
@@ -201,12 +311,90 @@ class Repository:
         c.execute("CREATE INDEX IF NOT EXISTS idx_ssl_platform"
                   " ON scoresaber_leaderboards(platform, map_hash, difficulty_name)")
 
-    def _conn(self) -> _ConnCtx:
+    def _new_conn(self) -> sqlite3.Connection:
+        """One configured connection. Callers should get it from _cached_conn()."""
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
+        # WAL is a PERSISTENT database property: set it once per connection, not
+        # per statement (it needs an exclusive lock; re-issuing it is waste).
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
-        return _ConnCtx(conn)
+        return conn
+
+    def _cached_conn(self) -> sqlite3.Connection:
+        """Long-lived per-thread connection.
+
+        Perf (2026-09, measured): opening a connection per replay cost ~18.7 ms
+        per write batch and reusing one costs ~2.2 ms — an ~8x difference on a
+        ~100 MB database (connection setup plus the WAL checkpoint performed when
+        short-lived connections close). Connections are per-thread because sqlite3
+        objects are not shareable across threads; analysis runs on worker threads,
+        so each gets its own.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._new_conn()
+            self._local.conn = conn
+        return conn
+
+    def close(self) -> None:
+        """Release this thread's cached connection (shutdown / worker teardown).
+
+        Also the context-manager exit and the weakref finalizer callback. Kept
+        out of __del__ on purpose: defining __del__ creates a reference cycle
+        (instance <-> bound method) so the object is only reclaimed by the cyclic
+        GC, which left temporary databases locked on Windows in tests.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            self._local.conn = None
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+    def __enter__(self) -> "Repository":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self.close()
+        return False
+
+    def _conn(self) -> _ConnCtx:
+        # Inside a write session on this thread: hand out the session connection,
+        # owned by the session (it commits/rolls back, _ConnCtx must not close it).
+        sess = getattr(self._local, "session", None)
+        if sess is not None and sess.get("conn") is not None:
+            return _ConnCtx(sess["conn"], close=False, commit=False)
+        # Outside a session: the cached connection is committed but NOT closed —
+        # closing is what made per-replay writes expensive (see _cached_conn).
+        return _ConnCtx(self._cached_conn(), close=False)
+
+    @contextlib.contextmanager
+    def session(self):
+        """Group many write calls into ONE connection and ONE transaction.
+
+        All Repository methods called inside the block join the same connection,
+        so a whole replay's derived data is committed atomically: either all of
+        it lands or none of it does (previously a single replay already spanned
+        4 independent transactions on 4 short-lived connections).
+        Nested sessions reuse the outer one.
+        """
+        outer = getattr(self._local, "session", None)
+        if outer is not None:
+            yield outer["conn"]                  # nested: reuse, no double commit
+            return
+        conn = self._cached_conn()
+        state = {"conn": conn}
+        self._local.session = state
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            self._local.session = None
 
     # ---------- maps ----------
     def upsert_map(self, m: dict) -> None:
@@ -326,6 +514,36 @@ class Repository:
             row = c.execute("SELECT * FROM replays WHERE replay_id=?",
                             (replay_id,)).fetchone()
             return _row_to_dict(row) if row else None
+
+    def delete_replay(self, replay_id: str) -> dict:
+        """Remove a replay record and ALL its derived data, in one transaction.
+
+        Used by the user-facing "delete replay" action (2026-09): the user chose to
+        delete the file, so keeping the local analysis around is not what they
+        asked for. Removes the row plus every table keyed by replay_id:
+        notes / metrics / windows / motion_series / accuracy_curve / ai_reports.
+        References from `experiments` (baseline/candidate) are nulled instead of
+        deleting the experiment itself — the experiment row is a deliberate record
+        that must survive its subjects.
+
+        Returns a per-table count so the caller can log/report what was removed.
+        """
+        tables = ("notes", "metrics", "windows", "motion_series",
+                  "accuracy_curve", "ai_reports")
+        counts: dict[str, int] = {}
+        with self.session() as c:                       # one connection, one transaction
+            for t in tables:
+                cur = c.execute(f"DELETE FROM {t} WHERE replay_id=?", (replay_id,))
+                counts[t] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            # experiments reference replays without a foreign key: unlink, never delete
+            for col in ("baseline_replay_id", "candidate_replay_id"):
+                try:
+                    c.execute(f"UPDATE experiments SET {col}=NULL WHERE {col}=?", (replay_id,))
+                except sqlite3.OperationalError:
+                    pass                                # column absent in old databases
+            cur = c.execute("DELETE FROM replays WHERE replay_id=?", (replay_id,))
+            counts["replays"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        return counts
 
     def get_replay_by_session(self, player_id: str, map_hash: str,
                               timestamp: int) -> Optional[dict]:
@@ -573,6 +791,30 @@ class Repository:
             rows = c.execute(
                 "SELECT file_path, file_size, file_mtime FROM replays").fetchall()
             return {r["file_path"]: (r["file_size"], r["file_mtime"]) for r in rows}
+
+    def list_replays_by_session(self, page: int = 1, gap_seconds: int = 3600,
+                                map_hash: str | None = None,
+                                days: int | None = None) -> dict:
+        """Return the replay list grouped into play sessions (2026-09).
+
+        Sessions are built from the timestamp gap alone (see
+        `group_replays_by_session`), so unlike "by day" a midnight run stays one
+        session and two separate blocks in the same day stay two. Pagination unit
+        = one session, mirroring `list_replays_by_day`; the response reuses the
+        same `days` key so the overview renders both modes with one code path.
+        """
+        rows = self.list_replays(limit=100000, map_hash=map_hash, days=days)
+        sessions = group_replays_by_session(rows, gap_seconds)
+        total = len(sessions)
+        if not total:
+            return {"days": [], "total_days": 0, "page": page, "pages": 0}
+        page = max(1, min(page, total))
+        return {
+            "days": [sessions[page - 1]],
+            "total_days": total,
+            "page": page,
+            "pages": total,
+        }
 
     def previous_attempts_on_map(self, map_hash: str, difficulty: str,
                                   before_ts: int, exclude_id: str | None = None,
@@ -914,18 +1156,35 @@ class Repository:
 
     # ---------- player palette cache (platform-scoped, 2026 spec) ----------
     def save_player_palette(self, platform: str, player_id: str, result: dict) -> None:
-        """Persist a classify_player() result per player per platform (offline-capable)."""
+        """Persist a palette result per player per platform (offline-capable).
+
+        The payload carries both the ACC-weighted skill ratings (r80/r94/r96, NULL when
+        a track lacks direct evidence) and, for the colouring path, the anchor that was
+        actually used (``yellow_stars`` = best track with sufficient evidence).
+        """
         with self._conn() as c:
             c.execute("""INSERT OR REPLACE INTO player_palette_cache(
                     platform, player_id, computed_at, stage, max_single_pp,
                     fallback_stars, yellow_stars, sample_count, method,
-                    valid_count, nf_excluded)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    valid_count, nf_excluded,
+                    r80, r94, r96,
+                    r80_direct, r94_direct, r96_direct,
+                    r80_lower_bound, r94_lower_bound, r96_lower_bound,
+                    r80_confidence, r94_confidence, r96_confidence,
+                    skill_params)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (platform, player_id, _now(), result.get("stage"),
                  result.get("max_single_pp"), result.get("fallback_stars"),
                  result.get("yellow_stars"), result.get("sample_count"),
                  result.get("method"), result.get("valid_count"),
-                 result.get("nf_excluded")))
+                 result.get("nf_excluded"),
+                 result.get("r80"), result.get("r94"), result.get("r96"),
+                 result.get("r80_direct"), result.get("r94_direct"), result.get("r96_direct"),
+                 result.get("r80_lower_bound"), result.get("r94_lower_bound"),
+                 result.get("r96_lower_bound"),
+                 result.get("r80_confidence"), result.get("r94_confidence"),
+                 result.get("r96_confidence"),
+                 json.dumps(result.get("skill_params") or {}, ensure_ascii=False)))
 
     def get_player_palette(self, platform: str, player_id: str) -> Optional[dict]:
         with self._conn() as c:

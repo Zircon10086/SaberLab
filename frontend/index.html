@@ -86,12 +86,30 @@
         <span data-i18n="nav.settings">设置</span>
       </button>
     </nav>
-    <div class="sidebar-footer">
-      <div class="sidebar-footer-status">
-        <span class="status-dot" id="srv-dot"></span>
-        <span id="srv-text" data-i18n="footer.connecting">连接中…</span>
+    <!-- 侧栏底部整块（2026-09）：玩家卡片 + 服务器状态。
+         卡片数据来自云端同步缓存（/api/player/card），未同步过云端数据时
+         整块卡片保持隐藏（无错误态）。 -->
+    <div class="sidebar-bottom">
+      <div class="player-card hidden" id="player-card">
+        <div class="pc-avatar">
+          <img id="pc-avatar-img" alt="" class="hidden">
+          <span class="pc-avatar-fallback" id="pc-avatar-fallback"></span>
+        </div>
+        <div class="pc-info">
+          <div class="pc-name" id="pc-name"></div>
+          <div class="pc-ranks">
+            <span class="pc-rank" id="pc-rank-global"></span>
+            <span class="pc-rank" id="pc-rank-country"></span>
+          </div>
+        </div>
       </div>
-      <div class="sidebar-footer-tagline" data-i18n="footer.tagline">本地 Replay · 确定性计算 · AI 解释</div>
+      <div class="sidebar-footer">
+        <div class="sidebar-footer-status">
+          <span class="status-dot" id="srv-dot"></span>
+          <span id="srv-text" data-i18n="footer.connecting">连接中…</span>
+        </div>
+        <div class="sidebar-footer-tagline" data-i18n="footer.tagline">本地 Replay · 确定性计算 · AI 解释</div>
+      </div>
     </div>
   </aside>
 
@@ -120,7 +138,8 @@
           <div class="title-left">
             <span data-i18n="recent.title">最近 Replay</span>
             <span class="page-mode" id="page-mode">
-              <button class="pm-tab active" data-mode="day" data-i18n="recent.mode_day">按天</button>
+              <button class="pm-tab active" data-mode="session" data-i18n="recent.mode_session">按游玩段</button>
+              <button class="pm-tab" data-mode="day" data-i18n="recent.mode_day">按天</button>
               <button class="pm-tab" data-mode="count" data-i18n="recent.mode_count">按数量</button>
             </span>
             <button id="btn-goto-search" class="mini icon-btn" style="margin-left:10px">
@@ -155,16 +174,25 @@
     <section id="tab-history" class="tabpane">
       <h1 class="page-title" data-i18n="history.title">历史</h1>
       <p class="page-desc" data-i18n="history.desc">全部 Replay 游玩记录</p>
-      <div class="filters">
-        <select id="hist-days">
-          <option value="" data-i18n="history.all_time">全部时间</option>
-          <option value="7" data-i18n="history.days7">最近 7 天</option>
-          <option value="30" data-i18n="history.days30">最近 30 天</option>
-        </select>
-        <input id="hist-filter" data-i18n-placeholder="history.filter" placeholder="按歌名筛选…" />
-        <button id="btn-hist-refresh" class="mini" data-i18n="history.refresh">刷新</button>
+      <div class="surface">
+        <!-- 与总览一致：三栏对称 grid（左栏=筛选，中栏=分页 → 严格水平居中，右栏空占位），
+             分页置顶显示；历史页分页按数量分页、一页 300 条（2026-09） -->
+        <div class="surface-title">
+          <div class="title-left">
+            <div class="filters">
+              <select id="hist-days">
+                <option value="" data-i18n="history.all_time">全部时间</option>
+                <option value="7" data-i18n="history.days7">最近 7 天</option>
+                <option value="30" data-i18n="history.days30">最近 30 天</option>
+              </select>
+              <input id="hist-filter" data-i18n-placeholder="history.filter" placeholder="按歌名筛选…" />
+              <button id="btn-hist-refresh" class="mini" data-i18n="history.refresh">刷新</button>
+            </div>
+          </div>
+          <div id="history-pagination" class="pagination"></div>
+        </div>
+        <div id="history-list" class="replay-list" data-i18n="common.loading">加载中…</div>
       </div>
-      <div id="history-list" class="replay-list" data-i18n="common.loading">加载中…</div>
     </section>
 
     <!-- ====== 对比 ====== -->
@@ -208,7 +236,7 @@
 
       <div class="surface">
         <div class="surface-title" data-i18n="settings.datasource.title">云端数据源</div>
-        <p class="hint" style="margin-bottom:12px" data-i18n="settings.datasource.desc">选择云端成绩与星级的数据来源。玩家 ID 两平台通用（从 Replay 自动解析）；切换后另一平台已缓存的数据保留不动，可随时切回。</p>
+        <p class="hint" style="margin-bottom:12px" data-i18n="settings.datasource.desc">选择云端成绩与星级的数据来源。玩家 ID 两平台通用，切换后可随时切回。</p>
         <div class="page-mode" id="datasource-switch" style="margin-left:0">
           <button class="pm-tab" data-platform="scoresaber">ScoreSaber</button>
           <button class="pm-tab" data-platform="beatleader">BeatLeader</button>
@@ -219,7 +247,7 @@
         <div class="surface-title"><span data-i18n="settings.game.title">游戏路径</span>
           <span id="set-root-badge" class="path-badge"></span>
         </div>
-        <p class="hint" style="margin-bottom:12px" data-i18n="settings.game.desc">选择 Beat Saber 游戏根目录即可，程序自动寻找谱面、Replay 与 SongCore 相对路径（标准游戏结构下无需手动指定）。选择后自动验证，成功即保存。</p>
+        <p class="hint" style="margin-bottom:12px" data-i18n="settings.game.desc">选择 Beat Saber 游戏根目录即可，其余路径将自动查找。选择后自动验证，成功即保存。</p>
         <div class="path-row">
           <input id="set-root-input" type="text" data-i18n-placeholder="settings.game.placeholder" placeholder="未选择游戏根目录，点击右侧按钮或手动输入…" spellcheck="false">
           <button id="btn-set-browse" class="mini primary" data-i18n="settings.game.browse">选择文件夹…</button>
@@ -231,7 +259,7 @@
 
       <div class="surface" id="set-storage">
         <div class="surface-title" data-i18n="settings.storage.title">SABER LAB 存储管理</div>
-        <p class="hint" style="margin-bottom:12px" data-i18n="settings.storage.desc">清空分析缓存后，重启需要重新计算全部分析数据与 AI 报告。原始 Replay 文件与谱面库不受影响。</p>
+        <p class="hint" style="margin-bottom:12px" data-i18n="settings.storage.desc">清空分析缓存后，重启需要重新计算全部分析数据与 AI 报告。</p>
         <div class="storage-actions">
           <button id="btn-clear-cache" class="danger" data-i18n="settings.storage.clear">删除缓存</button>
         </div>
@@ -239,9 +267,9 @@
       </div>
 
       <div class="actions">
-        <button id="btn-set-save" class="primary" data-i18n="settings.save">保存全部设置</button>
+        <!-- 2026-09：设置项改为「焦点离开即自动保存」（app.js autoSaveOnBlur → saveSettings），
+             原先的「保存全部设置」按钮与旁边的保存提示已移除，保存结果用 toast 反馈。 -->
         <button id="btn-set-restart" data-i18n="settings.restart" data-i18n-title="settings.restart_title">重启 SABER LAB</button>
-        <span id="set-save-msg" class="hint" style="margin-left:10px"></span>
       </div>
     </section>
 

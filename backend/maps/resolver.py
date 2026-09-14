@@ -338,15 +338,23 @@ class MapResolver:
         return self.repo.get_map_by_path(path)
 
     # ---------- resolve ----------
-    def resolve(self, map_hash: str) -> Optional[dict]:
-        """Look up a local level by the replay's map_hash."""
+    def resolve(self, map_hash: str, trigger_scan: bool = True) -> Optional[dict]:
+        """Look up a local level by the replay's map_hash.
+
+        trigger_scan=False is for BATCH callers (2026-09): a full rescan walks
+        every folder under CustomLevels and costs ~14 s on a 1000-map library, so
+        letting 400 replays each request one (per 30 s debounce, and once per
+        worker process) turned a ~30 s batch into ~4 minutes. Batch paths scan
+        ONCE up front and then resolve without rescanning; a replay whose map is
+        genuinely absent simply gets no map instead of stalling the batch.
+        """
         if not map_hash:
             return None
         key = map_hash.strip().upper()
         row = self.repo.get_map(key)
         if row:
             return row
-        if key in self._negative_cache:
+        if key in self._negative_cache or not trigger_scan:
             return None
         # DB miss: trigger one targeted scan (for newly downloaded levels).
         # Debounce + mutex (v1.4.1): a scan in progress or one run within the last 30s

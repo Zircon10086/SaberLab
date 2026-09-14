@@ -128,6 +128,54 @@ def build_note_groups(notes, group_notes: int = 50) -> list[dict]:
 
 def _group_metrics(chunk) -> dict:
     """In-group aggregation (convention consistent with fatigue._segment_stats / windows._window_metrics)."""
+    # NoteEvent path (the analyze-time scenario): all fields are plain attributes, so
+    # count them in one pass instead of calling _attr twice per note per classification
+    # (2026-09 perf: ~40k _attr calls per large replay). The metrics computed below are
+    # byte-for-byte the same expressions as the dict path — only the counting differs.
+    if chunk and not isinstance(chunk[0], dict):
+        good: list = []
+        bad = miss = bombs = 0
+        for n in chunk:
+            et = n.event_type
+            if et == GOOD:
+                good.append(n)
+            elif et == BAD:
+                bad += 1
+            elif et == MISS:
+                miss += 1
+            elif et == BOMB:
+                bombs += 1
+        m = {"note_events": len(chunk), "good": len(good), "bad": bad,
+             "miss": miss, "bomb": bombs}
+        scored = len(chunk) - bombs          # == count of non-bomb notes
+        if scored:
+            m["miss_rate"] = round(miss / scored, 4)
+            m["bad_rate"] = round(bad / scored, 4)
+        if good:
+            total = center = speed = 0.0
+            left_n = left_score = right_n = right_score = 0
+            for n in good:
+                ns, cs, sp, saber = _note_stats(n)
+                total += ns
+                center += cs
+                speed += sp
+                if saber == "left":
+                    left_n += 1
+                    left_score += ns
+                else:
+                    right_n += 1
+                    right_score += ns
+            g = len(good)
+            m["accuracy_local"] = round(total / (115 * g), 4)
+            m["center_avg"] = round(center / g, 3)
+            m["saber_speed_avg"] = round(speed / g, 3)
+            denom = left_score + right_score
+            # >0 favors the right hand, <0 favors the left hand (consistent with the windows convention)
+            m["lr_imbalance"] = round((right_score - left_score) / denom, 4) if denom else 0.0
+            m["left_notes"] = left_n
+            m["right_notes"] = right_n
+        return m
+
     good = [n for n in chunk if _attr(n, "event_type") == GOOD]
     bad = sum(1 for n in chunk if _attr(n, "event_type") == BAD)
     miss = sum(1 for n in chunk if _attr(n, "event_type") == MISS)

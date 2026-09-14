@@ -121,6 +121,9 @@ def _get(cfg: Config, url: str):
 
 
 def fetch_profile(cfg: Config, player_id: str) -> dict:
+    # `profilePicture` (https://cdn.scoresaber.com/avatars/<id>.jpg) is kept in
+    # the snapshot since 2026-09: the sidebar player card caches that image
+    # locally during the sync (backend/services/avatars.py).
     return _get(cfg, f"{BASE}/player/{player_id}/full")
 
 
@@ -147,6 +150,11 @@ def fetch_scores(cfg: Config, player_id: str, limit: int = 100,
                 "score_id": sc.get("id"),
                 "time_set": sc.get("timeSet"),
                 "score": sc.get("modifiedScore") or sc.get("baseScore"),
+                # The ACC-weighted skill model needs the accuracy ScoreSaber itself
+                # scored the play at: baseScore / leaderboard.maxScore. Both raw
+                # fields are kept ("score" above stays the modifier-adjusted value).
+                "base_score": sc.get("baseScore"),
+                "max_score": lb.get("maxScore"),
                 "pp": sc.get("pp"),
                 "weight": sc.get("weight"),
                 "rank": sc.get("rank"),

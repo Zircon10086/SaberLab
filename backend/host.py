@@ -749,10 +749,11 @@ def main():
                     cmd = [sys.executable, str(pathlib.Path(__file__).resolve()),
                            *sys.argv[1:]]
                 import subprocess
-                # Strip .env-provided vars from the inherited environment: the
-                # child's load_dotenv never overrides existing vars, so a stale
-                # value (e.g. an API key loaded before the user saved a new one)
-                # would otherwise win forever across restarts (2026-08 fix).
+                # Strip .env-provided vars from the inherited environment. Since the AI
+                # key is read from the .env FILE only (Config.ai_api_key, 2026-09), a
+                # stale value can no longer win over a freshly saved one; this stays as
+                # defence so secrets never travel through the process environment at all
+                # (they would otherwise be visible to anything the child spawns).
                 env = {k: v for k, v in os.environ.items()
                        if k not in dotenv_key_names()}
                 subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), env=env,

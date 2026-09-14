@@ -79,30 +79,61 @@ function toast(message, kind = "error") {
 /* ---------------- 通用弹窗（全局强提醒接口，独立的顶层浮层组件） ----------------
    专门用于需要用户显式关注/确认的强提醒内容（警示、不可撤销操作、结构化
    长内容等）；与轻量 popover（锚定、不阻断交互）语义不同、各自独立。
-   openModal({ title, body, onClose }): title = 纯文本标题；body = HTML 字符串
+   openModal({ title, body, onClose, actions }): title = 纯文本标题；body = HTML 字符串
    （调用方自行转义）；点遮罩或关闭按钮均可关闭。返回 overlay 元素。
-   closeModal(): 关闭当前打开的弹窗（幂等）。 */
-function openModal({ title, body, onClose = null } = {}) {
+   actions（2026-09，为"删除回放"这类需要确认的危险操作加入）：菜单按钮数组
+   [{ id, label, kind?, onClick }]，kind = "primary" | "danger" | ""（默认次级样式）。
+   点击后**不自动关闭**——由 onClick 决定（危险操作要等请求成功再关，避免"已关闭
+   但没删掉"的误导）。返回的 overlay 上可用 #modal-act-<id> 取到按钮。
+   **有 actions 时不再渲染右下角"关闭"按钮**：它与"取消"功能重复，两个关不掉的
+   出口只会让确认界面变啰嗦（用户 2026-09 指出）。
+   closeModal(): 关闭当前打开的弹窗（幂等，带退场动画）。
+   **存在多个 overlay 时只关闭最后打开的那个**——若让退场中的旧弹窗与新弹窗并存，
+   会出现两层遮罩叠加（观感上像闪一下），所以这里逐个标记 closing（各自淡出）而不是
+   一次性全删。 */
+let modalClosing = new WeakSet();
+function openModal({ title, body, onClose = null, actions = null } = {}) {
   closeModal();
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
+  const hasActions = !!(actions && actions.length);
+  const actionHtml = hasActions
+    ? `<div class="modal-actions">` + actions.map((a) =>
+        `<button id="modal-act-${a.id}" class="${a.kind || ""}">${escHtml(a.label)}</button>`
+      ).join("") + `</div>`
+    : "";
+  // 无 actions 的纯信息弹窗仍需要唯一的关闭出口
+  const closeHtml = hasActions
+    ? ""
+    : `<div class="modal-close"><button class="mini" id="modal-close-btn">${t("common.close")}</button></div>`;
   overlay.innerHTML =
     `<div class="modal" role="dialog" aria-modal="true">` +
     (title ? `<div class="modal-title">${escHtml(title)}</div>` : "") +
     (body || "") +
-    `<div class="modal-close"><button class="mini" id="modal-close-btn">${t("common.close")}</button></div>` +
+    actionHtml + closeHtml +
     `</div>`;
   document.body.appendChild(overlay);
   overlay.addEventListener("click", (e) => { if (e.target === overlay) closeModal(); });
-  document.getElementById("modal-close-btn").addEventListener("click", closeModal);
+  const closeBtn = document.getElementById("modal-close-btn");
+  if (closeBtn) closeBtn.addEventListener("click", closeModal);
+  if (hasActions) {
+    actions.forEach((a) => {
+      const btn = document.getElementById(`modal-act-${a.id}`);
+      if (btn && a.onClick) btn.addEventListener("click", () => a.onClick(btn));
+    });
+  }
   if (onClose) overlay.addEventListener("modalclose", onClose);
   return overlay;
 }
 
 function closeModal() {
   document.querySelectorAll(".modal-overlay").forEach((o) => {
+    if (o.classList.contains("closing")) return;      // 已在退场动画中，避免重复触发
     o.dispatchEvent(new CustomEvent("modalclose"));
-    o.remove();
+    o.classList.add("closing");
+    // 退场动画结束后再移除（与 popover/toast 同一套做法，含 animationend 兜底）
+    o.addEventListener("animationend", () => o.remove(), { once: true });
+    setTimeout(() => o.remove(), 300);
   });
 }
 
@@ -110,8 +141,14 @@ function closeModal() {
    轻量浮动卡片：锚定在触发元素下方弹出（空间不足自动翻转到上方，左右夹边），
    不加遮罩、不阻断页面交互；点击外部 / Escape / 页面滚动 / 窗口尺寸变化即关闭。
    全屏 openModal 保留为强提醒接口，二者并存、语义不同。
-   openPopover({ anchor, body, onClose }): anchor = 触发元素；body = HTML 字符串
-   （调用方自行转义）；onClose 在开始关闭时回调。返回 popover 元素。
+   openPopover({ anchor, at, body, onClose, className, blockContextMenu }):
+     - anchor: 触发元素（按元素定位）
+     - at: {x, y} 视口坐标（**优先于 anchor**；右键菜单用光标位置，2026-09）
+     - body: HTML 字符串（调用方自行转义）
+     - className: 追加到 .popover 的类（如 ctx-menu 决定列表样式）
+     - blockContextMenu: 捕获阶段监听 contextmenu 关闭（右键菜单专用：在别处再点
+       右键时应"先关旧菜单再开新菜单"，交给后续调用方处理）
+     - onClose 在开始关闭时回调。
    closePopover(): 关闭当前弹出小窗（幂等，带退出动画 + 移除全部监听）。 */
 let popoverState = null;
 
@@ -121,6 +158,7 @@ function closePopover() {
   popoverState = null;
   document.removeEventListener("click", st.onDocClick, true);
   document.removeEventListener("keydown", st.onKey);
+  if (st.onDocCtx) document.removeEventListener("contextmenu", st.onDocCtx, true);
   window.removeEventListener("scroll", st.onDismiss, true);
   window.removeEventListener("resize", st.onDismiss);
   if (st.onClose) st.onClose();
@@ -129,32 +167,42 @@ function closePopover() {
   setTimeout(() => st.el.remove(), 300);   // animation 不触发时的兜底（同 toast）
 }
 
-function openPopover({ anchor, body, onClose = null } = {}) {
+function openPopover({ anchor = null, at = null, body = "", onClose = null,
+                       className = "", blockContextMenu = false } = {}) {
   closePopover();
   const el = document.createElement("div");
-  el.className = "popover";
+  el.className = "popover" + (className ? " " + className : "");
   el.innerHTML = body;
   document.body.appendChild(el);
   // 定位：默认锚点下方居中；下方放不下且上方放得下则翻转（入场方向跟随翻转）；
   // 左右夹到视口内。先隐藏测量尺寸再定位，避免闪现。
+  // at（视口坐标）优先：右键菜单跟随光标，且只做"夹到视口内"处理。
   el.style.visibility = "hidden";
-  const r = anchor.getBoundingClientRect();
   const margin = 8, gap = 10;
   const pw = el.offsetWidth, ph = el.offsetHeight;
-  let left = r.left + r.width / 2 - pw / 2;
-  left = Math.max(margin, Math.min(left, window.innerWidth - pw - margin));
-  let top = r.bottom + gap;
-  if (top + ph > window.innerHeight - margin && r.top - gap - ph >= margin) {
-    top = r.top - gap - ph;
-    el.style.setProperty("--pop-drop", "6px");       // 从下方入场 → 上方翻转入场方向反转
-    el.style.transformOrigin = "bottom center";
+  let left, top;
+  if (at) {
+    left = Math.min(Math.max(margin, at.x), Math.max(margin, window.innerWidth - pw - margin));
+    top = Math.min(Math.max(margin, at.y), Math.max(margin, window.innerHeight - ph - margin));
+    el.style.transformOrigin = "top left";          // 从光标处展开
+  } else {
+    const r = anchor.getBoundingClientRect();
+    left = r.left + r.width / 2 - pw / 2;
+    left = Math.max(margin, Math.min(left, window.innerWidth - pw - margin));
+    top = r.bottom + gap;
+    if (top + ph > window.innerHeight - margin && r.top - gap - ph >= margin) {
+      top = r.top - gap - ph;
+      el.style.setProperty("--pop-drop", "6px");       // 从下方入场 → 上方翻转入场方向反转
+      el.style.transformOrigin = "bottom center";
+    }
   }
   el.style.left = `${Math.round(left)}px`;
   el.style.top = `${Math.round(top)}px`;
   el.style.visibility = "";
   el.classList.add("open");
+  // 外部点击：anchor 模式要放行触发元素自身的点击，坐标模式无需放行
   const onDocClick = (e) => {
-    if (!el.contains(e.target) && !anchor.contains(e.target)) closePopover();
+    if (!el.contains(e.target) && !(anchor && anchor.contains(e.target))) closePopover();
   };
   const onKey = (e) => { if (e.key === "Escape") closePopover(); };
   const onDismiss = () => closePopover();   // 滚动/缩放会让锚点漂移，直接关闭
@@ -164,7 +212,205 @@ function openPopover({ anchor, body, onClose = null } = {}) {
   window.addEventListener("scroll", onDismiss, true);
   window.addEventListener("resize", onDismiss);
   popoverState = { el, onClose, onDocClick, onKey, onDismiss };
+  if (blockContextMenu) {
+    // 右键菜单：在菜单外再点右键时，先关掉当前菜单（新菜单由该次事件自己开）。
+    // 用捕获阶段，保证在调用方的 contextmenu 处理之前就把旧菜单清掉。
+    const onDocCtx = (e) => { if (!el.contains(e.target)) closePopover(); };
+    setTimeout(() => document.addEventListener("contextmenu", onDocCtx, true), 0);
+    popoverState.onDocCtx = onDocCtx;
+  }
   return el;
+}
+
+/* ---------------- 右键菜单框架（context menu，2026-09） ----------------
+   设计目标：**搭框架**——新增右键功能只需往 CTX_MENUS 注册一条，不改框架代码。
+
+   组成：
+   1. 一次性的文档级 contextmenu 委托（见 bindContextMenus）：用 closest 自内向外
+      找第一个命中的注册项，命中则拦截浏览器原生菜单。
+   2. CTX_MENUS 注册表：{ match(sel), items(el) }。items 返回菜单项数组，便于按
+      元素状态动态增删（返回空数组 = 该元素没有可用项，此时放行原生菜单）。
+   3. 菜单项：{ label, action, danger?, disabled?, sep? }，label 由调用方给最终文案
+      （i18n 由注册项自己 t()），action(ev, el) 执行。
+   4. 渲染复用现有 openPopover（新增 at 坐标模式）：材质、动画、Escape、外部点击、
+      滚动关闭全部继承，不重复实现浮层逻辑。
+
+   新增一个右键场景的正确做法：往 CTX_MENUS 里 push 一条，items 里 t() 取文案，
+   然后在对应渲染函数里给元素加 class/属性供 match 选择（如 .replay-item）。
+   菜单项的统一行为（分隔线、禁用态、危险色、点击后关闭）由框架负责。 */
+const CTX_MENUS = [];
+
+function ctxMenuItem({ label, action, danger = false, disabled = false }) {
+  return { label, action, danger, disabled };
+}
+
+function ctxSeparator() {
+  return { sep: true };
+}
+
+function buildContextMenuHtml(items) {
+  const rows = items.map((it) => {
+    if (it.sep) return '<div class="ctx-sep"></div>';
+    const cls = "ctx-item" + (it.danger ? " danger" : "") + (it.disabled ? " disabled" : "");
+    // label 由注册项给出（调用方负责转义）；这里只做 HTML 转义兜底，避免意外注入
+    return `<button type="button" class="${cls}" data-ctx-idx="${items.indexOf(it)}"` +
+           (it.disabled ? " disabled" : "") + `>${escHtml(it.label)}</button>`;
+  });
+  return `<div class="ctx-menu" role="menu">${rows.join("")}</div>`;
+}
+
+/* 在 (x, y) 处打开右键菜单。items 为空则什么也不做（调用方应先判断）。 */
+function openContextMenu(items, x, y) {
+  if (!items || !items.length) return null;
+  const el = openPopover({
+    at: { x, y },
+    className: "ctx",
+    blockContextMenu: true,
+    body: buildContextMenuHtml(items),
+  });
+  const menu = el.querySelector(".ctx-menu");
+  if (!menu) return el;
+  menu.addEventListener("click", (e) => {
+    const btn = e.target.closest(".ctx-item");
+    if (!btn || btn.disabled) return;
+    e.preventDefault();
+    e.stopPropagation();          // 让 popover 的"外部点击关闭"不要抢在动作之前
+    const item = items[Number(btn.dataset.ctxIdx)];
+    closePopover();
+    if (item && item.action) {
+      try {
+        item.action(e, btn);
+      } catch (err) {
+        console.error("[ctx] action failed", err);
+        toast(String(err && err.message ? err.message : err), "error");
+      }
+    }
+  });
+  return el;
+}
+
+/* 文档级委托：只绑一次。closest 自内向外匹配，第一个命中的注册项胜出。 */
+function bindContextMenus() {
+  document.addEventListener("contextmenu", (e) => {
+    // 输入类元素保留原生菜单（复制/粘贴对文本输入是刚需）
+    const t0 = e.target;
+    if (t0 && t0.closest && t0.closest("input, textarea, [contenteditable='true']")) return;
+    for (const entry of CTX_MENUS) {
+      const el = e.target.closest ? e.target.closest(entry.match) : null;
+      if (!el) continue;
+      const items = (entry.items(el) || []).filter(Boolean);
+      if (!items.length) return;          // 命中但无可用项 → 放行原生菜单
+      e.preventDefault();
+      openContextMenu(items, e.clientX, e.clientY);
+      return;
+    }
+  });
+}
+
+/* 剪贴板辅助（copyText）已随"复制 Replay ID"一起移除（2026-09）：
+   Replay ID 是每设备唯一的 sha256，对用户没有复用价值，右键菜单不再需要复制动作，
+   于是该函数与 [data-copy] 兜底注册项都成了无人调用的死代码（仓库惯例：不留死代码）。
+   将来若某个新菜单项需要复制，再按当时的需求重新引入即可。 */
+
+/* 注册：回放条目（总览 / 历史 / 详情页同谱历史 / 对比列表共用 .replay-item）
+   菜单项（2026-09 用户确定）：
+     打开详情 · 查看同谱面记录（按**歌名**过滤历史搜索框，见下方说明）· 分隔
+     · 打开文件所在位置 · 删除回放文件（二次确认 → 移到回收站）
+   说明：早期版本用 map_hash 填搜索框——但历史搜索只匹配歌名与 5 位 beatmap_key，
+   哈希永远搜不到东西；"复制 Replay ID"也按用户要求去掉了（ID 是每设备唯一的
+   sha256，对用户没有复用价值）。*/
+CTX_MENUS.push({
+  match: ".replay-item",
+  items(el) {
+    const id = el.dataset.id;
+    if (!id) return [];
+    const song = el.dataset.song || "";
+    const fileAvailable = el.dataset.fileAvailable !== "0";
+    const out = [
+      ctxMenuItem({ label: t("ctx.open_detail"), action: () => openDetail(id) }),
+    ];
+    if (song) {
+      out.push(ctxMenuItem({
+        label: t("ctx.same_map_history"),
+        action: () => showSameMapHistory(song),
+      }));
+    }
+    out.push(ctxSeparator());
+    // 文件不在原位时禁用（避免点开一个空文件夹/报错）
+    out.push(ctxMenuItem({
+      label: t("ctx.reveal_file"),
+      disabled: !fileAvailable,
+      action: () => revealReplayFile(id),
+    }));
+    out.push(ctxMenuItem({
+      label: t("ctx.recycle_file"),
+      danger: true,
+      disabled: !fileAvailable,
+      action: () => confirmRecycleReplay(id, song || el.dataset.fileName || ""),
+    }));
+    return out;
+  },
+});
+
+/* 跳转历史页并按**歌名**过滤（右键菜单 → 同一谱面的所有尝试）。
+   历史搜索（histScore）只匹配歌曲名与 5 位 beatmap_key，所以这里必须填歌名；
+   填 map_hash 会永远搜不到（2026-09 修正，用户指出）。 */
+function showSameMapHistory(songName) {
+  switchTab("history");
+  const f = $("#hist-filter");
+  if (f) {
+    f.value = songName;
+    f.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
+
+/* 打开回放文件所在位置（文件不在原位时后端回退到所在文件夹） */
+async function revealReplayFile(id) {
+  try {
+    const res = await api(`/api/replays/${id}/reveal`, { method: "POST" });
+    if (res.mode === "folder") toast(t("ctx.reveal_folder_fallback"), "success");
+  } catch (e) {
+    toast(tErr(`打开文件位置失败：${e.message}`), "error");
+  }
+}
+
+/* 删除回放：二次确认 → 文件移到回收站 + SaberLab 移除该记录（**不是永久删除**）。
+   弹窗复用 openModal（actions 按钮区）；确认后才发请求，成功才关弹窗，
+   避免"弹窗关了但没删掉"的误导。
+   记录被移除后列表要刷新；若当前正在看这条回放的详情，直接返回列表
+   （记录已不存在，停留在一个空详情页没有意义）。 */
+function confirmRecycleReplay(id, songName) {
+  const body =
+    `<p>${escHtml(t("ctx.recycle_confirm", { song: songName || t("replay.unknown_song") }))}</p>` +
+    `<p class="hint">${escHtml(t("ctx.recycle_hint"))}</p>`;
+  openModal({
+    title: t("ctx.recycle_title"),
+    body,
+    actions: [
+      { id: "cancel", label: t("common.cancel"), onClick: () => closeModal() },
+      {
+        id: "confirm",
+        label: t("ctx.recycle_confirm_btn"),
+        kind: "danger",
+        onClick: async (btn) => {
+          btn.disabled = true;
+          try {
+            const res = await api(`/api/replays/${id}/recycle`, { method: "POST" });
+            closeModal();
+            toast(t("ctx.recycled_toast", { name: res.file_name || "" }), "success");
+            if (currentReplay && currentReplay.replay_id === id) {
+              goBack();                       // 记录已移除：退回列表
+            } else {
+              await Promise.allSettled([loadRecent(currentPage), loadHistory()]);
+            }
+          } catch (e) {
+            btn.disabled = false;
+            toast(tErr(`删除失败：${e.message}`), "error");
+          }
+        },
+      },
+    ],
+  });
 }
 
 /* ---------------- 毛玻璃（webview 窗口模式，见 others/毛玻璃方案探索.md） ----------------
@@ -293,6 +539,111 @@ function initAcrylic() {
 const SHELL_WEBVIEW = new URLSearchParams(location.search).get("shell") === "webview";
 if (SHELL_WEBVIEW) initAcrylic();
 
+/* ---------------- 3D 回放（chro 插件）的离开暂停 ----------------
+   回放页靠 CSS 位移切换，iframe 始终留在文档里，插件因此会在后台继续播放
+   （音频 + 场景）。这里在"回放页不在当前画面"时暂停播放，播放位置保留；
+   **回到回放页不会自动继续，由玩家自己点播放**（2026-09-14 定案）。
+   两条路径：
+     · 插件自带控制接口（文档根上有标记）→ 发一条契约消息，插件自己执行；
+     · 老插件（无标记）→ 回退：用插件自身的播放/暂停快捷键（空格），并先判定
+       它是否真的在播放（读数约 0.9s 跳一次，故取样窗口取 1.5s）。
+   插件产物缺失/跨源/派发失败时全部静默降级，界面不报错。 */
+const CHRO_READOUT_RE = /^\d{1,2}:\d{2}$/;
+const CHRO_PROBE_MS = 1500;       // 读数刷新间隔（约 0.9s）的余量
+let chroPauseProbe = null;        // 判定中的定时器（连续切页时不会叠加）
+
+function chroFrameDoc() {
+  const frame = $("#replay-frame");
+  if (!frame) return null;
+  try {
+    return frame.contentDocument || null;   // 同源插件；缺失/跨源时返回 null
+  } catch (e) {
+    return null;
+  }
+}
+
+// 读插件时间轴上的 MM:SS 读数：读得到 = 插件可被宿主控制（仅回退路径使用）
+function chroReadoutTime() {
+  const doc = chroFrameDoc();
+  if (!doc) return null;
+  const nodes = doc.querySelectorAll("span, button, div");
+  for (const el of nodes) {
+    if (el.children.length) continue;
+    const txt = (el.textContent || "").trim();
+    if (CHRO_READOUT_RE.test(txt)) return txt;
+  }
+  return null;
+}
+
+// 回退路径：插件自身的播放/暂停快捷键（与用户在插件里按空格同一条路径）
+function chroPressPlayPause() {
+  const frame = $("#replay-frame");
+  if (!frame) return;
+  const win = frame.contentWindow;
+  if (!win) return;
+  try {
+    win.document.dispatchEvent(new win.KeyboardEvent("keydown", {
+      key: " ", code: "Space", bubbles: true, cancelable: true,
+    }));
+  } catch (e) {
+    /* 触发不了就当没这回事：界面不报错，播放行为退回改动前的样子 */
+  }
+}
+
+// 回退路径：读数是否仍在推进（= 插件正在播放）
+function chroProgressing(done) {
+  const before = chroReadoutTime();
+  if (before === null) { done(false); return; }
+  if (chroPauseProbe) clearTimeout(chroPauseProbe);
+  chroPauseProbe = setTimeout(() => {
+    chroPauseProbe = null;
+    const after = chroReadoutTime();
+    done(after !== null && after !== before);
+  }, CHRO_PROBE_MS);
+}
+
+// 当前选的详情子页（三个 .dpane 是恒定的，选中态在 .dt-tab.active 上）
+function chroReplayPaneSelected() {
+  const paneTab = $(".dt-tab.active");
+  const onDetailTab = $("#tab-detail")?.classList.contains("active") === true;
+  return paneTab?.dataset.pane === "replay" && onDetailTab;
+}
+
+// 插件是否自带宿主播放控制（标记由插件在自己文档根上设置）
+function chroSupportsHostPlayback() {
+  const doc = chroFrameDoc();
+  return !!doc && doc.documentElement?.dataset?.saberlabHost === "1";
+}
+
+function chroSendPause() {
+  const frame = $("#replay-frame");
+  if (!frame || !frame.contentWindow) return;
+  try {
+    frame.contentWindow.postMessage(
+      { type: "saberlab:playback", action: "pause" },
+      window.location.origin,
+    );
+  } catch (e) {
+    /* 静默降级：失败就当没这回事 */
+  }
+}
+
+// 只在"回放页离开当前画面"时调用；回来时不发任何指令（玩家手动继续）
+function syncChroPlayback() {
+  if (chroReplayPaneSelected()) return;
+
+  if (chroSupportsHostPlayback()) {
+    chroSendPause();                             // 插件自己保证幂等：没在播就不动
+    return;
+  }
+
+  chroProgressing((playing) => {
+    if (!playing) return;                        // 本来就没在播，不碰
+    if (chroReplayPaneSelected()) return;        // 判定期间用户已经切回来了，作废
+    chroPressPlayPause();
+  });
+}
+
 /* ---------------- tabs / sidebar 导航 ---------------- */
 $$("#tabs .nav-item").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 function switchTab(name) {
@@ -307,6 +658,7 @@ function switchTab(name) {
   if (name === "compare") loadCompareOptions();
   if (name === "scoresaber") loadScoreSaber();
   if (name === "settings") loadSettings();
+  syncChroPlayback();
 }
 
 /* ---------------- SVG chart ---------------- */
@@ -723,7 +1075,12 @@ async function loadStatus() {
 }
 
 let currentPage = 1;
-let pageMode = "day";   // 总览分页模式：day=按天分组 / count=按数量（20 条/页，v1.4.1）
+// 总览分页模式：session=按游玩段分组（默认） / day=按天分组 / count=按数量（20 条/页，v1.4.1）
+// session 模式的「一段」由相邻 Replay 的时间间隔决定（阈值 = 界面设置
+// ui.session_gap_minutes，默认 60 分钟），因此跨天连玩不会被切成两天、
+// 同一天的上午/下午两段也不会被并到一起。默认值须与 index.html 里带 active 的
+// 那个按钮一致（页面加载即按它取数据）。
+let pageMode = "session";
 
 async function loadRecent(page = 1) {
   currentPage = page;
@@ -738,6 +1095,8 @@ async function loadRecent(page = 1) {
     renderPagination(data.total, data.page, data.pages, "count");
     return;
   }
+  // day / session 共用同一响应形状（days: [{date, replays}]），仅分页单位与
+  // 分组标题不同：按天显示日期，按游玩段显示后端给的起止时刻（跨天的段自带日期）
   const days = data.days || [];
   const html = days.map((d) => {
     const dateTitle = `<div class="day-header">${escHtml(d.date)} <span class="day-count">${d.replays.length} ${t("pagination.unit_count")}</span></div>`;
@@ -747,7 +1106,7 @@ async function loadRecent(page = 1) {
   $("#recent-replays").innerHTML = days.length ? html : `<div class="empty">${t("recent.empty")}</div>`;
   bindReplayItems();
   animateReplayItems();
-  renderPagination(data.total_days, data.page, data.pages, "day");
+  renderPagination(data.total_days, data.page, data.pages, pageMode);
 }
 
 /* 分页刷新动画（v1.6.0）：新渲染的 replay 条目迅速逐条淡化出现。
@@ -760,43 +1119,49 @@ function animateReplayItems() {
   });
 }
 
-function renderPagination(total, page, pages, unit = "day") {
-  const el = $("#pagination");
+/* 分页控件（总览 + 历史页共用同款按钮，2026-09）
+   renderPagination(total, page, pages, unit, onPage, el):
+     - unit: day（按天）/ session（按游玩段）/ count（按数量）
+     - onPage: 跳页动作，可注入；不传则走总览原有的 loadRecent
+     - el: 挂载容器，默认 #pagination（历史页传 #history-pagination）
+   历史页只按数量分页（一页 300 条），因此复用同一个组件、同一个样式。 */
+function renderPagination(total, page, pages, unit = "day", onPage = null, el = null) {
+  const box = el || $("#pagination");
+  if (!box) return;
   if (pages <= 1) {
-    el.innerHTML = "";
+    box.innerHTML = "";
     return;
   }
-  const isCount = unit === "count";
-  const unitLabel = t(isCount ? "pagination.unit_count" : "pagination.unit_day");
-  const prevLabel = t(isCount ? "pagination.prev_count" : "pagination.prev_day");
-  const nextLabel = t(isCount ? "pagination.next_count" : "pagination.next_day");
+  const unitLabel = t("pagination.unit_" + unit);
+  const prevLabel = t("pagination.prev_" + unit);
+  const nextLabel = t("pagination.next_" + unit);
+  // 跳页动作注入：不传则保持总览原有行为（loadRecent）
+  const jump = onPage || ((p) => loadRecent(p));
+  const btn = (p, label, active = false) =>
+    active ? `<button class="active">${label}</button>`
+           : `<button data-page="${p}">${label}</button>`;
+
   let html = `<div class="pagination-info">${t("pagination.total", { total, unit: unitLabel, page, pages })}</div>`;
   html += `<div class="pagination-controls">`;
-  if (page > 1) {
-    html += `<button onclick="loadRecent(${page - 1})">${prevLabel}</button>`;
-  }
+  if (page > 1) html += btn(page - 1, prevLabel);
   const start = Math.max(1, page - 2);
   const end = Math.min(pages, page + 2);
   if (start > 1) {
-    html += `<button onclick="loadRecent(1)">1</button>`;
+    html += btn(1, "1");
     if (start > 2) html += `<span>...</span>`;
   }
-  for (let i = start; i <= end; i++) {
-    if (i === page) {
-      html += `<button class="active">${i}</button>`;
-    } else {
-      html += `<button onclick="loadRecent(${i})">${i}</button>`;
-    }
-  }
+  for (let i = start; i <= end; i++) html += btn(i, String(i), i === page);
   if (end < pages) {
     if (end < pages - 1) html += `<span>...</span>`;
-    html += `<button onclick="loadRecent(${pages})">${pages}</button>`;
+    html += btn(pages, String(pages));
   }
-  if (page < pages) {
-    html += `<button onclick="loadRecent(${page + 1})">${nextLabel}</button>`;
-  }
+  if (page < pages) html += btn(page + 1, nextLabel);
   html += `</div>`;
-  el.innerHTML = html;
+  box.innerHTML = html;
+  // 事件委托（替代内联 onclick 拼字符串）：可安全注入任意加载函数
+  box.querySelectorAll("button[data-page]").forEach((b) => {
+    b.addEventListener("click", () => jump(Number(b.dataset.page)));
+  });
 }
 
 /* 分页模式切换：立即刷新（v1.4.1） */
@@ -861,7 +1226,7 @@ function replayItem(r, highlight = "") {
   const missBadTxt = isPending
     ? `<span style="color:var(--muted)">${t("replay.pending")}</span>`
     : `${r.miss_count}<span style="color:var(--muted)">/${r.bad_count}</span>`;
-  return `<div class="replay-item status-${statusClass}" data-id="${r.replay_id}">
+  return `<div class="replay-item status-${statusClass}" data-id="${r.replay_id}"${r.map_hash ? ` data-map-hash="${r.map_hash}"` : ""}${r.song_name ? ` data-song="${escHtml(r.song_name)}"` : ""}${r.file_name ? ` data-file-name="${escHtml(r.file_name)}"` : ""} data-file-available="${r.file_available === false ? "0" : "1"}">
     <img src="${cover}" loading="lazy" onerror="this.onerror=null;this.src='/static/default.png'" alt="">
     <div>
       <div class="title">${highlightMatch(r.song_name || t("replay.unknown_song"), highlight)} ${keyBadge} <span class="completion-icon">${statusIcon}</span></div>
@@ -1011,6 +1376,8 @@ async function openPpPreview(id, anchor) {
 function escHtml(s) {
   return String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+/* 纯文本元素（textContent）用，不做 HTML 转义：只把 null/undefined 归一为空串 */
+const esc = (s) => String(s ?? "");
 
 /* ---------------- 总览任务按钮：路径可用性拦截 + 一键刷新/联网更新 ----------------
    一键刷新 = 并行触发 5 个任务（入库/批量分析/谱面扫描/NPS/联网星级），本地只处理
@@ -1105,7 +1472,7 @@ async function pollTask() {
 /* ---------------- 详情 ---------------- */
 let currentReplay = null;
 let currentEvents = { miss: [], bad: [] };   // miss/bad 事件时间戳（事件台阶线）
-let currentNotes = { t: [], acc: [], center_t: [], center: [], speed_t: [], speed: [], density_t: [], density: [] };
+let currentNotes = { t: [], acc: [], center_t: [], center: [], speed_t: [], speed: [], density_t: [], density: [], energy_t: [], energy: [] };
   // per-note 曲线（固定窗口退役，2026）：
   //   t/acc = 官方口径累计 accuracy（score/maxScore，全部 block note 含惩罚点，
   //           终点与 replay 记录一致；2026-08 修正）
@@ -1129,6 +1496,9 @@ async function openDetail(id, pane = "data") {
   detailReturnTab = cur ? cur.id.replace("tab-", "") : "overview";
   if (detailReturnTab === "detail") detailReturnTab = "overview";
   detailTargetPane = pane;
+  // 上一轮的 iframe 会被下面的 content.innerHTML="" 一并移除（插件随之重置播放），
+  // 这里把还在飞的播放判定取消掉，避免它落到新的 iframe 上
+  if (chroPauseProbe) { clearTimeout(chroPauseProbe); chroPauseProbe = null; }
 
   // 取消上一轮还在飞的详情请求（释放连接，防止请求堆积拖慢）
   if (detailAbort) detailAbort.abort();
@@ -1171,7 +1541,9 @@ async function openDetail(id, pane = "data") {
     if (seq !== detailReqSeq) return;   // 已有更新的请求，丢弃本次结果
     currentReplay = row;
     currentEvents = timeline.events || { miss: [], bad: [] };
-    currentNotes = timeline.notes || { t: [], acc: [], center_t: [], center: [], speed_t: [], speed: [], density_t: [], density: [] };
+    currentNotes = timeline.notes || { t: [], acc: [], center_t: [], center: [],
+                                       speed_t: [], speed: [], density_t: [], density: [],
+                                       energy_t: [], energy: [] };
     currentNoteRange = timeline.note_range || { first_note: 0, last_note: 0 };
     currentSeries = series.motion;
     currentSlice = sliceDetails;
@@ -1192,6 +1564,23 @@ function goBack() {
   // 详情页可能刚懒分析完成（pending -> analyzed），返回时刷新列表状态
   if (detailReturnTab === "overview") loadRecent(currentPage).catch(() => {});
 }
+
+/* ESC = 返回键（2026-09，用户需求）：仅在详情页可用（详情顶栏可见即视为在详情页）。
+   与弹层/下拉的 ESC 关闭共用同一个按键，因此**弹层打开时让位给弹层**
+   （openPopover 自己注册的 keydown 后注册，先 return 才不会把两层语义搅在一起）。 */
+function detailIsOpen() {
+  const bar = $("#detail-topbar");
+  return !!bar && bar.style.display !== "none" && !!currentReplay;
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (document.querySelector(".popover")) return;   // 有弹层：交给弹层关闭
+  if (!detailIsOpen()) return;
+  const btn = $("#btn-detail-back");
+  if (!btn) return;                     // 无返回按钮时不做任何事
+  e.preventDefault();
+  btn.click();                          // 与点击返回按钮完全同一条路径
+});
 
 /* 详情加载骨架屏（shimmer，按实测布局：第一行卡 750px / 第二行 920px） */
 function detailSkeletonHtml() {
@@ -1343,7 +1732,11 @@ function renderDetailBody(content) {
   // fatigue
   renderFatigue(m.fatigue || {});
 
-  // SliceDetails（v1.6.0：4x3 网格平均分 + 双 9 宫格切割轨迹）
+  // 能量 / 失败时间（2026-09）：本地按官方算法重算（backend/analysis/energy.py）。
+  // 与 completion_status 无关——只陈述"能量何时归零"这一事实，不替玩家解释意图。
+  renderEnergySummary(m.energy || {});
+
+  // SliceDetails（v1.6.0：4x3 网格 + 双 9 宫格切割轨迹）
   renderSliceDetails(currentSlice);
 
   // charts
@@ -1430,6 +1823,7 @@ function switchDetailPane(name, instant = false) {
   }
   // 注意：切换 pane 是纯 transform 位移，不重建 DOM、不改布局，
   // 图表保持首绘内容即可——重绘会重建 legend/svg 导致高度抖动（卡片突变高）。
+  syncChroPlayback();
 }
 
 function buildDetailSkeleton() {
@@ -1477,8 +1871,10 @@ function buildDetailSkeleton() {
               <label><input type="checkbox" class="tl-toggle" value="bad_cum"> ${t("tl.bad_cum")}</label>
               <label><input type="checkbox" class="tl-toggle" value="saber_speed_avg"> ${t("tl.speed")}</label>
               <label><input type="checkbox" class="tl-toggle" value="note_density"> ${t("tl.density")}</label>
+              <label><input type="checkbox" class="tl-toggle" value="energy"> ${t("tl.energy")}</label>
             </div>
-            <div id="chart-timeline" class="chart"></div></div>
+            <div id="chart-timeline" class="chart"></div>
+            <div id="d-energy" class="energy-line"></div></div>
           <div class="surface"><div class="surface-title">${t("detail.card.fatigue")}</div><div id="d-fatigue"></div></div>
           <div class="surface"><div class="surface-title">${t("detail.card.accuracy")}</div><table class="metrics-table" id="d-hands"></table>
             <p class="hint">${t("detail.acc_hint")}</p></div>
@@ -1749,6 +2145,7 @@ function collapseSlice(data, tileIndex) {
 const TL_COLORS = {
   accuracy_local: "#3d9bff", center_avg: "#38d17c", miss_cum: "#ff3d5a",
   bad_cum: "#f5c542", saber_speed_avg: "#a06bff", note_density: "#8b96ab",
+  energy: "#ffffff",   // 白色：与密度的灰（#8b96ab）明确区分（用户 2026-09 指定）
 };
 /* 时间序列图表标签（i18n：dict 异步加载，须在 I18N.init 后构建，见 init） */
 let TL_LABELS = {};
@@ -1757,6 +2154,7 @@ function buildTimelineI18n() {
   TL_LABELS = {
     accuracy_local: t("tl.accuracy"), center_avg: t("tl.center"), miss_cum: t("tl.miss_cum"),
     bad_cum: t("tl.bad_cum"), saber_speed_avg: t("tl.speed"), note_density: t("tl.density"),
+    energy: t("tl.energy"),
   };
   /* 真实值格式化（图例范围 + 悬停数值框共用） */
   TL_VALUE_FMT = {
@@ -1766,6 +2164,7 @@ function buildTimelineI18n() {
     bad_cum: (v) => String(Math.round(v)),
     saber_speed_avg: (v) => t("tl.speed_unit", { v: v.toFixed(2) }),
     note_density: (v) => t("tl.density_unit", { v: v.toFixed(2) }),
+    energy: (v) => (v * 100).toFixed(1) + "%",
   };
 }
 
@@ -1812,6 +2211,13 @@ function drawTimeline(animate = true) {
       const st = (currentNotes || {}).speed_t || [];
       const sv = (currentNotes || {}).speed || [];
       st.forEach((t, i) => pts.push({ x: t, y: sv[i] }));
+    } else if (key === "energy") {
+      // 能量条（2026-09）：由后端按官方 GameEnergyCounter 算法重算的台阶线
+      // （白色，区别于密度的灰）。y 为 0..1 的能量比例，与其它序列一同归一化。
+      // 取值来自真实事件（每个 note 事件 + 撞墙），不插值、不伪造。
+      const et = (currentNotes || {}).energy_t || [];
+      const ev = (currentNotes || {}).energy || [];
+      et.forEach((t, i) => pts.push({ x: t, y: ev[i] }));
     } else {
       // 密度：per-note 局部密度（±5 note 邻域，固定窗口退役，2026）。
       // 谱面长间隙（如 Hatatagami 中段 >2s 停顿）自然呈现低谷——忠于数据。
@@ -1829,7 +2235,7 @@ function drawTimeline(animate = true) {
       : t("tl.range", { lo: fmt(lo), hi: fmt(hi) });
     series.push({
       key, name: TL_LABELS[key], color: TL_COLORS[key],
-      points: pts, marked, step: key === "miss_cum" || key === "bad_cum",
+      points: pts, marked, step: key === "miss_cum" || key === "bad_cum" || key === "energy",
       rangeText,
     });
   }
@@ -1837,19 +2243,17 @@ function drawTimeline(animate = true) {
   // 刀速/密度也是 per-note（固定窗口退役，2026），全部落在
   // [first_note, last_note] 区间内。lineChart 会在边界线性插值裁剪跨界线段。
   const axisOpts = lastNote > firstNote ? { xMin: firstNote, xMax: lastNote } : {};
-  // ⚠️ 失败时间红轴标记 —— 已暂停（2026-08-23）
-  // 原因：BeatLeader 0.9.33 的 .bsor failTime 字段恒为 0。官方 BSOR 格式标注
-  // failTime = "song fail time (only if failed), seconds"，但本地 326 个 .bsor
-  // 逐字段二进制核对解析无误后仍全部为 0（含 144 个 NF 触发样本如 Sound
-  // Chimera Expert、86 个 exit 中途退出样本如 Mentai Cosmic/JETLAGG）——
-  // 疑为 BeatLeader mod 写入端未实现/未启用该字段。
-  // 功能实现已验证可用（注入 fail_time 后红轴正确渲染、像素位置精确对齐），
-  // 恢复方式：获得含非零 failTime 的 replay 后，把 FAIL_TIME_MARKER_ENABLED 改为 true。
-  const FAIL_TIME_MARKER_ENABLED = false;
+  // 失败时间红轴标记（2026-09 启用）：数据来自**本地按官方算法重算的 fail_time**
+  // （backend/analysis/energy.py，反编译 GameEnergyCounter 移植）。
+  // 历史：本标记 2026-08 因 .bsor 的 failTime 字段恒为 0 而暂停；现在不再依赖该
+  // 字段，因此只要模拟得出"能量归零"就画线——与 completion_status（玩家意图的
+  // 分类）无关：fail 后继续打完、fail 前主动退出都会被忠实呈现。
   const markers = [];
   const r = currentReplay || {};
-  if (FAIL_TIME_MARKER_ENABLED && r.has_nf && Number(r.fail_time) > 0) {
-    markers.push({ x: Number(r.fail_time), label: t("marker.fail_time", { t: fmt.dur2(r.fail_time) }) });
+  const en = (r.metrics || {}).energy || {};
+  const computedFail = Number(en.fail_time);
+  if (en.did_reach_zero && Number.isFinite(computedFail) && computedFail > 0) {
+    markers.push({ x: computedFail, label: t("marker.fail_time", { t: fmt.dur2(computedFail) }) });
   }
   lineChart(box, series, {
     fmtX: (v) => fmt.dur2(v), yDec: 0,
@@ -1923,13 +2327,30 @@ function renderReport(rep) {
 let histTimer = null;
 let histReqSeq = 0;   // 请求竞态序号：快速连续输入时丢弃过期响应（v1.4.1）
 
-async function loadHistory() {
+/* 历史页：筛选 + **按数量分页**（一页 300 条，复用总览同款分页按钮）。
+   取数策略（2026-09）：无搜索词时只取最近 300 条（首屏速度）；
+   有搜索词时全量取数，然后在客户端按重合度排序并分页——否则较旧的记录会被
+   截在窗口外，表现为"总览能看到某条记录、历史里搜不到"（用户报告的现象：
+   最早的 Noob 记录全部落在 300 条之外，看起来像按玩家过滤，其实不是）。 */
+const HIST_PAGE_SIZE = 300;
+/* 取数上限（2026-09 实测决定）：默认与搜索都用同一个上限，因为**默认视图也要能翻页**
+   （只显示 300 条却不能翻页是不对的）。服务器返回约 **1083 字节/行**（实测 424 行 =
+   448 KB、23 ms），客户端过滤+排序 6000 行只要 2 ms、渲染一页 300 行 13 ms——
+   **瓶颈只在取数上限**。旧值 2000 在 6000 条库上会漏掉 67% 的命中，故放到 10000：
+   覆盖 10800 条规模的极端库（约 11 MB 传输，本机环回可接受）。
+   注意 `/api/history` 自身 limit 上限是 50000，已同步放宽。 */
+const HIST_SEARCH_LIMIT = 10000;
+let historyPage = 1;
+let historyRows = [];      // 当前筛选结果（已排序），分页只切这一份数据
+
+async function loadHistory(page = 1) {
   const seq = ++histReqSeq;
+  historyPage = Math.max(1, Number(page) || 1);
   const days = $("#hist-days").value;
   const q = $("#hist-filter").value.trim();
   let list;
   try {
-    list = await api(`/api/history?limit=300${days ? `&days=${days}` : ""}`);
+    list = await api(`/api/history?limit=${HIST_SEARCH_LIMIT}${days ? `&days=${days}` : ""}`);
   } catch (e) {
     if (seq === histReqSeq) toast(t("history.load_failed", { err: e.message }));
     return;
@@ -1942,18 +2363,38 @@ async function loadHistory() {
       .filter((x) => x.score > 0)
       .sort((a, b) => b.score - a.score)
       .map((x) => x.r);
-    $("#history-list").innerHTML = list.length
-      ? list.map((r) => replayItem(r, q)).join("")
-      : `<div class="empty">${t("history.empty_filter", { q: escHtml(q) })}</div>`;
-  } else {
-    $("#history-list").innerHTML = list.length
-      ? list.map((r) => replayItem(r)).join("")
-      : `<div class="empty">${t("history.empty")}</div>`;
   }
-  bindReplayItems();
+  historyRows = list;
+  renderHistoryPage();
 }
 
-/* 搜索重合度评分：歌名完全包含 > key 完全匹配 > 歌名部分 > key 部分 */
+/* 只渲染当前页（一页 300 条），并渲染分页按钮 */
+function renderHistoryPage() {
+  const total = historyRows.length;
+  const pages = Math.max(1, Math.ceil(total / HIST_PAGE_SIZE));
+  if (historyPage > pages) historyPage = pages;          // 数据变少时回到最后一页
+  const start = (historyPage - 1) * HIST_PAGE_SIZE;
+  const slice = historyRows.slice(start, start + HIST_PAGE_SIZE);
+  const q = $("#hist-filter").value.trim();
+  $("#history-list").innerHTML = slice.length
+    ? slice.map((r) => replayItem(r, q)).join("")
+    : `<div class="empty">${q ? t("history.empty_filter", { q: escHtml(q) }) : t("history.empty")}</div>`;
+  bindReplayItems();
+  renderPagination(total, historyPage, pages, "count",
+                   (p) => { historyPage = p; renderHistoryPage(); scrollHistoryTop(); },
+                   $("#history-pagination"));
+}
+
+/* 翻页后回到列表顶部（与总览翻页一致的观感） */
+function scrollHistoryTop() {
+  const box = $("#history-list");
+  if (box && box.scrollIntoView) box.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
+/* 搜索重合度评分：歌名完全包含 > key 完全匹配 > 歌名部分 > key 部分。
+   注意：**只匹配歌曲名与 5 位 beatmap_key**，不匹配玩家名——
+   一台机器通常只有一个玩家，且未登录时的默认名（如 "Noob"）与登录后是同一人，
+   按玩家名过滤只会让同一人的记录互相隐身。 */
 function histScore(r, tokens) {
   const name = (r.song_name || "").toLowerCase();
   const key = (r.beatmap_key || "").toLowerCase();
@@ -1990,16 +2431,21 @@ function highlightMatch(text, q) {
   return out;
 }
 
-/* 自动搜索：输入后 1s 防抖触发（避免持续搜索影响性能） */
+/* 自动搜索：输入后 1s 防抖触发（避免持续搜索影响性能）。
+   每次搜索都回到第 1 页——留在旧页码会看到一个与关键词无关的页（2026-09 分页）。 */
 $("#hist-filter").addEventListener("input", () => {
   clearTimeout(histTimer);
-  histTimer = setTimeout(loadHistory, 1000);
+  histTimer = setTimeout(() => loadHistory(1), 1000);
 });
 $("#hist-filter").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { clearTimeout(histTimer); loadHistory(); }
+  if (e.key === "Enter") { clearTimeout(histTimer); loadHistory(1); }
+});
+$("#hist-days").addEventListener("change", () => {   // 时间范围变化同样回到第 1 页
+  clearTimeout(histTimer);
+  loadHistory(1);
 });
 $("#btn-hist-refresh").addEventListener("click", () => {
-  clearTimeout(histTimer); loadHistory();
+  clearTimeout(histTimer); loadHistory(historyPage);
 });
 
 /* 总览「搜索」按钮：跳转历史并聚焦输入框 */
@@ -2048,6 +2494,68 @@ $("#btn-compare").addEventListener("click", async () => {
   btn.disabled = false; btn.textContent = t("compare.btn");
 });
 
+/* ---------------- 玩家卡片（侧栏左下角，2026-09） ----------------
+   数据 = 云端同步缓存的玩家档案（name/country/rank/countryRank）+ 本地缓存头像与国旗
+   （同步时下载，见 backend/services/player_assets.py），显示于「服务器运行中」上方。
+   同步时机与云端数据页一致（「拉取数据并计算动态水平」/ 一键刷新），本卡片只读缓存、
+   不触发任何网络请求。头像未缓存 → 首字母兜底；国旗未缓存 → 国家代码字母
+   （WebView2/Chromium 不渲染旗帜 emoji，故用图片）；整块无数据 → 保持隐藏。 */
+const pcRank = (v) => (typeof v === "number" && v > 0 ? `#${fmt.num(v)}` : "-");
+
+/* 语言切换会整页 reload（init 重新拉取），因此标签文案随 t() 直接生成即可 */
+const pcLabel = (id, key, text) => {
+  const el = $(id);
+  if (el) { el.dataset.i18n = key; el.title = t(key); }
+  return text;
+};
+
+function renderPlayerCard(p) {
+  const box = $("#player-card");
+  if (!box) return;
+  if (!p) { box.classList.add("hidden"); return; }
+  const name = esc(p.name) || "-";
+  $("#pc-name").textContent = name;
+  $("#pc-name").title = name;
+  $("#pc-rank-global").innerHTML = pcLabel(
+    "#pc-rank-global", "player.card_global",
+    `<span class="pc-globe">🌐</span> ${pcRank(p.rank)}`);
+  // 国家排名：优先本地缓存国旗图片，无缓存时退回国家代码（不显示破图）
+  const flag = p.flag_url
+    ? `<img class="pc-flag-img" src="${escHtml(p.flag_url)}" alt="">`
+    : (p.country ? `<span class="pc-flag-code">${escHtml(p.country)}</span>` : "");
+  $("#pc-rank-country").innerHTML = pcLabel(
+    "#pc-rank-country", "player.card_country",
+    [flag, pcRank(p.countryRank)].filter(Boolean).join(" "));
+  const img = $("#pc-avatar-img"), fb = $("#pc-avatar-fallback");
+  fb.textContent = (name.trim()[0] || "?").toUpperCase();
+  if (p.avatar_url) {
+    // ?v= 带文件 mtime：缓存没变则 URL 不变（不重发请求），变了自动换图
+    if (img.dataset.v !== p.avatar_url) {
+      img.dataset.v = p.avatar_url;
+      img.src = p.avatar_url;
+    }
+    img.classList.remove("hidden");
+    fb.classList.add("hidden");
+    fb.removeAttribute("title");
+  } else {
+    delete img.dataset.v;
+    img.removeAttribute("src");
+    img.classList.add("hidden");
+    fb.classList.remove("hidden");
+    fb.title = t("player.card_avatar_missing");
+  }
+  box.classList.remove("hidden");
+}
+
+async function loadPlayerCard() {
+  try {
+    const data = await api("/api/player/card");
+    renderPlayerCard(data && data.profile);
+  } catch (e) {
+    renderPlayerCard(null);   // 端点失败 = 卡片不可用，隐藏即可（不干扰其它 UI）
+  }
+}
+
 /* ---------------- 云端数据（数据源：scoresaber | beatleader） ---------------- */
 let ssLoaded = false;
 const cloudApiPath = () => (window.__platform === "beatleader" ? "/api/beatleader" : "/api/scoresaber");
@@ -2065,27 +2573,51 @@ async function loadScoreSaber(force = false) {
 }
 
 /* 动态水平卡片：黄字显示黄色基准（当前平均水平）+ 右侧五色色带（灰绿黄红紫，
-   每段写判定范围）。范围文本从 yellow_stars 推导（与后端 build_tiers 同源语义）。 */
+   每段写判定范围）。色带锚点 = 当前选中的基准（80% / 94% / 96%），取值与
+   后端 build_tiers 同源语义（±0.5 / ±1.5★）。三档数值各占一行，数据不足的档
+   只写"数据不足"，不给数字。 */
+function paletteTrackRow(key, pal) {
+  const stars = pal[key];
+  const direct = pal[`${key}_direct`];
+  if (stars == null) {
+    return `<div class="ss-track"><span class="ss-track-name">${t("scoresaber.track_" + key)}</span>` +
+      `<span class="ss-track-missing">${t("scoresaber.track_insufficient")}</span></div>`;
+  }
+  // 选中的这一档才是色带锚点，加粗以示区别
+  const active = (pal.method === key) ? " ss-track-active" : "";
+  const lower = pal[`${key}_lower_bound`];
+  const lowerTxt = (lower != null && lower > stars)
+    ? ` · ${t("scoresaber.track_lower_bound", { stars: Number(lower).toFixed(2) })}` : "";
+  return `<div class="ss-track${active}">` +
+    `<span class="ss-track-name">${t("scoresaber.track_" + key)}</span>` +
+    `<span class="ss-track-value">${Number(stars).toFixed(2)}★</span>` +
+    `<span class="ss-track-sub">${t("scoresaber.track_direct", { n: direct ?? 0 })}${lowerTxt}</span></div>`;
+}
+
 function paletteLevelHTML(pal) {
-  const y = pal.yellow_stars;
-  const f = (x) => Number(x).toFixed(2);
-  const lo1 = f(y - 1.5), lo2 = f(y - 0.5), hi2 = f(y + 0.5), hi3 = f(y + 1.5);
-  const methodTxt = pal.method === "top20" ? t("scoresaber.level_method_top20")
-    : pal.method === "blend8-19" ? t("scoresaber.level_method_blend", { n: pal.sample_count })
-    : t("scoresaber.level_method_fallback");
+  // 色带用当前生效的锚点：优先 pal.method 指出的那一档，其次任一有值的档
+  const anchorKey = (pal.method && pal[pal.method] != null) ? pal.method
+    : ["personal96", "personal94", "personal80"].find((k) => pal[k] != null);
+  const y = anchorKey ? pal[anchorKey] : null;
   const updated = (pal.computed_at || "").replace("T", " ").slice(0, 16);
-  return `<div class="ss-level-row">
-    <div class="ss-level-info">
-      <div class="ss-level-line">${t("scoresaber.level_title")}：<span class="ss-yellow">${f(y)}★</span></div>
-      <div class="ss-level-sub">${t("scoresaber.level_stage")}：${escHtml(pal.stage || "-")} · ${t("scoresaber.level_sample")}：${pal.sample_count ?? "-"}（${methodTxt}） · ${t("scoresaber.level_updated", { time: updated })}</div>
-    </div>
-    <div class="ss-bands">
+  let bands = "";
+  if (y != null) {
+    const f = (x) => Number(x).toFixed(2);
+    const lo1 = f(y - 1.5), lo2 = f(y - 0.5), hi2 = f(y + 0.5), hi3 = f(y + 1.5);
+    bands = `<div class="ss-bands">
       <div class="band band-gray">&lt;${lo1}★</div>
       <div class="band band-green">${lo1}–${lo2}★</div>
       <div class="band band-yellow">${lo2}–${hi2}★</div>
       <div class="band band-red">${hi2}–${hi3}★</div>
       <div class="band band-purple">&gt;${hi3}★</div>
+    </div>`;
+  }
+  return `<div class="ss-level-row">
+    <div class="ss-level-info">
+      ${["personal96", "personal94", "personal80"].map((k) => paletteTrackRow(k, pal)).join("")}
+      <div class="ss-level-sub">${t("scoresaber.level_updated", { time: updated })}</div>
     </div>
+    ${bands}
   </div>`;
 }
 
@@ -2127,6 +2659,7 @@ $("#btn-ss-refresh").addEventListener("click", async () => {
     const data = await api(cloudRefreshPath(), { method: "POST" });
     renderScoreSaber(data);
     ssLoaded = true;
+    loadPlayerCard();   // 刚同步完：立即刷新侧栏玩家卡片（含新头像）
     toast(t("scoresaber.synced", {
       platform: t("platform." + window.__platform),
     }), "success");
@@ -2165,6 +2698,7 @@ $("#btn-ss-validate").addEventListener("click", async () => {
   await I18N.init();            // language tables + dynamic language discovery
   buildTimelineI18n();          // chart labels (depends on dict)
   applyStaticI18n();            // index.html static text
+  bindContextMenus();           // 右键菜单：文档级委托，只绑一次（依赖 i18n，故放在此处）
   I18N.renderLangSwitch();      // settings language card buttons (dynamic)
   // 云端数据源切换卡片（设置 → 玩家）：初始状态由 /api/settings 的值驱动，
   // loadSettings() 时刷新；点击即保存并刷新页面（即时生效）
@@ -2194,6 +2728,19 @@ $("#btn-ss-validate").addEventListener("click", async () => {
   }
   // loadStatus 内部已拉取 /api/status 并返回（原先这里再拉一次是冗余请求）
   const s = await loadStatus();
+  // 玩家卡片（侧栏左下角）：与最近 replay 并行请求，不阻塞首屏
+  const pcImage = $("#pc-avatar-img");
+  if (pcImage) {
+    // 图片字节损坏/端点 410 时退回首字母，而不是显示破图
+    pcImage.addEventListener("error", () => {
+      pcImage.classList.add("hidden");
+      $("#pc-avatar-fallback").classList.remove("hidden");
+    });
+    pcImage.addEventListener("load", () => {
+      pcImage.classList.remove("hidden");
+      $("#pc-avatar-fallback").classList.add("hidden");
+    });
+  }
   // 导航「云端数据」→ 显示当前平台名（ScoreSaber / BeatLeader），便于确认当前数据源
   const navCloud = document.querySelector('.nav-item[data-tab="scoresaber"] span');
   if (navCloud) navCloud.textContent = t("platform." + window.__platform);
@@ -2203,6 +2750,7 @@ $("#btn-ss-validate").addEventListener("click", async () => {
   const validateBtn = $("#btn-ss-validate");
   if (validateBtn) validateBtn.classList.toggle("hidden", window.__platform !== "scoresaber");
   await loadRecent();
+  loadPlayerCard();   // 玩家卡片：并行加载，失败仅隐藏该块
   if (s && (s.tasks || []).some((task) => task.running)) pollTask();
 })();
 
@@ -2216,6 +2764,44 @@ if (!window._saberlabResizeBound) {
     }, 150);
   });
   window._saberlabResizeBound = true;
+}
+
+/* ---------------- 能量 / 失败时间（2026-09） ----------------
+   数据来自 metrics.energy（后端按官方 GameEnergyCounter 算法重算，见 analysis/energy.py）。
+   呈现原则：只陈述事实（能量最低点、是否归零、归零时刻、扣血来源），不解释玩家意图、
+   不与 completion_status 合并——fail 后坚持打完 / fail 前主动退出都会如实呈现。 */
+function renderEnergySummary(en) {
+  const box = $("#d-energy");
+  if (!box) return;
+  if (!en || en.start_energy == null) { box.innerHTML = ""; return; }
+  const pct = (v) => (v == null ? "–" : (Number(v) * 100).toFixed(1) + "%");
+  const parts = [];
+  const minE = en.min_energy;
+  parts.push(`<span class="en-item"><span class="k">${t("energy.min")}</span>` +
+    `<span class="v ${Number(minE) <= 0 ? "danger" : ""}">${pct(minE)}</span></span>`);
+  if (en.did_reach_zero && Number(en.fail_time) > 0) {
+    parts.push(`<span class="en-item"><span class="k">${t("energy.fail_time")}</span>` +
+      `<span class="v danger">${fmt.dur2(Number(en.fail_time))}</span></span>`);
+  } else {
+    parts.push(`<span class="en-item"><span class="k">${t("energy.fail_time")}</span>` +
+      `<span class="v">${t("energy.no_fail")}</span></span>`);
+  }
+  // 扣血来源分解（只列实际发生的项；游戏自身只关心总量，这里给出可追溯的来源）
+  const byReason = en.drain_by_reason || {};
+  const order = ["miss", "bad", "bomb", "obstacle"];
+  const drain = order.filter((k) => byReason[k] != null && Number(byReason[k]) > 0)
+    .map((k) => `${t("energy.reason_" + k)} ${pct(byReason[k])}`).join(" · ");
+  if (drain) parts.push(`<span class="en-item"><span class="k">${t("energy.drain")}</span><span class="v">${drain}</span></span>`);
+  const hits = Number(en.obstacle_hits) || 0;
+  if (hits > 0) {
+    parts.push(`<span class="en-item"><span class="k">${t("energy.obstacles")}</span><span class="v">${hits}</span></span>`);
+    // 障碍物驻留是"进入时刻 + 1 帧"的有界近似（回放不记录离开时刻，见
+    // analysis/energy.py 的实测误差）。只有在确实撞过墙的回放上才标注，
+    // 避免给其余 96% 的场次加噪音——忠实呈现，但不假装精确。
+    parts.push(`<span class="en-item approx" title="${t("energy.obstacle_approx")}">` +
+      `<span class="v">⚠ ${t("energy.obstacle_approx")}</span></span>`);
+  }
+  box.innerHTML = parts.join("");
 }
 
 /* ---------------- 设置（动态表单，按 schema type 生成控件） ---------------- */
@@ -2265,6 +2851,70 @@ function setGroup(g) {
 /* 控件生成：type -> 输入控件（带 name 属性，满足表单可访问性）
    注意：局部变量名避开全局 t()（i18n），防止遮蔽——曾用 const t = item.type
    导致 boolean/secret 分支调用 t("...") 报 "t is not a function"。 */
+/* enum 下拉：值为隐藏 input（data-key），外观与交互复用通用 openPopover——
+   锚定在触发按钮下方（空间不足自动翻转）、玻璃材质、popIn/popOut 出入场、
+   点击外部 / Escape / 滚动关闭。选中即写回隐藏 input 并更新按钮文案。 */
+let settingsEnums = {};   // cid -> [{value, label}]，随设置表单一起重建
+let enumOpenId = null;    // 当前展开的下拉 id（同一按钮再点 = 收起，同 PP 预览的开关语义）
+
+function openEnumPopover(cid) {
+  const trigger = document.getElementById(cid);
+  const opts = settingsEnums[cid];
+  if (!trigger || !opts || !opts.length) return;
+  // 已展开且点的是同一个触发按钮 → 收起（而不是重播入场动画）。onClose 会复位
+  // enumOpenId；点击外部/Escape/滚动关闭时同样经 onClose 复位。
+  if (enumOpenId === cid) { closePopover(); return; }
+  // 唯一事实来源 = 同键的隐藏 input（collectSettings 也读它）
+  const hidden = document.querySelector(`#set-form input[data-enum="${cid}"]`);
+  const cur = (hidden && hidden.value) || "";
+  const body = `<div class="popover-list" id="${cid}-list" role="listbox">` +
+    opts.map((o) => {
+      // 不可用项（如"数据不足"的个人基准）：置灰、不可点、右侧写原因
+      const disabled = !!o.disabled;
+      const selected = String(o.value) === String(cur);
+      return `<button type="button" class="popover-opt` +
+        (selected ? " active" : "") + (disabled ? " disabled" : "") +
+        `" role="option" aria-selected="${selected}"` +
+        (disabled ? ` aria-disabled="true" tabindex="-1"` : "") +
+        ` data-value="${escHtml(o.value)}">` +
+        `<span class="popover-opt-label">${escHtml(o.label)}</span>` +
+        (disabled && o.reason
+          ? `<span class="popover-opt-reason">${escHtml(o.reason)}</span>`
+          : `<span class="popover-opt-check" aria-hidden="true">✓</span>`) +
+        `</button>`;
+    }).join("") + `</div>`;
+  const el = openPopover({
+    anchor: trigger,
+    body,
+    onClose: () => {
+      trigger.classList.remove("open");
+      trigger.setAttribute("aria-expanded", "false");
+      if (enumOpenId === cid) enumOpenId = null;
+    },
+  });
+  enumOpenId = cid;
+  trigger.classList.add("open");
+  trigger.setAttribute("aria-expanded", "true");
+  el.querySelectorAll(".popover-opt").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.classList.contains("disabled")) return;   // 不可用项不响应点击
+      const value = btn.dataset.value;
+      // 写回值（hidden input 是唯一事实来源，collectSettings 照旧读取）
+      const input = trigger.parentElement.querySelector("input[data-key]");
+      if (input) {
+        input.value = value;
+        // 显式派发 change：设置页改为「焦点离开/值变更即自动保存」（2026-09），
+        // 不能依赖"程序化改 hidden input 会触发 change"这一浏览器行为差异
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      const label = opts.find((o) => String(o.value) === String(value));
+      const shown = trigger.querySelector(".enum-value");
+      if (shown && label) shown.textContent = label.label;
+      closePopover();
+    });
+  });
+}
+
 function settingsControl(item, key, val) {
   const nameAttr = `name="set-${key}"`;
   const typ = item.type;
@@ -2274,16 +2924,45 @@ function settingsControl(item, key, val) {
   if (typ === "enum") {
     // 选项文案 i18n：查 set.{key}.opt.{value}；缺失（如 ai.provider 无翻译）
     // 时回退显示原始枚举值，避免显示 key 字符串
+    // item.option_meta 由后端下发每个选项的可用性（如"数据不足"的个人基准），
+    // 不可用项在下拉里置灰、不响应点击；选项本身仍留在枚举里（配置值合法）
+    const meta = item.option_meta || {};
     const opts = (item.enum || []).map((o) => {
       const lk = `set.${key}.opt.${o}`;
       const label = t(lk) === lk ? o : t(lk);
-      return `<option value="${escHtml(o)}" ${String(val) === String(o) ? "selected" : ""}>${escHtml(label)}</option>`;
-    }).join("");
-    return `<select ${nameAttr} data-key="${key}">${opts}</select>`;
+      const info = meta[o] || {};
+      return { value: o, label, disabled: info.available === false,
+               reason: info.reason || "" };
+    });
+    // 外观与 PP 预测同源（2026-09）：不再用原生 <select>（展开列表由 OS 绘制，
+    // 无法做成毛玻璃），改为「玻璃触发按钮 + 通用 openPopover 列表」。
+    // 值仍放在 hidden input 上（data-key）——collectSettings 走的通用读取路径
+    // 因此完全不受影响，保存/脏值检测链路不需要任何改动。
+    const cur = opts.find((o) => String(o.value) === String(val)) || opts[0];
+    const cid = `enum-${key.replace(/\./g, "-")}`;
+    settingsEnums[cid] = opts;
+    return `<div class="enum-select">` +
+      `<input type="hidden" ${nameAttr} data-key="${key}" data-enum="${cid}" ` +
+      `value="${escHtml(val ?? "")}">` +
+      `<button type="button" class="enum-trigger" id="${cid}" ` +
+      `aria-haspopup="listbox" aria-expanded="false" aria-label="${escHtml(item.label || key)}" ` +
+      `onclick="openEnumPopover('${cid}')">` +
+      `<span class="enum-value">${escHtml(cur ? cur.label : "")}</span>` +
+      `<svg class="enum-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" ` +
+      `stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">` +
+      `<path d="M6 9l6 6 6-6"/></svg>` +
+      `</button></div>`;
   }
   if (typ === "secret") {
     const masked = (val && val.masked) ? val.masked : "";
-    return `<input type="password" ${nameAttr} data-key="${key}" placeholder="${val && val.configured ? masked : t("settings.secret_not_configured")}" autocomplete="new-password">`;
+    const input = `<input type="password" ${nameAttr} data-key="${key}" placeholder="${val && val.configured ? masked : t("settings.secret_not_configured")}" autocomplete="new-password">`;
+    // 已配置时标注密钥来源。密钥只从本地配置文件读取（2026-09 用户决定），
+    // 因此这里恒为"本地配置文件"；不读机器环境变量后，这一行是纯粹的确认信息。
+    if (val && val.configured && val.source) {
+      const hint = t("settings.secret_source_env_file");
+      if (hint) return input + `<div class="settings-desc">${escHtml(hint)}</div>`;
+    }
+    return input;
   }
   if (typ === "integer" || typ === "float") {
     return `<input type="number" ${nameAttr} data-key="${key}" value="${val ?? ""}" step="${typ === 'float' ? '0.1' : '1'}">`;
@@ -2365,13 +3044,33 @@ function renderRootChecks(res) {
   } else {
     badge.innerHTML = `<span class="set-bad">${t("settings.game.bad")}</span>`;
   }
+  // 每行按 status 渲染：ok 绿勾 / bad 红叉 / note 中性（可选项缺失、无法判定的
+  // 附加检测项——既不是问题也不代表确认，例如未安装的 mod）。缺失时回退到 ok。
+  // label / note 是后端中文（label 为路径或设置名，note 为状态说明）：label 查
+  // settings.game.* 文案；note 走 tErr（err 段以中文原文为 key，zh 恒原文）。
+  const ICONS = { ok: "✅", bad: "❌", note: "•" };
+  const NOTE_KEYS = {
+    "replay_retention": {
+      "已关闭：旧回放会被保留": "settings.game.retention_ok",
+      "未找到 BeatLeader 配置（未安装该 mod，可忽略）": "settings.game.retention_absent",
+      "请先填写游戏根目录": "settings.game.retention_no_root",
+      "配置无法解析（不影响其它检测）": "settings.game.retention_unreadable",
+      "配置中无该设置项 → mod 默认不删除旧回放（正常）": "settings.game.retention_no_key",
+    },
+  };
+  const localNote = (r) => {
+    const table = NOTE_KEYS[r.key];
+    const key = table && table[r.note];
+    return key ? t(key) : tErr(r.note || "");
+  };
+  const localLabel = (r) => (r.key === "replay_retention"
+    ? t("settings.game.retention_label") : r.label);
   box.innerHTML = `<div class="settings-checks">` +
     res.results.map((r) => {
-      const icon = r.ok ? "✅" : "❌";
-      const cls = r.ok ? "set-ok" : "set-bad";
-      return `<div class="settings-check ${cls}"><span>${icon}</span>` +
-        `<code>${escHtml(r.label)}</code><span class="v">${escHtml(r.path || "-")}</span>` +
-        (r.note ? `<em>${escHtml(r.note)}</em>` : "") + `</div>`;
+      const st = r.status || (r.ok ? "ok" : "bad");
+      return `<div class="settings-check set-${st}"><span>${ICONS[st] || "•"}</span>` +
+        `<code>${escHtml(localLabel(r))}</code><span class="v">${escHtml(r.path || "-")}</span>` +
+        (r.note ? `<em>${escHtml(localNote(r))}</em>` : "") + `</div>`;
     }).join("") + `</div>`;
   if (!res.valid) {
     box.insertAdjacentHTML("beforeend",
@@ -2437,34 +3136,58 @@ $("#set-root-input").addEventListener("input", () => {
   rootValidateTimer = setTimeout(() => validateRoot(false), 400);
 });
 
-$("#btn-set-save").addEventListener("click", async () => {
+/* 保存设置（唯一保存路径）：收集脏字段 → POST /api/settings。
+   原本只由底部「保存全部设置」按钮触发；2026-09 起改为**焦点离开即自动保存**，
+   按钮已移除——因为 collectSettings() 只提交真实变更的字段，自动保存一次
+   "保存全部"等价于只保存被改的那一项，不需要单独的"保存某项"逻辑。
+   返回 true 表示成功写入。 */
+async function saveSettings() {
   const values = collectSettings();
-  if (!Object.keys(values).length) {
-    $("#set-save-msg").textContent = t("settings.no_changes");
-    return;
-  }
-  const msg = $("#set-save-msg");
-  msg.innerHTML = `<span class="spinner"></span>${t("settings.saving")}`;
+  if (!Object.keys(values).length) return false;   // 无变更：不发请求（静默）
   try {
     const res = await api("/api/settings", {
       method: "POST", body: JSON.stringify({ values }),
     });
     if (res.saved) {
       // 后端确认消息（中文原文）经 msg 段查表翻译（en/ja）
-      msg.textContent = t("settings.saved", { msg: tMsg(res.message || "") });
+      toast(t("settings.saved", { msg: tMsg(res.message || "") }), "success");
+      // 重载设置值让表单与后端一致（此时焦点已离开，重绘不会打断输入）
       await loadSettings();
       // 星级色谱变更：重新拉取 palette 定义并重绘列表（即时生效，无需重启）
       if (Object.prototype.hasOwnProperty.call(values, "player.star_palette")) {
         await loadStatus();
         await loadRecent(currentPage);
       }
-    } else {
-      msg.textContent = t("settings.save_failed", { err: tErr(res.error || "") });
+      return true;
     }
+    toast(t("settings.save_failed", { err: tErr(res.error || "") }), "error");
   } catch (e) {
-    msg.textContent = e.message;
+    toast(t("settings.save_failed", { err: e.message }), "error");
   }
-});
+  return false;
+}
+
+/* 自动保存（2026-09）：焦点离开输入控件后保存。
+   - focusout：文本/数字/密码/根目录等输入框离开焦点时触发（串行：一次一个）
+   - change：checkbox 与自定义下拉（点击即改，不产生 focusout）
+   - 无变更时静默跳过：点击空白、切标签、tab 穿行都不会弹 toast
+   窗体在重绘（loadSettings 后）可能触发 focusout，用 autoSaveInFlight 跳过重入。 */
+let autoSaveInFlight = false;
+async function autoSaveOnBlur(e) {
+  if (autoSaveInFlight) return;
+  const el = e.target;
+  if (!el || !el.dataset || !el.dataset.key) return;   // 只认设置项控件
+  // 值没变就不发请求：例如在自定义下拉里又点了当前项、或 tab 只是穿过某字段
+  const key = el.dataset.key;
+  const same = el.type === "checkbox"
+    ? el.checked === Boolean(settingsValues[key])
+    : String(el.value) === String(settingsValues[key] ?? "");
+  if (same) return;
+  autoSaveInFlight = true;
+  try { await saveSettings(); } finally { autoSaveInFlight = false; }
+}
+$("#set-form").addEventListener("focusout", autoSaveOnBlur);
+$("#set-form").addEventListener("change", autoSaveOnBlur);
 
 /* 重启 SABER LAB：游戏路径已即时生效无需重启；端口/AI 等设置需重启。
    点击后调用 /api/restart，宿主 2 秒后拉起新进程并优雅退出。 */

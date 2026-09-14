@@ -507,6 +507,22 @@ Rules:
 * Do not copy a plugin's GPL-2.0-only source into the GPL-3.0-or-later repository.
 * Never add a fallback path to local build artifacts (the dev environment must behave exactly like the user edition).
 
+### 2.x Development vs. commit ownership (2026-09, user decision)
+
+The 3D replay plugin is licensed differently from SaberLab, so its files live outside
+this repository — but **during development it is treated as part of SaberLab's own
+functionality**:
+
+* The plugin's source (sibling project `Local-ChroViewer`) may be modified freely, and
+  interfaces may be added specifically to serve SaberLab (e.g. the host playback-control
+  contract). Do not avoid a correct plugin-side fix merely because the plugin is a
+  separate project.
+* **Committing SaberLab must never include anything under `plugins/`** — those files go
+  to the plugin's own repository instead. The exclusion is already enforced by
+  `.gitignore` (`plugins/chro/`); keep it intact.
+* Anything SaberLab needs from the plugin must be a documented interface — never a
+  build-artifact fallback.
+
 
 
 \---
@@ -739,6 +755,30 @@ Do not simplify a complex UI merely because a simpler implementation is easier.
 
 
 When a visual behavior depends on a specific JS/CSS/data contract, inspect the entire data flow before changing it.
+
+## 9.1 User-Facing Text (product rule, 2026-09)
+
+Every string SaberLab renders inside the app has **the ordinary player** as its reader.
+
+Rules:
+
+* **State only what will happen.** Never explain why, never justify the design.
+  Example that follows the rule: "The file will be moved to the system recycle bin,
+  SaberLab will remove this record, and data on the cloud site is kept."
+* **No implementation details** in user-visible strings — which table/field/task is
+  involved, how paths are derived, cache or file-copy behaviour, API/token wording.
+* **Parentheses that explain a technical term are NOT verbosity** and must be kept:
+  units, ranges, score parts, parameter names used for disambiguation —
+  e.g. `Center (0–15)`, `Pre / Center / Post`, `(×0.5)`, `(毫秒)`, `(B − A)`.
+  What is rejected is a parenthetical that **explains a cause or a mechanism**
+  (e.g. `NF（Fail 后自动启用）`, `⚠️ 未配置（规则报告兜底）`).
+* Prefer the plainest verb that names the outcome (`已关闭`, `估算值`, `未启用`)
+  over internal jargon (`兜底`, `回退`, `口径`).
+* "Why" belongs in developer documentation (`docs/DEVELOPMENT.md`, code comments),
+  where the reader is a maintainer rather than a player.
+* `title` tooltips and `aria-label`s follow the same rule: name the action or the
+  value, not the reasoning.
+
 
 
 

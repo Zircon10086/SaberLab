@@ -41,6 +41,96 @@ class PathStatus:
     exists: bool
     ok: bool
     note: str = ""
+    # Rendering hint for the settings checklist: "ok" (green) | "bad" (red) |
+    # "note" (neutral — neither a problem nor a confirmation, e.g. an optional
+    # mod that is simply not installed).
+    status: str = "ok"
+
+
+# BeatLeader mod config (relative to the game root): its "keep latest only"
+# replay setting deletes older .bsor files of the same map & difficulty.
+BEATLEADER_CONFIG_REL = "UserData/BeatLeader.json"
+# Config key behind the in-game setting labelled "keep latest only". Missing key
+# means the mod's own default, which has always been "old replays are kept"
+# (verified on this machine: with the key absent the log shows no deletion
+# warnings even on fresh saves) — so absence must NOT be reported as a problem.
+BEATLEADER_OVERRIDE_KEY = "OverrideOldReplays"
+
+
+def beatleader_replay_deletion_check(instance_root: str) -> PathStatus:
+    """Report whether the BeatLeader mod is set to delete older local replays.
+
+    Root cause context (HANDOFF §4.25): with `OverrideOldReplays` true the mod
+    removes older .bsor files of the same map & difficulty on every save — the
+    game log prints "Deleting old replays" / "old replays will be deleted". This
+    is a warning row only: it never affects `valid` (the game path itself is
+    fine, and the user must change the setting inside the game, not here).
+    """
+    label = "BeatLeader 回放保留「keep latest only」"
+    rel = BEATLEADER_CONFIG_REL
+    if not instance_root:
+        return PathStatus("replay_retention", label, rel, exists=False, ok=False,
+                          note="请先填写游戏根目录", status="note")
+    cfg_path = pathlib.Path(instance_root) / BEATLEADER_CONFIG_REL
+    # Optional mod: not installed → nothing to warn about (never red here).
+    if not cfg_path.exists():
+        return PathStatus("replay_retention", label, rel, exists=False, ok=False,
+                          note="未找到 BeatLeader 配置，可忽略",
+                          status="note")
+    try:
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return PathStatus("replay_retention", label, rel, exists=True, ok=False,
+                          note="配置无法解析（不影响其它检测）", status="note")
+    if not isinstance(data, dict) or BEATLEADER_OVERRIDE_KEY not in data:
+        return PathStatus("replay_retention", label, rel, exists=True, ok=False,
+                          note="配置中无该设置项，旧回放会被保留",
+                          status="note")
+    value = data.get(BEATLEADER_OVERRIDE_KEY)
+    # Only an explicitly enabled value counts as enabled: the mod writes a plain
+    # JSON bool, and a bare truthiness test would misread strings like "False"
+    # (never treat an unrecognized value as a red warning).
+    enabled = value is True or value in (1, "true", "True", "TRUE", "yes")
+    if enabled:
+        return PathStatus("replay_retention", label, rel, exists=True, ok=False,
+                          note="旧回放会被删除，请关闭游戏内 BeatLeader 的「keep latest only」",
+                          status="bad")
+    return PathStatus("replay_retention", label, rel, exists=True, ok=True,
+                      note="已关闭：旧回放会被保留", status="ok")
+
+
+def check_paths(instance_root: str) -> list[PathStatus]:
+    """Validate the root directory and its derived paths."""
+    results = []
+    root = pathlib.Path(instance_root) if instance_root else None
+
+    if not root or not root.exists():
+        results.append(PathStatus("instance_root", "游戏根目录",
+                                  normalize_path(str(root)) if root else "",
+                                  exists=False, ok=False,
+                                  note="路径不存在", status="bad"))
+        return results
+
+    results.append(PathStatus("instance_root", "游戏根目录",
+                              normalize_path(str(root)),
+                              exists=True, ok=True,
+                              note="已找到", status="ok"))
+    for key, rel in DERIVED_PATHS.items():
+        p = root / rel
+        exists = p.exists()
+        note = ""
+        status = "ok" if exists else "bad"
+        if not exists:
+            note = "未找到，请确认根目录正确"
+            if key == "local_leaderboard_dir":
+                note = "未找到（可选：LocalLeaderboard 补充扫描源，无该 mod 可忽略）"
+                status = "note"
+        results.append(PathStatus(key, rel, normalize_path(str(p)),
+                                  exists=exists, ok=exists, note=note, status=status))
+    # Not a path check, but it belongs to the same "game side is ready" checklist
+    # and is the one item the user has to fix inside the game (2026-09, §4.25).
+    results.append(beatleader_replay_deletion_check(instance_root))
+    return results
 
 
 @dataclass
@@ -95,35 +185,6 @@ def derive_paths(instance_root: str) -> dict:
     for key, rel in DERIVED_PATHS.items():
         out[key] = normalize_path(str(root / rel)) if root else ""
     return out
-
-
-def check_paths(instance_root: str) -> list[PathStatus]:
-    """Validate the root directory and its derived paths."""
-    results = []
-    root = pathlib.Path(instance_root) if instance_root else None
-
-    if not root or not root.exists():
-        results.append(PathStatus("instance_root", "游戏根目录",
-                                  normalize_path(str(root)) if root else "",
-                                  exists=False, ok=False,
-                                  note="路径不存在"))
-        return results
-
-    results.append(PathStatus("instance_root", "游戏根目录",
-                              normalize_path(str(root)),
-                              exists=True, ok=True,
-                              note="已找到"))
-    for key, rel in DERIVED_PATHS.items():
-        p = root / rel
-        exists = p.exists()
-        note = ""
-        if not exists:
-            note = "未找到，请确认根目录正确"
-            if key == "local_leaderboard_dir":
-                note = "未找到（可选：LocalLeaderboard 补充扫描源，无该 mod 可忽略）"
-        results.append(PathStatus(key, rel, normalize_path(str(p)),
-                                  exists=exists, ok=exists, note=note))
-    return results
 
 
 class ConfigService:
@@ -223,9 +284,14 @@ class ConfigService:
         if item.get("type") == "secret":
             raw = cfg.ai_api_key
             if not raw:
-                return {"configured": False, "masked": None}
+                return {"configured": False, "masked": None, "source": "",
+                        "source_name": ""}
             masked = raw[:5] + "••••••••" + raw[-4:] if len(raw) > 12 else "••••••••"
-            return {"configured": True, "masked": masked}
+            # Where the key came from ('env' | 'env_file'): a machine-wide
+            # environment variable is otherwise indistinguishable from a leak.
+            return {"configured": True, "masked": masked,
+                    "source": cfg.ai_api_key_source(),
+                    "source_name": cfg.ai_api_key_source_name()}
         parts = key.split(".")
         cur = None
         if parts[0] == "game":
@@ -251,6 +317,12 @@ class ConfigService:
                 "slope_group_notes": cfg.slope_group_notes,
                 "fatigue_edge_seconds": cfg.fatigue_edge_seconds,
             }
+            cur = mapping.get(parts[1], "")
+        elif parts[0] == "ui":
+            # UI-only preferences: NOT analysis parameters (changing these must not
+            # reset the analysis cache — see the schema comment on
+            # ui.session_gap_minutes).
+            mapping = {"session_gap_minutes": cfg.session_gap_minutes}
             cur = mapping.get(parts[1], "")
         elif parts[0] == "server":
             mapping = {"host": cfg.host, "port": cfg.port}

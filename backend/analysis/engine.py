@@ -21,6 +21,7 @@ from .accuracy import analyze_accuracy
 from .notes import build_note_groups
 from .motion import analyze_motion
 from .fatigue import analyze_fatigue
+from .energy import EnergyConfig, simulate_energy
 
 
 def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
@@ -69,6 +70,17 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
 
     mods = (replay.info.modifiers or "").upper()
     has_nf = "NF" in mods          # No Fail: auto-enabled after energy depletion, i.e. actually failed
+
+    # 5b) Energy / fail time (official algorithm ported from the decompiled
+    # GameEnergyCounter, see .energy module docstring). The .bsor failTime field
+    # is never written by the mod (498/498 local files are 0.0), so this computed
+    # value is the only source for the fail moment.
+    # NOTE: completion_status below still keys on the RECORDED fail_time — switching
+    # it to the computed one changes existing classification behaviour and is a
+    # separate product decision (the computed values are exposed in the summary and
+    # in the metrics table meanwhile).
+    energy_cfg = EnergyConfig.from_modifiers(replay.info.modifiers)
+    energy_result = simulate_energy(replay.notes, replay.walls, energy_cfg)
     fail_time = float(replay.info.fail_time or 0.0)
     if filename_exit:
         # BeatLeader filename explicitly marks a mid-run exit -> incomplete
@@ -101,6 +113,11 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
         "completion_status": completion_status,
         "song_length": song_length,
         "filename_exit": filename_exit,
+        "energy": energy_result.to_dict(),
+        # convenience copies of the two most-used energy facts (the full structured
+        # result above stays the source of truth for future features)
+        "energy_fail_time": energy_result.fail_time,
+        "energy_min": round(energy_result.min_energy, 6),
         **{f"{k}_count": v for k, v in counts.items()},
     }
 
@@ -112,6 +129,7 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
         "note_groups": note_groups,
         "motion": motion,
         "fatigue": fatigue,
+        "energy": energy_result,
     }
 
     if save and repo is not None:
@@ -120,70 +138,97 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
 
 
 def _persist(replay: Replay, result: dict, repo: Repository) -> None:
-    rid = replay.file_sha256
-    # notes table
-    repo.insert_notes(rid, result["accuracy"]["note_rows"])
+    """Persist one replay's derived data in a SINGLE connection + transaction.
 
-    # metrics table
-    rows: list[tuple[str, str, float, str]] = []
-    s = result["summary"]
-    rows.append(("overall", "score", float(replay.info.score), ""))
-    rows.append(("overall", "score_recomputed", float(s["score_recomputed"]), ""))
-    rows.append(("overall", "accuracy", s["accuracy"], ""))
-    rows.append(("overall", "max_combo", float(s["max_combo"]), ""))
-    rows.append(("overall", "full_combo", 1.0 if s["full_combo"] else 0.0, ""))
-    rows.append(("overall", "duration", s["duration"], ""))
-    rows.append(("overall", "good_count", float(s["good_count"]), ""))
-    rows.append(("overall", "bad_count", float(s["bad_count"]), ""))
-    rows.append(("overall", "miss_count", float(s["miss_count"]), ""))
-    rows.append(("overall", "bomb_count", float(s["bomb_count"]), ""))
+    Perf (2026-09): the four writes below used to run as four independent
+    transactions (~48 ms/replay, 74% of the whole per-replay analysis cost —
+    mostly commit round-trips against a ~100 MB WAL database). One session
+    makes the same writes ~3x cheaper and makes a replay's rows ATOMIC: a
+    failure now rolls the whole replay back instead of leaving it half-written.
+    """
+    with repo.session():
+        rid = replay.file_sha256
+        # notes table
+        repo.insert_notes(rid, result["accuracy"]["note_rows"])
 
-    import json as _json
-    for hand, hs in result["accuracy"]["hands"].items():
-        for name in ("pre_score_avg", "center_score_avg", "post_score_avg",
-                     "cut_distance_cm_avg", "saber_speed_avg", "time_dev_avg_ms",
-                     "time_dev_abs_avg_ms", "time_dev_std_ms", "late_ratio",
-                     "good", "bad", "miss"):
-            v = hs.get(name)
-            if isinstance(v, (int, float)):
-                rows.append((hand, name, float(v), ""))
-        rows.append((hand, "grid_acc", float(sum(g for g in hs["grid_acc"] if g)),
-                     _json.dumps(hs["grid_acc"])))
+        # metrics table
+        rows: list[tuple[str, str, float, str]] = []
+        s = result["summary"]
+        rows.append(("overall", "score", float(replay.info.score), ""))
+        rows.append(("overall", "score_recomputed", float(s["score_recomputed"]), ""))
+        rows.append(("overall", "accuracy", s["accuracy"], ""))
+        rows.append(("overall", "max_combo", float(s["max_combo"]), ""))
+        rows.append(("overall", "full_combo", 1.0 if s["full_combo"] else 0.0, ""))
+        rows.append(("overall", "duration", s["duration"], ""))
+        rows.append(("overall", "good_count", float(s["good_count"]), ""))
+        rows.append(("overall", "bad_count", float(s["bad_count"]), ""))
+        rows.append(("overall", "miss_count", float(s["miss_count"]), ""))
+        rows.append(("overall", "bomb_count", float(s["bomb_count"]), ""))
 
-    rev = result["motion"].get("reversal", {})
-    for hand in ("left", "right"):
-        r = rev.get(hand) or {}
-        for name in ("fast_ratio", "fast_pairs", "single_hand_reversal_score",
-                     "hit_interval_avg_ms", "fast_saber_speed_avg",
-                     "fast_fail_rate", "fast_fail_concentration",
-                     "speed_retention"):
-            if isinstance(r.get(name), (int, float)):
-                rows.append((hand, name, float(r[name]), ""))
-        eco = (result["motion"].get("economy") or {}).get(hand) or {}
-        if eco.get("economy_avg") is not None:
-            rows.append((hand, "path_economy", float(eco["economy_avg"]), ""))
-        mhand = result["motion"].get(hand) or {}
-        for name in ("path_length_m", "speed_avg_mps", "speed_p95_mps",
-                     "speed_peak_mps", "angular_velocity_avg_degps",
-                     "angular_velocity_p95_degps", "angular_velocity_peak_degps",
-                     "angular_velocity_std_degps"):
-            if isinstance(mhand.get(name), (int, float)):
-                rows.append((hand, name, float(mhand[name]), ""))
+        # energy / fail telemetry (official algorithm, see analysis/energy.py). Stored
+        # as metrics so existing read paths (detail API, AI context, future features)
+        # pick them up without new tables; the full event stream is kept in the
+        # analysis result and only its summary aggregates are persisted.
+        en = s.get("energy") or {}
+        if en:
+            if en.get("fail_time") is not None:
+                rows.append(("energy", "fail_time", float(en["fail_time"]), ""))
+            for name in ("start_energy", "end_energy", "min_energy", "max_energy",
+                         "final_charge", "total_drain", "time_in_danger"):
+                v = en.get(name)
+                if isinstance(v, (int, float)):
+                    rows.append(("energy", name, float(v), ""))
+            rows.append(("energy", "did_reach_zero", 1.0 if en.get("did_reach_zero") else 0.0, ""))
+            rows.append(("energy", "obstacle_hits", float(len(en.get("obstacle_hits") or [])), ""))
+            for reason, v in (en.get("drain_by_reason") or {}).items():
+                rows.append(("energy", f"drain_{reason}", float(v), ""))
 
-    if result["fatigue"].get("available"):
-        for k, v in result["fatigue"]["deltas"].items():
-            if isinstance(v, (int, float)):
-                rows.append(("fatigue", f"delta_{k}", float(v), ""))
-        for k, v in result["fatigue"]["slopes"].items():
-            if isinstance(v, (int, float)):
-                rows.append(("fatigue", k, float(v), ""))
+        import json as _json
+        for hand, hs in result["accuracy"]["hands"].items():
+            for name in ("pre_score_avg", "center_score_avg", "post_score_avg",
+                         "cut_distance_cm_avg", "saber_speed_avg", "time_dev_avg_ms",
+                         "time_dev_abs_avg_ms", "time_dev_std_ms", "late_ratio",
+                         "good", "bad", "miss"):
+                v = hs.get(name)
+                if isinstance(v, (int, float)):
+                    rows.append((hand, name, float(v), ""))
+            rows.append((hand, "grid_acc", float(sum(g for g in hs["grid_acc"] if g)),
+                         _json.dumps(hs["grid_acc"])))
 
-    repo.save_metrics(rid, rows)
+        rev = result["motion"].get("reversal", {})
+        for hand in ("left", "right"):
+            r = rev.get(hand) or {}
+            for name in ("fast_ratio", "fast_pairs", "single_hand_reversal_score",
+                         "hit_interval_avg_ms", "fast_saber_speed_avg",
+                         "fast_fail_rate", "fast_fail_concentration",
+                         "speed_retention"):
+                if isinstance(r.get(name), (int, float)):
+                    rows.append((hand, name, float(r[name]), ""))
+            eco = (result["motion"].get("economy") or {}).get(hand) or {}
+            if eco.get("economy_avg") is not None:
+                rows.append((hand, "path_economy", float(eco["economy_avg"]), ""))
+            mhand = result["motion"].get(hand) or {}
+            for name in ("path_length_m", "speed_avg_mps", "speed_p95_mps",
+                         "speed_peak_mps", "angular_velocity_avg_degps",
+                         "angular_velocity_p95_degps", "angular_velocity_peak_degps",
+                         "angular_velocity_std_degps"):
+                if isinstance(mhand.get(name), (int, float)):
+                    rows.append((hand, name, float(mhand[name]), ""))
 
-    # Motion series (charts)
-    if result["motion"].get("series"):
-        repo.save_motion_series(rid, result["motion"]["series"])
+        if result["fatigue"].get("available"):
+            for k, v in result["fatigue"]["deltas"].items():
+                if isinstance(v, (int, float)):
+                    rows.append(("fatigue", f"delta_{k}", float(v), ""))
+            for k, v in result["fatigue"]["slopes"].items():
+                if isinstance(v, (int, float)):
+                    rows.append(("fatigue", k, float(v), ""))
 
-    # Official-convention per-block accuracy curve (2026-08: curve aligned with replay records)
-    if result.get("block_accuracy"):
-        repo.save_accuracy_curve(rid, result["block_accuracy"])
+        repo.save_metrics(rid, rows)
+
+        # Motion series (charts)
+        if result["motion"].get("series"):
+            repo.save_motion_series(rid, result["motion"]["series"])
+
+        # Official-convention per-block accuracy curve (2026-08: curve aligned with replay records)
+        if result.get("block_accuracy"):
+            repo.save_accuracy_curve(rid, result["block_accuracy"])
