@@ -83,7 +83,7 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 
 | 文件 | 说明 | 大小 |
 | --- | --- | --- |
-| [SaberLab-v2.1.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.1.0/SaberLab-v2.1.0-win64.zip) | **用户版**：内置全部依赖（Python 运行时 + chro 3D 查看器），解压双击即用 | ~45 MB |
+| [SaberLab-v2.2.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.2.0/SaberLab-v2.2.0-win64.zip) | **用户版**：内置全部依赖（Python 运行时 + chro 3D 查看器），解压双击即用 | ~45 MB |
 | [源码（saberlab-src）](https://github.com/Zircon10086/SaberLab) | **开发者版**：仓库源码，按下方「从源码构建」自行安装依赖 | — |
 
 > 更早版本见 [Releases 页面](https://github.com/Zircon10086/SaberLab/releases)。
@@ -189,7 +189,7 @@ SaberLab 本体以 **[GPL-3.0-or-later](LICENSE)**  发布。
 
 ### 人类开发者负责的部分
 * **架构设计**：项目的整体框架、技术选型与系统设计由人类开发者独立完成。
-* **代码审查**：AI 生成的所有代码均经过人工审查与重构。
+* **代码审查**：开发者精力有限，无法逐行审查代码，如果有疏漏欢迎开 Issue。
 * **测试与 Debug**：所有的漏洞修复（Debugging）、单元测试及最终的质量把关均由人类完成。
 
 
