@@ -83,7 +83,7 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 
 | File | Description | Size |
 | --- | --- | --- |
-| [SaberLab-v2.2.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.2.0/SaberLab-v2.2.0-win64.zip) | **User edition**: all dependencies bundled (Python runtime + chro 3D viewer). Unzip and double-click to run | ~45 MB |
+| [SaberLab-v2.3.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.3.0/SaberLab-v2.3.0-win64.zip) | **User edition**: all dependencies bundled (Python runtime + chro 3D viewer). Unzip and double-click to run | ~45 MB |
 | [Source (saberlab-src)](https://github.com/Zircon10086/SaberLab) | **Developer edition**: repository source; install dependencies yourself as described under "Build from Source" | — |
 
 > Older versions are available on the [Releases page](https://github.com/Zircon10086/SaberLab/releases).
