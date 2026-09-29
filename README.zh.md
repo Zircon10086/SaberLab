@@ -67,13 +67,14 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 | --- | --- |
 | **本地优先** | 读取本地 BeatLeader `.bsor` Replay + 本地谱面；全部指标 Python 确定性计算，原始 Replay 永远只读 |
 | **官方算法** | BSOR 官方解码器/计分器逐项移植，重算总分与 Replay 记录**逐分一致**（acc 曲线同口径） |
-| **Note 锚定分析** | 时间序列/疲劳/摘要全部锚定真实 note 事件，中段密度低谷忠实呈现谱面结构 |
+| **Note 锚定分析** | 时间轴曲线、疲劳斜率与 AI 摘要全部锚定真实 note 事件，不使用固定时间窗口；中段密度低谷忠实呈现谱面结构 |
 | **多语言** | 简体中文 / English / 日本語 界面切换（设置页自动发现语言文件） |
 | **独立窗口** | 自带 WebView2 窗口与毛玻璃背景；重新启动会替换 6980 上的旧 SaberLab，其他程序占用端口时安全顺延 |
 | **3D 回放** | ChroViewer 移植，谱面/回放/环境全本地渲染，纯本地数据源 |
 | **AI 教练** | 结构化指标交给 LLM 解读，获取个性化指导；可关闭 AI 使用规则报告（设置 → AI） |
 | **双端联网同步** | 支持 ScoreSaber 与 BeatLeader， 星级/PP 主动缓存、429 限速退避重试 |
 | **完成度判断** | 中途退出 / NF（Fail）/ 时长 自动判定，列表/详情一目了然 |
+| **能量与失败时间** | 按游戏自身的能量规则在本地重算能量条，即使回放文件从不记录失败时间，也能看到这一局在何时（以及是否）失败 |
 
 ---
 
@@ -90,10 +91,10 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 
 **首次使用**：
 
-1. 双击 SaberLab.exe 运行，弹出命令行和自带窗口。
+1. 双击 SaberLab.exe 运行，弹出应用窗口。
 2. 进入「设置 → 游戏路径」，点「选择文件夹…」指定 Beat Saber 游戏根目录——
    自动验证并派生 Replay/谱面/SongCore 相对路径，验证成功即保存。
-3. 可选：配置 AI API Key（`.env`），不配置则获取算法的基础报告。
+3. 可选：在「设置 → AI」中填入 AI API Key（保存在 SaberLab 同级的 `.env` 文件里），不配置则获取算法的基础报告。
 
 
 ---
@@ -103,18 +104,24 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 ### 分析引擎
 
 - **Accuracy**：Pre(70)/Center(15)/Post(30) 左右手、cut 距离、timing 偏差，
-  官方排除规则（slider/burst 特殊计分）
-- **Time**：30s 窗口 / 1s 步长（支持调整），独立归一化显示 + 真实范围图例 + 悬停查看具体数值
+  官方排除规则（slider/burst 特殊计分）；切割细节网格展示每个位置的方块是怎么被切的
+- **时间轴**：逐 note 曲线，按每个 note 的真实时间绘制——准确率（与回放记录同一公式）、
+  Center 均分、刀速与 note 密度，另有 Miss/Bad 累计线、能量曲线与失败时间标记；悬停查看具体数值
 - **Motion**：手位置速度/角速度、路径经济性、单手连续换向分析
-- **Fatigue**：前段 vs 后段 delta + 每分钟斜率（运动学推断，非医学诊断）
+- **Fatigue**：锚定首末 note 的前段 vs 后段对比 + 按固定 note 数分组拟合的每分钟斜率
+  （运动学推断，非医学诊断）
+- **能量**：能量曲线、失败时间、最低能量、按原因（Miss / Bad / 炸弹 / 障碍物）分解的扣血与撞墙次数；
+  障碍物扣血仍为近似值，应用内有标注
 - **Profile**：从 Replay 的 controller offset 自动建 Saber Profile，A/B 实验记录（API-only）
 
 ### 界面与回放
 
-- **总览仪表盘**：KPI 统计行、按天分页、宽屏多列、完成度状态渐变；任务进度直接呈现在
-  「任务状态」卡片
-- **详情页**：完成度卡片 + 2×3 指标网格 + 时间序列/疲劳曲线/手部运动图表；
-  同谱历史
+- **总览仪表盘**：KPI 统计行、最近 Replay 按游玩段 / 按天 / 按数量分页、宽屏多列、完成度状态渐变；
+  任务进度直接呈现在「任务状态」卡片
+- **详情页**：三个标签页——数据一览（切割细节、时间轴与能量小结、疲劳曲线、切准度、手部运动、
+  单手连续换向、同谱历史）、AI 分析与 3D 回放；按 Esc 返回列表
+- **历史**：按歌名或谱面 key 全库搜索，每页 300 条
+- **右键菜单**：任一回放条目可打开详情、查看同谱面记录、打开文件所在位置、删除（文件移动到系统回收站）
 - **3D 回放**：详情页内嵌 iframe（ChroViewer 移植版），WebGL 全本地渲染，
   本地谱面源优先（远程源默认关闭）
 - **毛玻璃窗口**：自动获取本地壁纸并创建毛玻璃背景，保证可读性的前提下做到美观好看。
@@ -124,8 +131,9 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 - **PP 预测**：点击 ranked Replay 条目的 PP 值，在其下方弹出「准确率预览」小窗，
   拖动滑条即可读取不同准确率下的预估 PP（ScoreSaber 公式复刻，实测 ±0.1%；
   仅 ScoreSaber 数据源）
-- **ScoreSaber**：以本地谱面为根缓存全难度 leaderboard，
-  星级四色分级、玩家 pp、交叉验证；网络失败不投毒缓存
+- **ScoreSaber / BeatLeader**：以本地谱面为根缓存全难度 leaderboard、玩家 pp 与侧栏玩家卡片；
+  星级数字可按你自己的预估水平配色（80% / 94% / 96% 三档准确率基准，数据不足的基准不可选）；
+  网络失败不投毒缓存
 - **AI Coach**：LLM Provider 抽象（OpenAI 兼容协议），引用结构化指标、单变量实验、
   事实/推断分离；无 Key 时也可以获得算法生成的基础报告
 - **NPS**：兼容 v2 / v3 方块格式，一键全部计算方块密度
@@ -177,6 +185,8 @@ SaberLab 本体以 **[GPL-3.0-or-later](LICENSE)**  发布。
 - [BS-Open-Replay](https://github.com/BeatLeader/BS-Open-Replay)（BeatLeader）—— 官方 BSOR 解码器与计分逻辑移植来源
 - [ScoreSaber API](https://docs.scoresaber.com/)（ScoreSaber）—— ScoreSaber 官方 API 文档
 - [SongCore](https://github.com/Goobwabber/SongCore) —— 谱面 hash 算法参考
+- [SliceDetails](https://github.com/qqrz997/SliceDetails)（qqrz997 / ckosmic）—— 切割细节网格移植自它的分析逻辑
+- [Beon](https://github.com/noirblancrouge/Beon)（Bastien Sozeau / NBR）—— 霓虹字标字体，SIL Open Font License 1.1
 
 
 ## AI 使用声明
