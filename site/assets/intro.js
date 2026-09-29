@@ -315,11 +315,14 @@
     });
     return { p: P, n: N, i: I };
   }
-  function arrow(h) {  // the chevron on the note face, pointing down (cut direction)
-    var z = h + 0.0015, pts = [[-0.155, 0.07], [0, -0.035], [0.155, 0.07], [0.155, 0.0], [0, -0.1], [-0.155, 0.0]];
-    var P = [], N = [];
-    pts.forEach(function (q) { P.push(q[0], q[1], z); N.push(0, 0, 1); });
-    return { p: P, n: N, i: [1, 4, 3, 1, 3, 2, 5, 4, 1, 5, 1, 0] };  // right arm, left arm
+  /* the arrow on the note face, pointing down (cut direction): the game's solid wedge, same
+     outline as the app's slice-note arrow (frontend/app.js SLICE_NOTE_ARROW), in its 500-unit
+     viewBox where the note body is 450 wide */
+  var ARROW_OUTLINE = [[118, 125], [382, 125], [382, 150], [250, 215], [118, 150]];
+  function arrow(h) {
+    var z = h + 0.0015, k = 2 * h / 450, P = [], N = [];
+    ARROW_OUTLINE.forEach(function (q) { P.push((q[0] - 250) * k, (250 - q[1]) * k, z); N.push(0, 0, 1); });
+    return { p: P, n: N, i: [3, 2, 1, 3, 1, 0, 3, 0, 4] };  // fan from the tip, counter-clockwise
   }
   function lathe(prof, seg) {  // profile [[r, y], ...] turned around +y
     var P = [], N = [], I = [];

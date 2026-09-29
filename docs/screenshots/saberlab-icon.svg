@@ -2,8 +2,10 @@
   <title>SaberLab</title>
   <!-- A note, cut clean through the tip of its arrow: the red and blue halves are the two
        hands (and SABER / LAB in the wordmark), sliding apart along the cut as the saber
-       passes. Master copy: frontend/ and site/ carry identical copies, and the .ico / .png
-       renders are generated from it (docs/DEVELOPMENT.md §11). -->
+       passes. The arrow is the game's solid wedge: the slice-note outline of
+       frontend/app.js (SLICE_NOTE_ARROW), scaled with the body (450 -> 184 units).
+       Master copy: site/ carries an identical copy, and the .ico / .png renders are
+       generated from it (docs/DEVELOPMENT.md §11). -->
   <defs>
     <linearGradient id="sl-red" x1="0" y1="0" x2="0.6" y2="1">
       <stop offset="0" stop-color="#ff6b80"/>
@@ -38,13 +40,13 @@
   <g transform="translate(-9 -11)" clip-path="url(#sl-left)">
     <rect x="36" y="36" width="184" height="184" rx="35" fill="url(#sl-red)"/>
     <rect x="36" y="36" width="184" height="184" rx="35" fill="url(#sl-sheen)"/>
-    <path d="M64 88 128 135 192 88" fill="none" stroke="#fff4f6" stroke-width="28" stroke-miterlimit="8"/>
+    <polygon points="74,76.9 182,76.9 182,87.1 128,113.7 74,87.1" fill="#fff4f6" stroke="#fff4f6" stroke-width="4.9" stroke-linejoin="round"/>
   </g>
 
   <!-- right half -->
   <g transform="translate(9 11)" clip-path="url(#sl-right)">
     <rect x="36" y="36" width="184" height="184" rx="35" fill="url(#sl-blue)"/>
     <rect x="36" y="36" width="184" height="184" rx="35" fill="url(#sl-sheen)"/>
-    <path d="M64 88 128 135 192 88" fill="none" stroke="#f2f8ff" stroke-width="28" stroke-miterlimit="8"/>
+    <polygon points="74,76.9 182,76.9 182,87.1 128,113.7 74,87.1" fill="#f2f8ff" stroke="#f2f8ff" stroke-width="4.9" stroke-linejoin="round"/>
   </g>
 </svg>
