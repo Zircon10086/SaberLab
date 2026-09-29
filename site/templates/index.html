@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="{{lang}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{meta.title}}</title>
+  <meta name="description" content="{{meta.description}}">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#06080d">
+  <link rel="canonical" href="{{canonical}}">
+{{hreflang}}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="SaberLab">
+  <meta property="og:title" content="{{meta.title}}">
+  <meta property="og:description" content="{{meta.description}}">
+  <meta property="og:url" content="{{canonical}}">
+  <meta property="og:image" content="{{og_image}}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:locale" content="{{og_locale}}">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preload" href="{{root}}assets/fonts/Beon-Regular.otf" as="font" type="font/otf" crossorigin>
+  <link rel="icon" href="{{root}}assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{root}}assets/site.css">
+  <script>
+    /* The opening cut plays once per tab session, never with reduced motion or a deep
+       link. intro.js must claim it (class intro-live) within 2.5 s or the page shows. */
+    (function (d) {
+      try {
+        if (!location.hash && !sessionStorage.getItem("saberlab.intro") &&
+            !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          d.documentElement.classList.add("intro");
+          setTimeout(function () {
+            if (!d.documentElement.classList.contains("intro-live")) d.documentElement.classList.remove("intro");
+          }, 2500);
+        }
+      } catch (e) { /* storage blocked: no intro */ }
+    })(document);
+  </script>
+</head>
+<body>
+  <div class="intro-stage" id="intro-stage" aria-hidden="true">
+    <canvas class="intro-gl"></canvas>
+    <canvas class="intro-hud"></canvas>
+  </div>
+  <button type="button" class="intro-skip" id="intro-skip" hidden>{{intro.skip}}</button>
+  <a class="skip-link" href="#main">{{nav.skip}}</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="{{home}}" aria-label="SaberLab">
+        <span class="brand-saber">SABER</span><span class="brand-lab">LAB</span>
+      </a>
+      <nav class="site-nav" aria-label="{{nav.label}}">
+        <a href="#run">{{nav.run}}</a>
+        <a href="#features">{{nav.features}}</a>
+        <a href="#download">{{nav.download}}</a>
+        <a href="{{repo_url}}">GitHub</a>
+      </nav>
+      <nav class="lang-switch" aria-label="{{nav.lang_label}}">
+{{lang_switch}}
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">{{hero.eyebrow}}</p>
+          <h1>{{hero.title}}</h1>
+          <p class="hero-lead">{{hero.lead}}</p>
+          <p class="hero-body">{{hero.body}}</p>
+          <div class="cta-row">
+            <a class="button primary" href="{{releases_url}}">{{hero.cta}}</a>
+            <a class="button" href="{{repo_url}}">{{hero.cta_source}}</a>
+          </div>
+          <p class="note mono">{{hero.requirements}}</p>
+        </div>
+
+        <!-- One illustrative cut. The numbers follow the official formula from the
+             data-* geometry (checked by tests/test_site_build.py); intro.js draws the
+             same geometry in 3D before the page appears. -->
+        <aside class="readout panel" id="readout" aria-labelledby="readout-title"
+               data-pre-deg="110" data-center-cm="6.0" data-post-deg="52">
+          <div class="readout-head">
+            <h2 class="readout-title mono" id="readout-title">{{readout.title}}</h2>
+            <span class="readout-tag mono">{{readout.tag}}</span>
+            <button type="button" class="readout-replay mono" id="intro-replay" hidden>{{intro.replay}}</button>
+          </div>
+          <div class="readout-row" data-row="pre">
+            <span class="rr-name mono">Pre</span>
+            <span class="rr-sub">{{readout.pre}}</span>
+            <span class="rr-measure mono">110°</span>
+            <span class="rr-meter" style="--fill:1"><i></i></span>
+            <span class="rr-points mono"><b>70</b>/70</span>
+          </div>
+          <div class="readout-row" data-row="center">
+            <span class="rr-name mono">Center</span>
+            <span class="rr-sub">{{readout.center}}</span>
+            <span class="rr-measure mono">6.0 cm</span>
+            <span class="rr-meter" style="--fill:0.8"><i></i></span>
+            <span class="rr-points mono"><b>12</b>/15</span>
+          </div>
+          <div class="readout-row" data-row="post">
+            <span class="rr-name mono">Post</span>
+            <span class="rr-sub">{{readout.post}}</span>
+            <span class="rr-measure mono">52°</span>
+            <span class="rr-meter" style="--fill:0.8667"><i></i></span>
+            <span class="rr-points mono"><b>26</b>/30</span>
+          </div>
+          <div class="readout-total">
+            <span class="rt-label mono">{{readout.total}}</span>
+            <span class="rt-value"><b id="readout-score">108</b><span class="rt-max mono">/115</span></span>
+            <span class="rt-lost mono"><b>−7</b> {{readout.lost}}</span>
+          </div>
+          <p class="readout-formula">{{readout.formula}}</p>
+        </aside>
+      </div>
+    </section>
+
+    <section class="section" id="run" aria-labelledby="run-title">
+      <div class="container">
+        <p class="eyebrow">{{realrun.eyebrow}}</p>
+        <h2 id="run-title">{{realrun.title}}</h2>
+        <p class="section-lead">{{realrun.lead}}</p>
+        <p class="run-meta mono">
+          <b>{{run.song}}</b> · {{run.difficulty}} · {{realrun.mapped_by}} {{run.mapper}} ·
+          {{run.duration}} · {{realrun.played}} {{run.played}} · {{realrun.source}}
+        </p>
+        <dl class="run-stats">
+          <div><dt>{{realrun.notes}}</dt><dd>{{run.notes}}</dd></div>
+          <div><dt>{{realrun.accuracy}}</dt><dd>{{run.accuracy}}</dd></div>
+          <div><dt>{{realrun.misses}}</dt><dd>{{run.misses}}</dd></div>
+          <div><dt>{{realrun.bad}}</dt><dd>{{run.bad}}</dd></div>
+          <div><dt>{{realrun.avg_cut}}</dt><dd>{{run.cut}}<small>/115</small></dd></div>
+          <div><dt>Pre · Center · Post</dt><dd>{{run.pre}} · {{run.center}} · {{run.post}}</dd></div>
+        </dl>
+        <figure class="run-chart panel" id="run-chart"
+                data-left="{{realrun.tip_left}}" data-right="{{realrun.tip_right}}"
+                data-miss="{{realrun.tip_miss}}" data-bad="{{realrun.tip_bad}}">
+          <div class="run-plot" style="--acc-top:{{run.acc_top}}">
+            {{run.svg}}
+            <span class="run-lane mono">{{realrun.lane_score}}</span>
+            <span class="run-lane run-lane-acc mono">{{realrun.lane_acc}}</span>
+            {{run.labels}}
+            <span class="run-cursor" hidden></span>
+            <div class="run-tip mono" hidden></div>
+          </div>
+          <figcaption class="run-legend mono">
+            <span class="lg lg-r">{{realrun.legend_right}}</span>
+            <span class="lg lg-l">{{realrun.legend_left}}</span>
+            <span class="lg lg-avg">{{realrun.legend_avg}}</span>
+            <span class="lg lg-acc">{{realrun.legend_acc}}</span>
+            <span class="lg lg-miss">{{realrun.legend_miss}}</span>
+            <span class="lg lg-weak">{{realrun.legend_weak}} {{run.weak_range}} · {{realrun.weak_mean}} {{run.weak_mean}} · {{run.weak_count}} {{realrun.weak_notes}}</span>
+          </figcaption>
+          <script type="application/json" id="run-data">{{run.hover}}</script>
+        </figure>
+      </div>
+    </section>
+    <section class="section" aria-labelledby="grid-title">
+      <div class="container grid-layout">
+        <div>
+          <p class="eyebrow">{{grid.eyebrow}}</p>
+          <h2 id="grid-title">{{grid.title}}</h2>
+          <p class="section-lead">{{grid.body}}</p>
+          <p class="note mono"><span class="swatch-weak"></span>{{grid.weak}} {{run.weak_tile_avg}} · {{run.weak_tile_count}} {{realrun.weak_notes}}</p>
+        </div>
+        <figure class="tile-figure panel">
+          <span class="tile-axis mono">{{grid.top}}</span>
+          <div class="tile-grid" id="tile-grid">{{run.tiles}}</div>
+          <span class="tile-axis mono">{{grid.bottom}}</span>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="pipe-title">
+      <div class="container">
+        <p class="eyebrow">{{pipe.eyebrow}}</p>
+        <h2 id="pipe-title">{{pipe.title}}</h2>
+        <ol class="pipeline" id="pipeline">
+          <li><span class="pipe-i mono">01</span><h3>{{pipe.s1.title}}</h3><p>{{pipe.s1.desc}}</p></li>
+          <li><span class="pipe-i mono">02</span><h3>{{pipe.s2.title}}</h3><p>{{pipe.s2.desc}}</p></li>
+          <li><span class="pipe-i mono">03</span><h3>{{pipe.s3.title}}</h3><p>{{pipe.s3.desc}}</p></li>
+          <li><span class="pipe-i mono">04</span><h3>{{pipe.s4.title}}</h3><p>{{pipe.s4.desc}}</p></li>
+          <li class="pipe-ai"><span class="pipe-i mono">05</span><h3>{{pipe.s5.title}}</h3><p>{{pipe.s5.desc}}</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="screens-title">
+      <div class="container">
+        <p class="eyebrow">{{screens.eyebrow}}</p>
+        <h2 id="screens-title">{{screens.title}}</h2>
+        <figure class="shot shot-wide">
+          <img src="{{root}}assets/img/overview-1920.webp"
+               srcset="{{root}}assets/img/overview-960.webp 960w, {{root}}assets/img/overview-1920.webp 1920w"
+               sizes="(min-width: 1240px) 1180px, 100vw"
+               width="1920" height="1044" loading="lazy" alt="{{shot.overview_alt}}">
+          <figcaption>{{shot.overview_caption}}</figcaption>
+        </figure>
+        <div class="shot-grid">
+          <figure class="shot">
+            <img src="{{root}}assets/img/replay-960.webp"
+                 srcset="{{root}}assets/img/replay-960.webp 960w, {{root}}assets/img/replay-1920.webp 1920w"
+                 sizes="(min-width: 1240px) 580px, (min-width: 760px) 50vw, 100vw"
+                 width="1920" height="1044" loading="lazy" alt="{{shot.replay_alt}}">
+            <figcaption>{{shot.replay_caption}}</figcaption>
+          </figure>
+          <figure class="shot">
+            <img src="{{root}}assets/img/chro-960.webp"
+                 srcset="{{root}}assets/img/chro-960.webp 960w, {{root}}assets/img/chro-1920.webp 1920w"
+                 sizes="(min-width: 1240px) 580px, (min-width: 760px) 50vw, 100vw"
+                 width="1920" height="1044" loading="lazy" alt="{{shot.chro_alt}}">
+            <figcaption>{{shot.chro_caption}}</figcaption>
+          </figure>
+        </div>
+        <p class="note">{{screens.note}}</p>
+      </div>
+    </section>
+
+    <section class="section" id="features" aria-labelledby="features-title">
+      <div class="container">
+        <p class="eyebrow">{{features.eyebrow}}</p>
+        <h2 id="features-title">{{features.title}}</h2>
+        <ol class="feature-grid">
+          <li class="feature"><h3>{{f.local.title}}</h3><p>{{f.local.desc}}</p></li>
+          <li class="feature"><h3>{{f.scoring.title}}</h3><p>{{f.scoring.desc}}</p></li>
+          <li class="feature"><h3>{{f.accuracy.title}}</h3><p>{{f.accuracy.desc}}</p></li>
+          <li class="feature"><h3>{{f.timeline.title}}</h3><p>{{f.timeline.desc}}</p></li>
+          <li class="feature"><h3>{{f.motion.title}}</h3><p>{{f.motion.desc}}</p></li>
+          <li class="feature"><h3>{{f.replay3d.title}}</h3><p>{{f.replay3d.desc}}</p></li>
+          <li class="feature"><h3>{{f.ai.title}}</h3><p>{{f.ai.desc}}</p></li>
+          <li class="feature"><h3>{{f.online.title}}</h3><p>{{f.online.desc}}</p></li>
+          <li class="feature"><h3>{{f.lang.title}}</h3><p>{{f.lang.desc}}</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section" id="download" aria-labelledby="download-title">
+      <div class="container">
+        <div class="download panel">
+          <p class="download-mark" aria-hidden="true"><span class="brand-saber">SABER</span> <span class="brand-lab">LAB</span></p>
+          <h2 id="download-title">{{download.title}}</h2>
+          <p>{{download.body}}</p>
+          <div class="cta-row">
+            <a class="button primary" href="{{releases_url}}">{{download.cta}}</a>
+            <a class="button" href="{{repo_url}}">{{download.source}}</a>
+          </div>
+          <ol class="steps">
+            <li>{{download.step1}}</li>
+            <li>{{download.step2}}</li>
+            <li>{{download.step3}}</li>
+          </ol>
+          <p class="note mono">{{download.requirements}}</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>{{footer.license_html}}</p>
+      <p>{{footer.credits_html}}</p>
+      <p>{{footer.font_html}}</p>
+      <p>{{footer.ai_html}}</p>
+      <p class="note">{{footer.trademark}}</p>
+    </div>
+  </footer>
+  <script src="{{root}}assets/site.js" defer></script>
+  <script src="{{root}}assets/intro.js" defer></script>
+</body>
+</html>

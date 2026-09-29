@@ -1,0 +1,11 @@
+{
+  "base_url": "https://zircon10086.github.io/SaberLab/",
+  "repo_url": "https://github.com/Zircon10086/SaberLab",
+  "default_lang": "en-US",
+  "languages": {
+    "en-US": {"path": "", "label": "English", "og_locale": "en_US"},
+    "zh-CN": {"path": "zh/", "label": "简体中文", "og_locale": "zh_CN"}
+  },
+  "pages": ["index.html"],
+  "not_found_page": "404.html"
+}

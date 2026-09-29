@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Placeholder mark: two crossed sabers in the app's red/blue; replace with the final icon. -->
+  <rect width="64" height="64" rx="14" fill="#0e1117"/>
+  <path d="M16 48 48 16" stroke="#ff3d5a" stroke-width="7" stroke-linecap="round"/>
+  <path d="M16 16 48 48" stroke="#3d9bff" stroke-width="7" stroke-linecap="round"/>
+</svg>
