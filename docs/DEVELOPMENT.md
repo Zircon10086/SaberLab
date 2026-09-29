@@ -79,7 +79,7 @@ site/          项目网站（GitHub Pages，独立于应用，见 §10）
 .github/workflows/pages.yml  网站构建与发布流程
 config/        config.yaml
 packaging/     PyInstaller spec + 打包文档
-_tools/        调试工具（cdp_stack/chro_smoke 等）
+_tools/        调试工具（cdp_stack/chro_smoke 等）与图标生成（make_icon，见 §11）
 _tmp/          测试临时区（探针/截图脚本，可随时清空）
 ```
 
@@ -874,3 +874,44 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
   Escape 跳过、重播 + 跳过按钮、二次访问、深链、减少动态效果、无 WebGL2、无 JS，
   以及图表悬停读数。需要带 WebGL2 的 headless Edge：本机
   `_tools/start_headless_edge.ps1` 启动的实例即为硬件 WebGL2。
+
+## 11. 应用图标（2026-09）
+
+图形：一个方块从箭头尖端被竖直切开，左半红、右半蓝（与游戏里的左右手、应用标题栏
+字标 SABER 红 / LAB 蓝一致），两半沿切口错开，光剑在切缝与方块上下露出。
+
+- **唯一手工编辑的文件**是母版 `docs/screenshots/saberlab-icon.svg`，其余全部生成：
+
+  | 文件 | 用途 |
+  |---|---|
+  | `frontend/saberlab.ico` | 窗口标题栏 / 任务栏 / exe 图标；浏览器模式的标签页图标 |
+  | `site/assets/favicon.svg` | 网站图标与页头、下载区的标志（与母版逐字节相同；Pages 只发布 `site/`） |
+  | `site/assets/favicon-32.png` | 不支持 SVG 图标的浏览器 |
+  | `site/assets/apple-touch-icon.png` | 180 px，底色为网站背景（iOS 会把透明区域填黑） |
+
+  README 直接引用母版。
+- **重新生成**：改完母版后
+
+  ```bat
+  powershell -File _tools\start_headless_edge.ps1
+  .venv\Scripts\python.exe _tools\make_icon.py          :: 写出上表四个文件
+  .venv\Scripts\python.exe _tools\make_icon.py --check  :: 只比对，不一致时退出码 1
+  ```
+
+  栅格化交给浏览器：headless Edge 在每个目标尺寸上直接把 SVG 画进同尺寸画布（不是
+  大图缩小），像素经 CDP 取回；同一台机器上结果逐字节稳定，所以 `--check` 可用。
+  `.ico` 含 16/20/24/32/40/48/64/96/256 九档：96 及以下为 32 位 DIB，256 为 PNG 压缩
+  （Windows 对这一档的要求）。写入器只用标准库。Win32 `LoadImage` 与 .NET
+  `System.Drawing.Icon` 均已实测能读出全部九档。
+- **窗口图标为什么要显式传**：pywebview 默认从 `sys.executable` 取图标，源码运行时那是
+  `python.exe`（任务栏显示 Python 图标）。所以 `backend/host.py` 的
+  `webview.start(icon=APP_ICON)` 显式传 `frontend/saberlab.ico`；打包版由
+  `packaging/saberlab.spec` 的 `EXE(icon=...)` 把同一个文件嵌进 exe。文件缺失不致命，
+  pywebview 会回到可执行文件自带的图标。已在 `run.bat` 窗口实测：标题栏小图标与任务栏
+  大图标均为 SaberLab 图标。
+- **小尺寸是设计约束**：16 px 下要能认出"红蓝两半 + 白色箭头"。所以不用细线和细小
+  高光——切缝约 18 单位（256 画布）、箭头描边 28、方块占 184 / 256。改图形时先用
+  `_tools/icon_preview.py <svg>` 在 16–256 px、深浅背景上看实际像素，再生成。
+- **回归测试** `tests/test_app_icon.py`：网站副本与母版一致、`.ico` 九档结构正确、
+  像素抽查（左红右蓝、角落透明，能抓出 BGRA 通道颠倒与行序上下颠倒）、SVG 自包含
+  （无脚本、无外部引用、`url(#…)` 都有定义）、窗口与前端确实引用了图标文件。

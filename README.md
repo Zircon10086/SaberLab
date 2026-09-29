@@ -5,6 +5,8 @@
 </p>
 
 <p>
+<img src="docs/screenshots/saberlab-icon.svg" alt="" width="128">
+<br>
 <img src="docs/screenshots/saberlab-logo-transparent.png" alt="SABER LAB" width="560">
 </p>
 

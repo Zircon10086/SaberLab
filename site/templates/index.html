@@ -20,7 +20,9 @@
   <meta property="og:locale" content="{{og_locale}}">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="preload" href="{{root}}assets/fonts/Beon-Regular.otf" as="font" type="font/otf" crossorigin>
+  <link rel="icon" href="{{root}}assets/favicon-32.png" type="image/png">
   <link rel="icon" href="{{root}}assets/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="{{root}}assets/apple-touch-icon.png">
   <link rel="stylesheet" href="{{root}}assets/site.css">
   <script>
     /* The opening cut plays once per tab session, never with reduced motion or a deep
@@ -49,7 +51,8 @@
   <header class="site-header">
     <div class="container header-inner">
       <a class="brand" href="{{home}}" aria-label="SaberLab">
-        <span class="brand-saber">SABER</span><span class="brand-lab">LAB</span>
+        <img class="brand-icon" src="{{root}}assets/favicon.svg" width="30" height="30" alt="">
+        <span><span class="brand-saber">SABER</span><span class="brand-lab">LAB</span></span>
       </a>
       <nav class="site-nav" aria-label="{{nav.label}}">
         <a href="#run">{{nav.run}}</a>
@@ -241,7 +244,10 @@
     <section class="section" id="download" aria-labelledby="download-title">
       <div class="container">
         <div class="download panel">
-          <p class="download-mark" aria-hidden="true"><span class="brand-saber">SABER</span> <span class="brand-lab">LAB</span></p>
+          <p class="download-mark" aria-hidden="true">
+            <img class="brand-icon" src="{{root}}assets/favicon.svg" width="104" height="104" alt="">
+            <span class="brand-saber">SABER</span> <span class="brand-lab">LAB</span>
+          </p>
           <h2 id="download-title">{{download.title}}</h2>
           <p>{{download.body}}</p>
           <div class="cta-row">
