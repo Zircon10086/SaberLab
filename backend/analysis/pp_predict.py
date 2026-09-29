@@ -62,7 +62,7 @@ def curve_multiplier(acc: float) -> float:
         return SS_CURVE[0][1]
     if acc >= SS_CURVE[-1][0]:
         return SS_CURVE[-1][1]
-    for (a0, m0), (a1, m1) in zip(SS_CURVE, SS_CURVE[1:]):
+    for (a0, m0), (a1, m1) in zip(SS_CURVE, SS_CURVE[1:], strict=False):
         if a0 <= acc <= a1:
             if a1 == a0:
                 return m0

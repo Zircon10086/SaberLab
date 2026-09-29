@@ -8,7 +8,7 @@ Responsibilities:
 4. Dual modes:
    - Default (webview): pywebview 5/6 + WebView2 opens its own window without launching the system browser
    - --browser: matches legacy run.bat behavior (launches the system browser), for development/fallback
-5. Acrylic glass (see the acrylic-scheme exploration doc at others/毛玻璃方案探索.md):
+5. Acrylic glass (design notes in the local-only others/ folder):
    - Production default = wallpaper push scheme C (backend geometry/wallpaper + frontend CSS blur); window move/resize
      notifies the frontend via evaluate_js to refresh background-position
    - Measured conclusion (2026-08-21): pywebview 6.2.1 transparent windows have no true window transparency
@@ -75,7 +75,7 @@ def _setup_stdio() -> None:
 # Pass the app object directly (instead of the "backend.main:app" import string):
 # PyInstaller static analysis collects modules via imports; import strings are invisible,
 # and in a frozen environment uvicorn would report "Could not import module backend.main"
-from backend.main import app
+from backend.main import app  # noqa: E402 - must follow the pre-import setup above
 
 WINDOW_TITLE = "SaberLab — Beat Saber 本地分析实验室"
 PORT_RANGE = 20  # 6980..6999
@@ -210,7 +210,7 @@ def replace_existing_instances(cfg) -> list[tuple[int, int]]:
     owners_before = {port: _listener_pid(port) for port in ports}
     occupied = [port for port in ports if owners_before[port]]
     with ThreadPoolExecutor(max_workers=8) as pool:
-        statuses = dict(zip(occupied, pool.map(_probe_saberlab, occupied)))
+        statuses = dict(zip(occupied, pool.map(_probe_saberlab, occupied), strict=True))
     replaced: list[tuple[int, int]] = []
     for port in occupied:
         status = statuses[port]
@@ -332,7 +332,7 @@ def try_legacy_acrylic(hwnd: int, tint: int = 0x99_30_30_30) -> bool:
 # The currently active window shell is registered through the backend.dialog bridge
 # (host.py runs as __main__; if main.py imports backend.host directly it gets a duplicate module
 # whose global state is not synchronized — see dialog.py)
-from backend import dialog
+from backend import dialog  # noqa: E402 - kept below the constants it documents
 
 
 class WebviewShell:
@@ -403,7 +403,7 @@ class WebviewShell:
             self._window.evaluate_js(
                 "window.__saberlabBackdropMoving && "
                 f"window.__saberlabBackdropMoving({str(moving).lower()})")
-        except Exception:
+        except Exception:  # noqa: BLE001 - fires on every window move; a log would flood
             pass
 
     def _native_handle(self) -> int | None:
@@ -515,12 +515,14 @@ class WebviewShell:
                 try:
                     ready = self._window.evaluate_js(
                         'typeof window.__saberlabBackdrop === "function"')
-                except Exception:
+                except Exception:  # noqa: BLE001 - JS bridge, polled in a loop
                     ready = False
                 if ready:
                     break
                 time.sleep(0.5)
             if not ready:
+                print("[host] frontend backdrop hook never became ready; "
+                      "skipping the wallpaper push", flush=True)
                 return
             self._notify_backdrop()
             while self._window:
@@ -591,7 +593,7 @@ class WebviewShell:
               f"window.__saberlabBackdrop({_json.dumps(payload)})")
         try:
             self._window.evaluate_js(js)
-        except Exception:
+        except Exception:  # noqa: BLE001 - backdrop push, repeats on every resize/move
             pass
 
     def start(self):
@@ -654,8 +656,10 @@ def main():
         def _preload_webview():
             try:
                 from webview.platforms import winforms  # noqa: F401  # loads clr/.NET runtime
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001 - the fallback below is the real handler
+                # Keep the cause: without it a later "webview window failed to
+                # start" is undiagnosable (missing WebView2 vs .NET runtime load).
+                print(f"[host] webview preload failed: {e}", flush=True)
             finally:
                 webview_preload.set()
 
@@ -695,12 +699,12 @@ def main():
         try:
             if not args.browser and shell is not None and shell._window is not None:
                 shell._window.destroy()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - shutdown path: the window may already be gone
             pass
         # stop uvicorn → main() reaches finally (port released) → spawn the new process in finally
         try:
             server.should_exit = True
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 - shutdown path: nothing left to report to
             pass
 
     dialog.register_restart(_restart_app)
@@ -721,7 +725,6 @@ def main():
         # Wait for the parallel webview preload (bounded; it runs while the
         # server warms up, so this is normally already done).
         webview_preload.wait(timeout=5)
-        t_win = time.perf_counter()
         shell.start()
     except Exception as e:  # pywebview unavailable (e.g. missing WebView2) → browser fallback
         print(f"[host] webview window failed to start ({e}), falling back to browser mode")

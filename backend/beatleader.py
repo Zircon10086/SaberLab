@@ -233,6 +233,13 @@ def sync_map_leaderboards(cfg, repo, map_hash: str, force: bool = False) -> dict
     """
     from datetime import datetime, timezone as _tz
 
+    # NOTE (do not "fix" this key): `not_on_scoresaber` is a legacy name kept for
+    # backward compatibility — it predates the portable per-platform leaderboard
+    # cache and now means "this map has no leaderboard on the CURRENT source"
+    # (BeatLeader here). It is load-bearing: the cross-platform stats aggregation
+    # in scoresaber.py counts it (sync_batch results -> total_stats), and the
+    # scoresaber module emits the same key. Renaming it touches both providers
+    # plus the i18n err-key convention, so it needs its own task. Not a bug.
     try:
         data = _get(cfg, f"{BASE}/leaderboards/hash/{map_hash.lower()}")
     except BeatLeaderError as e:
@@ -334,7 +341,9 @@ def sync_maps_batch(cfg, repo, map_hashes: list[str],
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(sync_one, pending))
         retry = []
-        for mh, res in zip(pending, results):
+        # results is a map() over pending, so the two are equal-length by
+        # construction; strict=True makes a future drift a loud failure.
+        for _mh, res in zip(pending, results, strict=True):
             if res is None:
                 continue
             if fail_count[res] < 3:

@@ -1,7 +1,10 @@
 [project]
 name = "saberlab"
-version = "2.2.0"
+version = "2.3.0"
 description = "Beat Saber 本地 Replay 分析实验室（BSOR 解析 + 确定性指标 + AI 解释）"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -12,11 +15,26 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.16"]
 
 [project.urls]
 BSOR-Format = "https://github.com/BeatLeader/BS-Open-Replay"
 SongCore = "https://github.com/Goobwabber/SongCore"
 
+[tool.ruff]
+# 只开"错误 + 缺陷"类规则，不开格式化规则（E501 行长等会制造巨量无关 diff）。
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "B"]
+# E501 行长：项目正文含中文，按格式化规则治理会产生巨量无关改动（AGENTS §6）。
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试在 import backend.* 之前必须先改 sys.path，E402 是该写法的必然产物。
+"tests/*" = ["E402"]
+
 [tool.saberlab]
 # 运行: run.bat 或 .venv\Scripts\python.exe backend\main.py
+# 静态检查: .venv\Scripts\python.exe -m ruff check backend tests

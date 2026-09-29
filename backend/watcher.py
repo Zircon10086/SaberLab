@@ -56,7 +56,7 @@ def _analyze_worker(path: str, force: bool) -> dict:
 # LocalLeaderboard stores the same session as BeatLeader but with a `_<tick>`
 # suffix: `<player>-<song>-<diff>-<mode>-<hash>-<ts>_<tick>.bsor` (the tick is
 # a high-resolution timestamp). Normalizing = dropping the tick (2026-09,
-# second replay source, HANDOFF §4.25 待办 2).
+# second replay source, HANDOFF §4.25, to-do item 2).
 _LL_NAME_RE = re.compile(r"^(\d+)-(.+)-(\d{10})(_\d+)?\.bsor$")
 
 
@@ -133,8 +133,16 @@ class ReplayPipeline:
         if not replay_dir.exists():
             return out
         known = self.repo.known_file_states()
-        files = sorted(replay_dir.glob("*.bsor"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
+
+        def _mtime(p: pathlib.Path) -> float:
+            # A file can vanish between glob() and stat() (the game rotates its
+            # replay folder). Sort such entries last instead of failing the scan.
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        files = sorted(replay_dir.glob("*.bsor"), key=_mtime, reverse=True)
         out["total_files"] = len(files)
         for f in files:
             try:
@@ -495,7 +503,7 @@ class ReplayPipeline:
         # Dedup (the same file may be both changed and pending) and drop rows whose
         # source file is gone: a deleted/renamed .bsor leaves a DB row behind
         # (ingest is add-only by design), and re-trying it every batch only
-        # produced "文件不存在" noise (2026-09).
+        # produced a flood of "file not found" results (2026-09).
         seen: set[str] = set()
         uniq = []
         for c in candidates:
@@ -538,7 +546,8 @@ class ReplayPipeline:
         try:
             self.resolver.scan()          # once, in the parent (workers never rescan)
         except Exception as e:                             # noqa: BLE001
-            print(f"[batch] 前置地图扫描失败（继续，未匹配的谱面将记为 not_found）: {e}", flush=True)
+            print(f"[batch] pre-scan of the map library failed, continuing "
+                  f"(unmatched maps will be recorded as not_found): {e}", flush=True)
         results: list[dict] = []
         workers = min(BATCH_WORKERS, total)
         try:
@@ -555,7 +564,7 @@ class ReplayPipeline:
         except Exception as e:                             # noqa: BLE001
             # Pool creation itself can fail (e.g. a frozen/restricted environment):
             # fall back to the serial path rather than reporting a failed batch.
-            print(f"[batch] 并行分析不可用，回退串行: {e}", flush=True)
+            print(f"[batch] parallel analysis unavailable, running serially: {e}", flush=True)
             results = []
             for i, p in enumerate(paths):
                 if progress_cb:
@@ -591,7 +600,7 @@ class ReplayPipeline:
         The two mods store one copy per session (LL keeps no exit replays),
         so the LL dir doubles as a safety copy:
         - row exists + its own file is gone → repair the row to point at the
-          LL twin (HANDOFF §4.25 恢复场景; analysis data untouched — same
+          LL twin (HANDOFF §4.25, recovery scenario; analysis data untouched — same
           content, the mod_VERSION shows the twins are byte-identical today,
           and matching is by session key anyway);
         - session not in the DB + BL twin exists → skip (the normal BL scan
@@ -611,8 +620,6 @@ class ReplayPipeline:
         if not ll_dir.exists():
             return empty
         bl_dir = pathlib.Path(self.cfg.replay_dir)
-        bl_names = ({p.name for p in bl_dir.glob("*.bsor")}
-                    if bl_dir.exists() else set())
         try:
             files = sorted(ll_dir.glob("*.bsor"),
                            key=lambda p: p.stat().st_mtime)

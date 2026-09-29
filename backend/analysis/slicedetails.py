@@ -33,7 +33,7 @@ import math
 from ..bsor.models import (
     NoteEvent, GOOD,
     SCORING_DEFAULT, SCORING_NORMAL, SCORING_SLIDER_HEAD, SCORING_SLIDER_TAIL,
-    SCORING_BURST_SLIDER_HEAD, SCORING_BURST_SLIDER_ELEMENT,
+    SCORING_BURST_SLIDER_HEAD,
 )
 from .scoring import cut_scores
 

@@ -1,4 +1,5 @@
-"""Desktop integration service (backend of acrylic scheme C; see the acrylic-scheme exploration doc at others/毛玻璃方案探索.md).
+"""Desktop integration service (backend of acrylic scheme C; the design notes for
+that exploration live in the local-only `others/` folder).
 
 Responsibilities:
 1. Get the desktop wallpaper file path (three-level fallback; no Pillow/extra dependencies needed)

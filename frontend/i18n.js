@@ -1,13 +1,17 @@
-/* SaberLab i18n —— JSON 对照表方案（2026-08 用户需求）。
+/* SaberLab i18n — the JSON lookup-table approach (2026-08 user requirement).
  *
- * 项目为零依赖原生 JS（无构建工具），不引入 i18next：
- * - 语言表：frontend/i18n/{lang}.json（/static/i18n/{lang}.json 挂载）
- * - 语言偏好：localStorage（纯前端偏好，后端 config 不拥有此项）
- * - t(key, params)：查当前语言表，缺失回退中文表（zh-CN 为基准表），
- *   再缺失返回 key 本身（便于发现漏翻）
- * - tErr(msg)：后端错误消息映射（en-US 表的 err 段：中文原文 → 英文，
- *   支持 {param} 模板匹配；zh-CN 直接返回原文）
- * - LLM / token / AI / NPS / PP 等大众缩写词在两种语言下均保留原样
+ * The project is dependency-free vanilla JS (no build tool) and does not add i18next:
+ * - Language tables: frontend/i18n/{lang}.json (mounted at /static/i18n/{lang}.json)
+ * - Language preference: localStorage (a purely front-end preference; the backend
+ *   config does not own it)
+ * - t(key, params): looks up the current language table, falls back to the Chinese
+ *   table when a key is missing (zh-CN is the baseline table), and returns the key
+ *   itself if it is missing there too (so untranslated entries are easy to spot)
+ * - tErr(msg): backend error-message mapping (the err section of the en-US table:
+ *   Chinese original → English, with {param} template matching; zh-CN returns the
+ *   original text directly)
+ * - Widely known abbreviations such as LLM / token / AI / NPS / PP stay as they are
+ *   in both languages
  */
 "use strict";
 
@@ -107,7 +111,8 @@ const I18N = {
     return msg;
   },
 
-  /** 后端错误消息翻译：精确匹配 → {param} 模板匹配 → 原文兜底。 */
+  /** Backend error-message translation: exact match → {param} template match →
+      original fallback. */
   tErr(msg) {
     return this._translateMessage(msg, "err");
   },

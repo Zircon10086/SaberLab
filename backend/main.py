@@ -16,6 +16,7 @@ import threading
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Optional
@@ -23,21 +24,19 @@ from typing import Optional
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend.config import Config, load_config, PROJECT_ROOT
+from backend.config import Config, LOOPBACK_HOSTS, load_config, PROJECT_ROOT
 from backend import APP_INSTANCE_ID
-from backend.config.schema import STAR_PALETTES, get_star_palette
+from backend.config.schema import STAR_PALETTES
 from backend.config.service import ConfigService, check_paths
-from backend.analysis.player_palette import build_tiers
-from backend.analysis import skill_model
 import backend.beatleader as beatleader
 from backend.db.repository import Repository
 from backend.maps.resolver import MapResolver
 from backend.services.enrichment import EnrichmentService
-from backend.services import player_assets
+from backend.services import energy_curve, player_assets, skill_tracks, timeline
 from backend.watcher import ReplayPipeline
 from backend.analysis.compare import compare_metrics
 from backend.ai.provider import LLMClient
@@ -125,6 +124,35 @@ def _db_empty() -> bool:
     return repo.count_replays() == 0
 
 
+def _require_replay_source_path(path: str) -> str:
+    """Confine a caller-supplied replay path to the configured replay sources.
+
+    Used by /api/analyze/by-path. Analyzed files become replay rows whose
+    file_path later feeds /reveal and /recycle (which sends the file to the OS
+    recycle bin), so an unrestricted path is an arbitrary-file handle. Both
+    configured sources are allowed: the BeatLeader replay dir and the optional
+    LocalLeaderboard dir, because a repaired LocalLeaderboard twin legitimately
+    points at a file inside the latter. Returns the resolved path.
+    """
+    resolved = None
+    try:
+        resolved = pathlib.Path(path or "").resolve()
+    except (OSError, ValueError):
+        resolved = None
+    if resolved is not None:
+        for root in (cfg.replay_dir, cfg.local_leaderboard_dir):
+            if not root:
+                continue
+            try:
+                base = pathlib.Path(root).resolve()
+            except (OSError, ValueError):
+                continue
+            if os.path.normcase(str(resolved)).startswith(
+                    os.path.normcase(str(base)) + os.sep):
+                return str(resolved)
+    raise HTTPException(403, "该文件不在回放目录中")
+
+
 def _require_db_populated() -> None:
     """Empty-DB guard: all background tasks are rejected on an empty database,
     except the Overview "⚡ One-click Refresh".
@@ -137,7 +165,7 @@ def _require_db_populated() -> None:
         raise HTTPException(
             400, "数据库为空：请先点击总览「⚡ 一键刷新」完成首次扫描")
 
-app = FastAPI(title="SaberLab", version="2.2.0",
+app = FastAPI(title="SaberLab", version="2.3.0",
               description="Beat Saber 本地 Replay 分析实验室")
 
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
@@ -159,6 +187,80 @@ async def _access_log(request, call_next):
     return response
 
 
+# ---------- local request guard (2026-09 security hardening) ----------
+# Threat model: a page the user happens to visit can POST to 127.0.0.1:6980 and
+# drive the destructive endpoints (recycle a replay, clear the analysis cache,
+# restart the app). DNS rebinding is the second half of the same model: once the
+# attacker's domain resolves to 127.0.0.1 the browser treats this server as
+# same-origin, so READING endpoints become an exfiltration surface too.
+#
+# Three independent checks, applied to EVERY request (reads included):
+#   1. Host must be a loopback name. This is the rebinding gate, and it has to
+#      cover reads: a rebound page is same-origin and can simply read responses.
+#   2. `Sec-Fetch-Site: cross-site` is refused. Chromium (hence WebView2) always
+#      sends it, and it catches subresource loads such as `<img src=...>` that
+#      carry no Origin header at all.
+#   3. An Origin header that IS present must be a loopback http origin; `null`
+#      (sandboxed iframe, file:// page) is refused.
+# Requests with neither Origin nor Sec-Fetch-Site are local tools talking
+# straight to 127.0.0.1 (curl, the launcher's own /api/status identity probe);
+# they pass rule 1 and are allowed.
+_LOOPBACK_HOSTS = frozenset(LOOPBACK_HOSTS)   # single source: backend.config
+_GUARD_DETAIL = "请求已被拒绝，操作没有执行"
+
+
+def _authority_host(value: str) -> str:
+    """Host part of a Host authority, lowercased, without the port.
+
+    Handles bracketed IPv6 literals (`[::1]:6980`). An empty result means the
+    header was missing or unusable, which the guard treats as untrusted.
+    """
+    v = (value or "").strip().lower()
+    if v.startswith("["):
+        end = v.find("]")
+        return v[1:end] if end > 0 else ""
+    host, _, _port = v.partition(":")
+    return host
+
+
+def _origin_host(value: str) -> str:
+    """Host part of an Origin header, or "" when it is absent/unusable.
+
+    A serialized `null` origin (opaque origin) and any non-http scheme yield "".
+    """
+    v = (value or "").strip()
+    if not v or v.lower() == "null":
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(v)
+    except ValueError:
+        return ""
+    if parts.scheme not in ("http", "https"):
+        return ""
+    return (parts.hostname or "").lower()
+
+
+def _guard_reject(request) -> JSONResponse:
+    """Refuse a request that failed the local-request checks (403 JSON)."""
+    print(f"[guard] refused {request.method} {request.url.path} "
+          f"host={request.headers.get('host', '')!r} "
+          f"origin={request.headers.get('origin', '')!r} "
+          f"site={request.headers.get('sec-fetch-site', '')!r}", flush=True)
+    return JSONResponse({"detail": _GUARD_DETAIL}, status_code=403)
+
+
+@app.middleware("http")
+async def _local_request_guard(request, call_next):
+    if _authority_host(request.headers.get("host", "")) not in _LOOPBACK_HOSTS:
+        return _guard_reject(request)
+    if (request.headers.get("sec-fetch-site", "") or "").strip().lower() == "cross-site":
+        return _guard_reject(request)
+    origin = request.headers.get("origin")
+    if origin is not None and _origin_host(origin) not in _LOOPBACK_HOSTS:
+        return _guard_reject(request)
+    return await call_next(request)
+
+
 class NoCacheStaticFiles(StaticFiles):
     """Disable caching for static assets: frontend changes take effect at once.
 
@@ -176,9 +278,7 @@ _task_lock = threading.Lock()
 # kind -> task dict; each kind has its own slot: same-kind conflicts 409, different kinds run in parallel
 _tasks: dict[str, dict] = {}
 
-# timeline energy curve cache (2026-09): replay_id -> (ts, vals) or [] when
-# unavailable. Bounded wholesale clear; see _energy_curve_for.
-_energy_curve_cache: dict[str, tuple] = {}
+# The timeline energy curve cache lives with its owner: backend/services/energy_curve.py.
 
 
 def _set_task(kind: str, **kw):
@@ -406,8 +506,8 @@ def api_status():
         tasks = [dict(t) for t in _tasks.values()]
     maps_dir = {"exists": _path_ok(cfg.custom_levels_dir)}
     platform = _active_platform()
-    palette_cache = _palette_cache_for(platform)
-    palette_entries = _palette_entries(palette_cache)
+    palette_cache = skill_tracks.palette_cache_for(repo, platform, _scoresaber_id())
+    palette_entries = skill_tracks.palette_entries(palette_cache)
     return {
         "ok": True,
         "app_instance": APP_INSTANCE_ID,
@@ -440,9 +540,9 @@ def api_status():
         # tracks whose rating exists on the ACTIVE platform (cached; absent offline ->
         # the active id falls back to "community").
         "ui": {
-            "star_palette": _active_palette_id(palette_cache),
+            "star_palette": skill_tracks.active_palette_id(cfg.star_palette, palette_cache),
             "star_palettes": STAR_PALETTES + palette_entries,
-            "star_palette_options": _palette_availability(palette_cache),
+            "star_palette_options": skill_tracks.palette_availability(palette_cache),
         },
     }
 
@@ -497,7 +597,7 @@ def api_analyze_all(body: AnalyzeBody | None = None, limit: int = Query(0),
 # intentional no-delete.
 @app.post("/api/analyze/by-path")
 def api_analyze_by_path(path: str = Query(...), lang: str = Query("zh-CN")):
-    return pipeline.process_file(path)
+    return pipeline.process_file(_require_replay_source_path(path))
 
 
 @app.post("/api/analyze/{replay_id}")
@@ -740,110 +840,26 @@ def api_replay_recycle(replay_id: str):
         try:
             rc = _run_hidden(["powershell.exe", "-NoProfile", "-NonInteractive",
                               "-Command", script], wait=True)
-        except subprocess.TimeoutExpired:
-            raise HTTPException(504, "回收站操作超时")
+        except subprocess.TimeoutExpired as e:
+            raise HTTPException(504, "回收站操作超时") from e
         if rc != 0:
             raise HTTPException(500, f"移动到回收站失败（退出码 {rc}）")
         file_recycled = True
 
     counts = repo.delete_replay(replay_id)
-    _energy_curve_cache.pop(replay_id, None)      # derived cache must not outlive the record
+    energy_curve.clear(replay_id)                 # derived cache must not outlive the record
     return {"status": "deleted", "file_name": name, "path": str(target) if target else "",
             "file_recycled": file_recycled, "removed": counts}
 
 
 @app.get("/api/replays/{replay_id}/timeline")
 def api_replay_timeline(replay_id: str):
-    """Chart data (note-anchored; the fixed time-window mode is retired, 2026):
-    - notes: per-note cumulative acc/center curves (good cut, x=event time)
-             + saber speed (±7 good-cut local mean, smoothed jumps)
-             + local density (±5 note neighborhood + ±2 note rounding, natural
-               valleys in map gaps - faithful to the data)
-             + energy_t/energy: the simulated energy bar (white line, 2026-09)
-    - events: miss/bad event timestamps (event step lines)
-    - note_range: first/last note times (timeline trim bounds)
-    - windows: reserved field (legacy history/empty arrays, backward compat;
-               engine no longer writes it)
+    """Chart data for the detail page timeline.
+
+    The payload shape and the shaping itself live in
+    `backend/services/timeline.py`; this route only hands it the repository.
     """
-    from backend.analysis.notes import moving_average, density_series
-    from backend.bsor.models import GOOD, BOMB
-    events = repo.get_note_events(replay_id)
-    notes = repo.get_accuracy_curve(replay_id)
-    # saber speed: ±7 local mean of good cuts (raw per-note values jump a lot;
-    # 2026-08 user request for smoother viewing; the window is still "the mean
-    # of the same batch of real good cuts" - traceable; miss/bad have no points,
-    # never pad with 0 or interpolate to fake data)
-    good_sp = [(e["event_time"], e["saber_speed"]) for e in events
-               if e["event_type"] == GOOD and e["saber_speed"] is not None]
-    notes["speed_t"] = [t for t, _ in good_sp]
-    notes["speed"] = moving_average([s for _, s in good_sp], 15)
-    # density: local density of all non-bomb notes (±5 neighborhood; long gaps
-    # naturally dip - faithful to map design); then a ±2 note centered MA
-    # smooths sharp jumps at pause edges (valleys kept, easier to read; 2026-08)
-    ts_all = [e["event_time"] for e in events if e["event_type"] != BOMB]
-    notes["density_t"] = ts_all
-    notes["density"] = moving_average(density_series(ts_all, 5), 5)
-    # energy bar (2026-09): rebuilt from the replay on demand rather than
-    # persisted — the energy module is a pure function of the note/wall events,
-    # so a lightweight parse (skip frames, the large section) + simulate costs
-    # ~1 ms and keeps the DB free of a redundant derived series. Failures are
-    # non-fatal: a missing/broken file simply yields no energy series.
-    en = _energy_curve_for(replay_id)
-    if en:
-        notes["energy_t"], notes["energy"] = en
-    return {"windows": repo.get_windows(replay_id),
-            "events": repo.get_miss_bad_events(replay_id),
-            "notes": notes,
-            "note_range": repo.get_note_time_range(replay_id)}
-
-
-def _energy_curve_for(replay_id: str):
-    """[(t, energy)] step-line samples for the timeline, or None when unavailable.
-
-    Cached per replay id (bounded, cleared wholesale when it grows past a small
-    cap) — the detail page redraws the chart on every toggle, and re-parsing the
-    file each time would be waste.
-    """
-    global _energy_curve_cache
-    cached = _energy_curve_cache.get(replay_id)
-    if cached is not None:
-        return cached or None
-    row = repo.get_replay(replay_id)
-    path = (row or {}).get("file_path")
-    if not path or not pathlib.Path(path).exists():
-        _energy_curve_cache[replay_id] = []
-        return None
-    try:
-        from backend.analysis.energy import EnergyConfig, simulate_energy
-        from backend.bsor import parser as bsor_parser
-        rep = bsor_parser.parse_file_light(path)
-        res = simulate_energy(rep.notes, rep.walls,
-                              EnergyConfig.from_modifiers(rep.info.modifiers))
-    except Exception as e:                             # noqa: BLE001 — never break the chart
-        print(f"[timeline] energy curve unavailable for {replay_id[:12]}: {e}", flush=True)
-        _energy_curve_cache[replay_id] = []
-        return None
-    # Step line: emit (t, value_before) then (t, value_after) per change so the
-    # bar reads as flat-then-jump, exactly like the miss/bad event lines.
-    ts: list[float] = [0.0]
-    vals: list[float] = [res.start_energy]
-    for ev in res.events:
-        if ev.reason == "fail":
-            ts.append(ev.t)
-            vals.append(0.0)
-            continue
-        ts.append(ev.t)
-        vals.append(round(ev.energy - ev.delta, 6))
-        ts.append(ev.t)
-        vals.append(round(ev.energy, 6))
-    if len(ts) > 20000:                                # safety cap (chart readability)
-        step = len(ts) // 20000 + 1
-        ts, vals = ts[::step], vals[::step]
-    result = (ts, vals)
-    if len(_energy_curve_cache) > 256:                 # bounded: detail view is user-driven
-        _energy_curve_cache.clear()
-    _energy_curve_cache[replay_id] = result
-    return result
+    return timeline.build_timeline(repo, replay_id)
 
 
 @app.get("/api/replays/{replay_id}/series")
@@ -877,9 +893,9 @@ def api_replay_slice_details(replay_id: str):
     try:
         replay = parse_file(path)
     except BsorError as e:
-        raise HTTPException(422, f"replay 解析失败: {e}")
+        raise HTTPException(422, f"replay 解析失败: {e}") from e
     except Exception as e:  # unexpected parse failure must not fake success
-        raise HTTPException(500, f"slice-details 计算失败: {e}")
+        raise HTTPException(500, f"slice-details 计算失败: {e}") from e
     return analyze_slice_details(replay.notes, height=replay.info.height,
                                  left_handed=replay.info.left_handed)
 
@@ -1055,7 +1071,11 @@ def api_map_cover(map_hash: str):
         try:
             resolver.ensure_map_path(map_hash)
             p = resolver.cover_path(map_hash)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - covers are a hot read-only path
+            # A cover is decoration: never fail the request over it. Without this
+            # line the fallback is invisible and "every cover is the default
+            # image" has no diagnostic trace at all (this runs on the request path).
+            print(f"[cover] lazy path repair failed for {map_hash[:12]}: {e}", flush=True)
             p = None
     if p is None:
         # map missing / original file deleted: return the default cover, no 404
@@ -1129,222 +1149,8 @@ def api_report(replay_id: str):
 
 
 # ---------- ACC-weighted skill ratings -> star palettes (2026-09) ----------
-# Each track (80% / 94% / 96% accuracy) becomes its own selectable palette, but only
-# when the model could actually produce a rating for it. A track with insufficient
-# direct evidence stays out of the selectable set entirely (the settings UI shows
-# "数据不足" and disables it) -- the model never guesses a number to fill the gap.
-PALETTE_TRACK_KEYS = ("personal96", "personal94", "personal80")     # best track first
-# The public ids are `personal<target>` (config enum, /api payloads, i18n). The cache
-# columns kept short names (r80/r94/r96) -- they are a storage detail and the live
-# database already has them that way -- so this map is the single translation point.
-TRACK_CACHE_COLUMNS = {"personal96": "r96", "personal94": "r94", "personal80": "r80"}
-
-
-def _track_column(key: str) -> str:
-    return TRACK_CACHE_COLUMNS[key]
-
-
-def _track_label(key: str) -> str:
-    return {"personal80": "80% 基准", "personal94": "94% 基准", "personal96": "96% 基准"}[key]
-
-
-def _palette_cache_for(platform: str | None = None) -> dict | None:
-    platform = platform or _active_platform()
-    pid = _scoresaber_id()
-    if not pid:
-        return None
-    cached = repo.get_player_palette(platform, pid)
-    if not cached:
-        return None
-    if not any(cached.get(_track_column(k)) is not None for k in PALETTE_TRACK_KEYS):
-        return None
-    return cached
-
-
-def _palette_meta(key: str, cached: dict) -> dict:
-    column = _track_column(key)
-    return {
-        "stars": cached.get(column),
-        "direct_count": cached.get(f"{column}_direct"),
-        "lower_bound": cached.get(f"{column}_lower_bound"),
-        "confidence": cached.get(f"{column}_confidence"),
-        "computed_at": cached.get("computed_at"),
-    }
-
-
-def _palette_entries(cached: dict | None) -> list[dict]:
-    """Palette definitions for every track that produced a rating."""
-    entries: list[dict] = []
-    for key in PALETTE_TRACK_KEYS:
-        stars = cached.get(_track_column(key)) if cached else None
-        if stars is None:
-            continue
-        entries.append({
-            "id": key,
-            "label": _track_label(key),
-            "tiers": build_tiers(stars),
-            "meta": _palette_meta(key, cached),
-        })
-    return entries
-
-
-def _available_palette_keys(cached: dict | None) -> list[str]:
-    return [e["id"] for e in _palette_entries(cached)]
-
-
-def _palette_availability(cached: dict | None) -> dict:
-    """Per-option availability for the settings UI.
-
-    A track without a rating is reported as unavailable with a short factual reason,
-    so the dropdown can grey it out instead of offering a choice that cannot work.
-    """
-    available = _available_palette_keys(cached)
-    options: dict = {"community": {"available": True}}
-    for key in PALETTE_TRACK_KEYS:
-        if key in available:
-            options[key] = {"available": True, "meta": _palette_meta(key, cached or {})}
-        else:
-            options[key] = {"available": False, "reason": skill_model.INSUFFICIENT_LABEL}
-    return options
-
-
-def _active_palette_id(cached: dict | None) -> str:
-    """Selected palette id with safe fallback.
-
-    Historic configs stored ``personal`` (the replaced classifier's single palette);
-    it now means "whichever track is available", best first, so an existing choice
-    keeps working instead of silently reverting to the community palette.
-    """
-    want = cfg.star_palette
-    available = _available_palette_keys(cached)
-    if want == "personal":
-        want = available[0] if available else "community"
-    if want in PALETTE_TRACK_KEYS:
-        return want if want in available else (available[0] if available else "community")
-    return want if get_star_palette(want) else "community"
-
-
-def _palette_result(platform: str, pid: str) -> dict | None:
-    """/api payload of the cached palette for a player/platform (public ids)."""
-    cached = repo.get_player_palette(platform, pid)
-    if not cached:
-        return None
-    if not any(cached.get(_track_column(k)) is not None for k in PALETTE_TRACK_KEYS):
-        return None
-    return _palette_public_payload(cached)
-
-
-def _score_record_from_payload(s: dict) -> skill_model.ScoreRecord | None:
-    """One cloud score row -> model record.
-
-    ACC follows the data source: ScoreSaber exposes baseScore / leaderboard.maxScore,
-    BeatLeader reports accuracy as a percentage. Rows without a positive pp / max_pp
-    are unranked or unranked-with-stars; the model rejects them anyway, so they are
-    skipped here to keep the evidence list honest.
-    """
-    max_score = s.get("max_score")
-    base_score = s.get("base_score")
-    acc = s.get("accuracy")
-    if isinstance(acc, (int, float)) and acc > 1.0:
-        acc = acc / 100.0
-    if acc is None and base_score and max_score:
-        acc = base_score / max_score
-    stars = s.get("stars")
-    pp = s.get("pp")
-    if not stars or not pp or not max_score or acc is None:
-        return None
-    timestamp = s.get("timepost")
-    if timestamp is None:
-        raw = s.get("time_set") or ""
-        try:
-            timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            timestamp = 0.0
-    return skill_model.ScoreRecord(
-        stars=float(stars),
-        acc=float(acc),
-        timestamp=float(timestamp or 0.0),
-        leaderboard_key=f"{s.get('leaderboard_id')}|{s.get('song_hash')}",
-        pp=float(pp),
-        max_pp=float(max_score),
-        modifiers=s.get("modifiers") or "",
-    )
-
-
-def _palette_public_payload(cached: dict) -> dict:
-    """Cache row -> API payload, translating cache columns to public ids.
-
-    Cache stores ratings in short columns (r80/r94/r96); every API consumer sees them
-    as `personal80/personal94/personal96` (plus `_direct` / `_lower_bound` /
-    `_confidence` suffixes). ``method`` carries the selected track in public form.
-    """
-    payload: dict = {
-        "status": "known" if cached.get("yellow_stars") is not None else "unknown",
-        "yellow_stars": cached.get("yellow_stars"),
-        "computed_at": cached.get("computed_at"),
-        "skill_params": cached.get("skill_params"),
-    }
-    for key in PALETTE_TRACK_KEYS:
-        column = _track_column(key)
-        payload[key] = cached.get(column)
-        payload[f"{key}_direct"] = cached.get(f"{column}_direct")
-        payload[f"{key}_lower_bound"] = cached.get(f"{column}_lower_bound")
-        payload[f"{key}_confidence"] = cached.get(f"{column}_confidence")
-    method = cached.get("method")
-    if method not in PALETTE_TRACK_KEYS:
-        # a cache row written before the ids were renamed still names the track "r80";
-        # map it so the UI can still tell which baseline is in effect
-        method = next((k for k in PALETTE_TRACK_KEYS if _track_column(k) == method), None)
-    payload["method"] = method
-    return payload
-
-
-def _skill_palette_payload(platform: str, pid: str, scores: list) -> dict:
-    """Run the ACC-weighted skill model over freshly fetched scores and cache it.
-
-    ``yellow_stars`` stays the colour anchor: the best track that produced a rating
-    (personal96 > personal94 > personal80). Tracks without enough direct evidence stay
-    NULL, which the settings UI turns into "数据不足" and a disabled option -- the model
-    is not allowed to guess a number there.
-    """
-    records = [r for r in (_score_record_from_payload(s) for s in scores) if r is not None]
-    ratings = skill_model.rate_player(records, time.time())
-    available = skill_model.available_track_keys(ratings)      # personal96, personal94, personal80 order
-
-    payload: dict = {
-        "stage": None,
-        "max_single_pp": max((r.pp for r in records), default=None),
-        "fallback_stars": None,
-        "yellow_stars": None,
-        "sample_count": len(records),
-        "method": "skill_model",
-        "valid_count": len(records),
-        "nf_excluded": None,
-        "skill_params": skill_model.parameters(),
-    }
-    for track in skill_model.TRACKS:
-        rating = ratings[track.key]
-        column = _track_column(track.key)          # cache columns are short (r80...)
-        payload[column] = rating.stars
-        payload[f"{column}_direct"] = rating.direct_count
-        payload[f"{column}_lower_bound"] = rating.lower_bound_stars
-        payload[f"{column}_confidence"] = rating.confidence if rating.stars is not None else None
-
-    anchor = skill_model.best_available_track(ratings)
-    if anchor is not None:
-        visible = ratings[anchor.key]
-        payload["yellow_stars"] = visible.stars
-        payload["fallback_stars"] = visible.potential
-        payload["method"] = anchor.key          # public id (personalNN)
-    payload["computed_at"] = datetime.now(timezone.utc).isoformat()
-    repo.save_player_palette(platform, pid, payload)
-    # callers and the API see public ids; only the cache keeps the short columns
-    return _palette_public_payload(payload)
-
-
-def _compute_and_cache_palette(platform: str, pid: str, scores: list) -> dict:
-    """Skill-model palette over freshly fetched scores, persisted, returned."""
-    return _skill_palette_payload(platform, pid, scores)
+# Moved to backend/services/skill_tracks.py (2026-09 slimming): the route layer
+# keeps only the calls; see that module for the cache shape and public ids.
 
 
 # ---------- cloud data page (platform-scoped: /api/scoresaber | /api/beatleader) ----------
@@ -1361,13 +1167,14 @@ def _cloud_page_get(platform: str):
     pid = _scoresaber_id()   # auto-resolved from BSOR (= Steam ID); the config setting is deprecated
     cached = repo.get_player_cache(platform, pid)
     if cached:
-        return {**cached, "palette": _palette_result(platform, pid)}
+        return {**cached, "palette": skill_tracks.palette_result(repo, platform, pid)}
     return _cloud_page_refresh(platform)
 
 
 def _cloud_page_refresh(platform: str):
-    """Shared POST logic: fetch profile + scores for the platform, compute and
-    cache the personal palette in one step ("拉取数据并计算动态水平").
+    """Shared POST logic: fetch profile + scores for the platform, compute and cache
+    the personal palette in one step (the cloud page's "Fetch Data & Compute Dynamic
+    Level" button, `scoresaber.refresh_btn`).
 
     The score fetch is deliberately wider than one page: the skill model needs plays
     near each target accuracy (80% / 94% / 96%), and a player's recent page alone can
@@ -1383,7 +1190,7 @@ def _cloud_page_refresh(platform: str):
             scores = beatleader.fetch_scores(cfg, pid, limit=CLOUD_SCORE_LIMIT,
                                              max_pages=CLOUD_SCORE_PAGES)
         except beatleader.BeatLeaderError as e:
-            raise HTTPException(502, str(e))
+            raise HTTPException(502, str(e)) from e
     else:
         try:
             profile = scoresaber.fetch_profile(cfg, pid)
@@ -1396,7 +1203,7 @@ def _cloud_page_refresh(platform: str):
             scores = list(merged.values())
             scores.sort(key=lambda r: r.get("time_set") or "", reverse=True)
         except scoresaber.ScoreSaberError as e:
-            raise HTTPException(502, str(e))
+            raise HTTPException(502, str(e)) from e
     repo.save_player_cache(platform, pid, profile, scores)
     # Sidebar player card images (avatar + country flag): downloaded here so the
     # card works offline afterwards. Best effort on purpose - a CDN failure must
@@ -1409,7 +1216,7 @@ def _cloud_page_refresh(platform: str):
         if attempted and not attempted.stored:
             print(f"[player] {kind} download failed ({platform})"
                   " — keeping cached image", flush=True)
-    palette = _compute_and_cache_palette(platform, pid, scores)
+    palette = skill_tracks.skill_palette_payload(repo, platform, pid, scores)
     return {"fetched_at": datetime.now(timezone.utc).isoformat(),
             "profile": profile, "scores": scores, "palette": palette}
 
@@ -1586,10 +1393,11 @@ def api_network_check():
 def api_i18n_langs():
     """Discover available UI languages by scanning frontend/i18n/*.json.
 
-    Each language file provides its own display name via the "lang.name"
-    key (e.g. zh-CN.json -> "简体中文"). Adding a new file is enough to
-    enable the language — the frontend renders the switch buttons
-    dynamically from this response (2026-08).
+    Each language file provides its own display name via the "lang.name" key — the
+    zh-CN file names itself in Chinese, the ja-JP file in Japanese, and so on, so the
+    switch buttons always read in their own language. Adding a new file is enough to
+    enable that language: the frontend renders the switch buttons dynamically from
+    this response (2026-08).
     """
     import re
     d = FRONTEND_DIR / "i18n"
@@ -1637,8 +1445,8 @@ def api_settings_schema():
     """
     from backend.config.schema import get_schema
     schema = get_schema()
-    palette_cache = _palette_cache_for()
-    availability = _palette_availability(palette_cache)
+    palette_cache = skill_tracks.palette_cache_for(repo, _active_platform(), _scoresaber_id())
+    availability = skill_tracks.palette_availability(palette_cache)
     for item in schema:
         if item.get("key") == "player.star_palette":
             item["option_meta"] = availability
@@ -1648,7 +1456,8 @@ def api_settings_schema():
     # Resolve it to the track that is actually available so the settings form shows a
     # real selection instead of an option that no longer exists in the enum.
     if values.get("player.star_palette") == "personal":
-        values["player.star_palette"] = _active_palette_id(palette_cache)
+        values["player.star_palette"] = skill_tracks.active_palette_id(
+            cfg.star_palette, palette_cache)
     return {"schema": schema, "values": values}
 
 
@@ -1743,7 +1552,7 @@ def api_settings_clear_cache():
     return result
 
 
-# ---------- desktop integration (frosted-glass plan C: wallpaper push, see others/毛玻璃方案探索.md) ----------
+# ---------- desktop integration (acrylic plan C: wallpaper push; design notes in the local-only others/ folder) ----------
 @app.post("/api/desktop/backdrop-ready")
 def api_desktop_backdrop_ready():
     """Frontend acrylic-layer ready notification (page load / language-switch

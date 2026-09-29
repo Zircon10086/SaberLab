@@ -181,7 +181,7 @@ def _reversal_analysis(replay: Replay, fast_dt: float = 0.35) -> dict:
         fast_speeds = []        # saber speeds of good cuts within fast segments
         slow_speeds = []        # saber speeds of good cuts outside fast segments
         fails_total = 0
-        for prev, cur in zip(hn, hn[1:]):
+        for prev, cur in zip(hn, hn[1:], strict=False):   # consecutive pairs
             dt = cur.event_time - prev.event_time
             if dt <= 0 or dt > 2.0:
                 continue
@@ -254,7 +254,7 @@ def _path_economy(replay: Replay, t: np.ndarray, pose: np.ndarray,
         cum = cum_by_hand[hand]
         hc = [n for n in good if n.cut.saber_type == st]
         ratios = []
-        for a, b in zip(hc, hc[1:]):
+        for a, b in zip(hc, hc[1:], strict=False):   # consecutive pairs
             straight = math.dist(a.cut.cut_point, b.cut.cut_point)
             if straight < 0.02:
                 continue

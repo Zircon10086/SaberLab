@@ -423,7 +423,9 @@ def sync_maps_batch(cfg: Config, repo, map_hashes: list[str],
         with ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(sync_one, pending))
         retry = []
-        for mh, res in zip(pending, results):
+        # results is a map() over pending, so the two are equal-length by
+        # construction; strict=True makes a future drift a loud failure.
+        for _mh, res in zip(pending, results, strict=True):
             if res is None:
                 continue
             if fail_count[res] < 3:

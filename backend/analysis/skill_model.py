@@ -31,8 +31,7 @@ caller decides where records come from.
 from __future__ import annotations
 
 import math
-import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .pp_predict import curve_multiplier
 
@@ -67,8 +66,6 @@ MIN_DIRECT_RECORDS = 8
 
 STATUS_OK = "ok"
 STATUS_INSUFFICIENT = "insufficient"
-
-INSUFFICIENT_LABEL = "数据不足"
 
 
 @dataclass(frozen=True)
@@ -125,7 +122,9 @@ def star_evidence_weight(stars: float) -> float:
 
 def weighted_median(values: list[float], weights: list[float]) -> float | None:
     """Weighted median (lower value wins on an exact 50% split). None when empty."""
-    pairs = [(v, w) for v, w in zip(values, weights) if w > 0]
+    # strict=False: values/weights are aligned by the caller; a short one must
+    # degrade to "less evidence", not raise.
+    pairs = [(v, w) for v, w in zip(values, weights, strict=False) if w > 0]
     if not pairs:
         return None
     pairs.sort(key=lambda p: p[0])

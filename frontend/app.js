@@ -1,4 +1,4 @@
-/* SaberLab 前端逻辑 —— 原生 JS，无外部依赖（i18n：JSON 对照表，见 i18n.js） */
+/* SaberLab frontend logic — plain JS, no external dependencies (i18n: JSON lookup tables, see i18n.js) */
 "use strict";
 
 const $ = (sel) => document.querySelector(sel);
@@ -17,8 +17,9 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
-/* 静态文本（index.html data-i18n / data-i18n-placeholder / data-i18n-title）。
-   语言切换按钮由 i18n.js renderLangSwitch 动态渲染（自动发现语言文件）。 */
+/* Static text (index.html data-i18n / data-i18n-placeholder / data-i18n-title).
+   The language switch button is rendered dynamically by i18n.js renderLangSwitch
+   (language files are discovered automatically). */
 function applyStaticI18n() {
   document.querySelectorAll("[data-i18n]").forEach((el) => {
     el.textContent = t(el.dataset.i18n);
@@ -45,15 +46,19 @@ const fmt = {
     : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}.${String(Math.round((s % 1) * 100)).padStart(2, "0")}`,
 };
 
-/* ---------------- toast（替代原生 alert 的轻提示） ----------------
-   顶部居中向下弹出；卡片顶部进度条**全宽**（显示剩余时间：生存期 3s 内
-   从右向左缩短到最左端，左端固定）；进度条归零（animationend）触发
-   淡出移除（向上收起，与入场对称）。reduced-motion 下进度条隐藏，
-   走 setTimeout 兜底离场。
-   kind（语义色渐变背景 + 同色进度条）：success=绿 / error=红（失败/警告）/
-   info=蓝；默认 error。
-   入场：插入后双 rAF 再加 .in —— 若插入即显示态，浏览器首帧就命中目标
-   样式、过渡无从发生（旧版"无入场动画"就是这个原因）。 */
+/* ---------------- toast (lightweight notice replacing native alert) ----------------
+   Pops down from the top center; the card's top progress bar is **full width**
+   (it shows the remaining lifetime: within the 3s lifetime it shrinks from right
+   to left down to the far left end, which stays pinned); when the bar reaches
+   zero (animationend) it triggers the fade-out removal (collapsing upwards,
+   symmetric with the entrance). Under reduced-motion the progress bar is hidden
+   and a setTimeout fallback handles the exit.
+   kind (semantic-color gradient background + progress bar in the same color):
+   success=green / error=red (failure/warning) / info=blue; default error.
+   Entrance: after insertion, a double rAF, then add .in — if it were inserted in
+   its shown state the browser would hit the target style on the very first frame
+   and no transition could ever happen (that is why the old version had "no
+   entrance animation"). */
 function toast(message, kind = "error") {
   const root = $("#toast-root");
   if (!root) { console.warn("[toast]", message); return; }
@@ -70,27 +75,30 @@ function toast(message, kind = "error") {
     el.classList.remove("in");
     el.classList.add("leaving");
     el.addEventListener("transitionend", () => el.remove(), { once: true });
-    setTimeout(() => el.remove(), 600);  // transition 不触发时的兜底
+    setTimeout(() => el.remove(), 600);  // fallback for when the transition never fires
   };
   bar.addEventListener("animationend", dismiss, { once: true });
-  setTimeout(dismiss, 3200);  // 进度条 animation 不触发（reduced-motion）时的兜底
+  setTimeout(dismiss, 3200);  // fallback for when the bar's animation never fires (reduced-motion)
 }
 
-/* ---------------- 通用弹窗（全局强提醒接口，独立的顶层浮层组件） ----------------
-   专门用于需要用户显式关注/确认的强提醒内容（警示、不可撤销操作、结构化
-   长内容等）；与轻量 popover（锚定、不阻断交互）语义不同、各自独立。
-   openModal({ title, body, onClose, actions }): title = 纯文本标题；body = HTML 字符串
-   （调用方自行转义）；点遮罩或关闭按钮均可关闭。返回 overlay 元素。
-   actions（2026-09，为"删除回放"这类需要确认的危险操作加入）：菜单按钮数组
-   [{ id, label, kind?, onClick }]，kind = "primary" | "danger" | ""（默认次级样式）。
-   点击后**不自动关闭**——由 onClick 决定（危险操作要等请求成功再关，避免"已关闭
-   但没删掉"的误导）。返回的 overlay 上可用 #modal-act-<id> 取到按钮。
-   **有 actions 时不再渲染右下角"关闭"按钮**：它与"取消"功能重复，两个关不掉的
-   出口只会让确认界面变啰嗦（用户 2026-09 指出）。
-   closeModal(): 关闭当前打开的弹窗（幂等，带退场动画）。
-   **存在多个 overlay 时只关闭最后打开的那个**——若让退场中的旧弹窗与新弹窗并存，
-   会出现两层遮罩叠加（观感上像闪一下），所以这里逐个标记 closing（各自淡出）而不是
-   一次性全删。 */
+/* ---------------- generic modal (global hard-notice interface, a separate top-layer component) ----------------
+   Reserved for hard notices that need the user's explicit attention/confirmation
+   (warnings, irreversible operations, structured long content, etc.); it is
+   semantically different from the lightweight popover (anchored, non-blocking)
+   and the two are kept independent.
+   openModal({ title, body, onClose, actions }): title = plain-text title; body = HTML string
+   (the caller escapes it); clicking the mask or the close button closes it. Returns the overlay element.
+   actions (2026-09, added for dangerous operations that need confirmation, such as "delete replay"): array of menu buttons
+   [{ id, label, kind?, onClick }], kind = "primary" | "danger" | "" (default secondary style).
+   A click does **not close it automatically** — that is up to onClick (a dangerous operation
+   must wait for the request to succeed before closing, to avoid the misleading "it closed
+   but nothing was deleted"). The returned overlay exposes the buttons as #modal-act-<id>.
+   **With actions, the "close" button in the bottom right is no longer rendered**: it duplicates
+   "cancel", and two unclosable exits only make the confirmation dialog wordier (user, 2026-09).
+   closeModal(): closes the currently open modal (idempotent, with an exit animation).
+   **With several overlays, only the last-opened one is closed** — letting an exiting old modal
+   coexist with a new one would stack two masks (it looks like a flash), so each is marked
+   closing (each fades out on its own) instead of all being removed at once. */
 let modalClosing = new WeakSet();
 function openModal({ title, body, onClose = null, actions = null } = {}) {
   closeModal();
@@ -102,7 +110,7 @@ function openModal({ title, body, onClose = null, actions = null } = {}) {
         `<button id="modal-act-${a.id}" class="${a.kind || ""}">${escHtml(a.label)}</button>`
       ).join("") + `</div>`
     : "";
-  // 无 actions 的纯信息弹窗仍需要唯一的关闭出口
+  // an information-only modal without actions still needs its single way out
   const closeHtml = hasActions
     ? ""
     : `<div class="modal-close"><button class="mini" id="modal-close-btn">${t("common.close")}</button></div>`;
@@ -128,28 +136,31 @@ function openModal({ title, body, onClose = null, actions = null } = {}) {
 
 function closeModal() {
   document.querySelectorAll(".modal-overlay").forEach((o) => {
-    if (o.classList.contains("closing")) return;      // 已在退场动画中，避免重复触发
+    if (o.classList.contains("closing")) return;      // already in the exit animation, avoid firing twice
     o.dispatchEvent(new CustomEvent("modalclose"));
     o.classList.add("closing");
-    // 退场动画结束后再移除（与 popover/toast 同一套做法，含 animationend 兜底）
+    // remove only after the exit animation ends (same approach as popover/toast, with an animationend fallback)
     o.addEventListener("animationend", () => o.remove(), { once: true });
     setTimeout(() => o.remove(), 300);
   });
 }
 
-/* ---------------- 锚定弹出小窗（popover，2026-08 为 PP 预测引入的通用组件） ----------------
-   轻量浮动卡片：锚定在触发元素下方弹出（空间不足自动翻转到上方，左右夹边），
-   不加遮罩、不阻断页面交互；点击外部 / Escape / 页面滚动 / 窗口尺寸变化即关闭。
-   全屏 openModal 保留为强提醒接口，二者并存、语义不同。
+/* ---------------- anchored popover (popover, the generic component introduced for PP prediction in 2026-08) ----------------
+   Lightweight floating card: it pops out anchored below the trigger element (it flips
+   above when there is not enough room, and is clamped left/right), adds no mask and does
+   not block page interaction; it closes on an outside click / Escape / page scroll /
+   window resize. The full-screen openModal remains the hard-notice interface; the two
+   coexist with different semantics.
    openPopover({ anchor, at, body, onClose, className, blockContextMenu }):
-     - anchor: 触发元素（按元素定位）
-     - at: {x, y} 视口坐标（**优先于 anchor**；右键菜单用光标位置，2026-09）
-     - body: HTML 字符串（调用方自行转义）
-     - className: 追加到 .popover 的类（如 ctx-menu 决定列表样式）
-     - blockContextMenu: 捕获阶段监听 contextmenu 关闭（右键菜单专用：在别处再点
-       右键时应"先关旧菜单再开新菜单"，交给后续调用方处理）
-     - onClose 在开始关闭时回调。
-   closePopover(): 关闭当前弹出小窗（幂等，带退出动画 + 移除全部监听）。 */
+     - anchor: trigger element (positioned relative to the element)
+     - at: {x, y} viewport coordinates (**takes precedence over anchor**; the context menu uses the cursor position, 2026-09)
+     - body: HTML string (the caller escapes it)
+     - className: class appended to .popover (e.g. ctx-menu selects the list styling)
+     - blockContextMenu: listen during the capture phase for contextmenu to close (context-menu
+       specific: right-clicking elsewhere should "close the old menu before opening the new
+       one", which is left to the caller that follows)
+     - onClose is called when the closing begins.
+   closePopover(): closes the current popover (idempotent, with an exit animation + removes every listener). */
 let popoverState = null;
 
 function closePopover() {
@@ -164,7 +175,7 @@ function closePopover() {
   if (st.onClose) st.onClose();
   st.el.classList.add("closing");
   st.el.addEventListener("animationend", () => st.el.remove(), { once: true });
-  setTimeout(() => st.el.remove(), 300);   // animation 不触发时的兜底（同 toast）
+  setTimeout(() => st.el.remove(), 300);   // fallback for when the animation never fires (same as toast)
 }
 
 function openPopover({ anchor = null, at = null, body = "", onClose = null,
@@ -174,9 +185,11 @@ function openPopover({ anchor = null, at = null, body = "", onClose = null,
   el.className = "popover" + (className ? " " + className : "");
   el.innerHTML = body;
   document.body.appendChild(el);
-  // 定位：默认锚点下方居中；下方放不下且上方放得下则翻转（入场方向跟随翻转）；
-  // 左右夹到视口内。先隐藏测量尺寸再定位，避免闪现。
-  // at（视口坐标）优先：右键菜单跟随光标，且只做"夹到视口内"处理。
+  // Positioning: centered below the anchor by default; flipped above when there is no room
+  // below but there is above (the entrance direction follows the flip); clamped
+  // horizontally into the viewport. Measure while hidden, then position, to avoid a flash.
+  // at (viewport coordinates) wins: the context menu follows the cursor, and only gets clamped
+  // into the viewport.
   el.style.visibility = "hidden";
   const margin = 8, gap = 10;
   const pw = el.offsetWidth, ph = el.offsetHeight;
@@ -184,7 +197,7 @@ function openPopover({ anchor = null, at = null, body = "", onClose = null,
   if (at) {
     left = Math.min(Math.max(margin, at.x), Math.max(margin, window.innerWidth - pw - margin));
     top = Math.min(Math.max(margin, at.y), Math.max(margin, window.innerHeight - ph - margin));
-    el.style.transformOrigin = "top left";          // 从光标处展开
+    el.style.transformOrigin = "top left";          // expands out of the cursor
   } else {
     const r = anchor.getBoundingClientRect();
     left = r.left + r.width / 2 - pw / 2;
@@ -192,7 +205,7 @@ function openPopover({ anchor = null, at = null, body = "", onClose = null,
     top = r.bottom + gap;
     if (top + ph > window.innerHeight - margin && r.top - gap - ph >= margin) {
       top = r.top - gap - ph;
-      el.style.setProperty("--pop-drop", "6px");       // 从下方入场 → 上方翻转入场方向反转
+      el.style.setProperty("--pop-drop", "6px");       // entering from below → flipped above, so the entrance direction is reversed
       el.style.transformOrigin = "bottom center";
     }
   }
@@ -200,21 +213,21 @@ function openPopover({ anchor = null, at = null, body = "", onClose = null,
   el.style.top = `${Math.round(top)}px`;
   el.style.visibility = "";
   el.classList.add("open");
-  // 外部点击：anchor 模式要放行触发元素自身的点击，坐标模式无需放行
+  // outside click: in anchor mode the trigger's own clicks must pass through, in coordinate mode nothing has to
   const onDocClick = (e) => {
     if (!el.contains(e.target) && !(anchor && anchor.contains(e.target))) closePopover();
   };
   const onKey = (e) => { if (e.key === "Escape") closePopover(); };
-  const onDismiss = () => closePopover();   // 滚动/缩放会让锚点漂移，直接关闭
-  // 延后一拍绑定外部点击：避免打开弹窗的那次点击（事件还在传播）立刻触发关闭
+  const onDismiss = () => closePopover();   // scrolling/zooming drifts the anchor, so just close
+  // bind the outside click one tick later: otherwise the very click that opened the popover (still propagating) closes it immediately
   setTimeout(() => document.addEventListener("click", onDocClick, true), 0);
   document.addEventListener("keydown", onKey);
   window.addEventListener("scroll", onDismiss, true);
   window.addEventListener("resize", onDismiss);
   popoverState = { el, onClose, onDocClick, onKey, onDismiss };
   if (blockContextMenu) {
-    // 右键菜单：在菜单外再点右键时，先关掉当前菜单（新菜单由该次事件自己开）。
-    // 用捕获阶段，保证在调用方的 contextmenu 处理之前就把旧菜单清掉。
+    // context menu: right-clicking again outside the menu closes the current menu first (the new one is opened by that event itself).
+    // Use the capture phase so the old menu is cleared before the caller's own contextmenu handler runs.
     const onDocCtx = (e) => { if (!el.contains(e.target)) closePopover(); };
     setTimeout(() => document.addEventListener("contextmenu", onDocCtx, true), 0);
     popoverState.onDocCtx = onDocCtx;
@@ -222,22 +235,28 @@ function openPopover({ anchor = null, at = null, body = "", onClose = null,
   return el;
 }
 
-/* ---------------- 右键菜单框架（context menu，2026-09） ----------------
-   设计目标：**搭框架**——新增右键功能只需往 CTX_MENUS 注册一条，不改框架代码。
+/* ---------------- context menu framework (context menu, 2026-09) ----------------
+   Design goal: **build the framework** — adding a new right-click feature only needs
+   one entry registered in CTX_MENUS, without touching framework code.
 
-   组成：
-   1. 一次性的文档级 contextmenu 委托（见 bindContextMenus）：用 closest 自内向外
-      找第一个命中的注册项，命中则拦截浏览器原生菜单。
-   2. CTX_MENUS 注册表：{ match(sel), items(el) }。items 返回菜单项数组，便于按
-      元素状态动态增删（返回空数组 = 该元素没有可用项，此时放行原生菜单）。
-   3. 菜单项：{ label, action, danger?, disabled?, sep? }，label 由调用方给最终文案
-      （i18n 由注册项自己 t()），action(ev, el) 执行。
-   4. 渲染复用现有 openPopover（新增 at 坐标模式）：材质、动画、Escape、外部点击、
-      滚动关闭全部继承，不重复实现浮层逻辑。
+   Composition:
+   1. A one-time document-level contextmenu delegation (see bindContextMenus): closest
+      walks from the inside out for the first matching registered entry, and a match
+      suppresses the browser's native menu.
+   2. The CTX_MENUS registry: { match(sel), items(el) }. items returns the array of
+      menu items and makes it easy to add/remove them per element state (an empty array
+      = the element has no usable items, and the native menu is let through).
+   3. A menu item: { label, action, danger?, disabled?, sep? }; label carries the final
+      text supplied by the caller (i18n is t()'d by the registered entry itself), action(ev, el) runs it.
+   4. Rendering reuses the existing openPopover (with the new at coordinate mode):
+      material, animation, Escape, outside click and scroll-to-close are all inherited,
+      so the layer logic is never reimplemented.
 
-   新增一个右键场景的正确做法：往 CTX_MENUS 里 push 一条，items 里 t() 取文案，
-   然后在对应渲染函数里给元素加 class/属性供 match 选择（如 .replay-item）。
-   菜单项的统一行为（分隔线、禁用态、危险色、点击后关闭）由框架负责。 */
+   The right way to add a right-click scenario: push an entry into CTX_MENUS, t() the
+   text in items, then give the element a class/attribute for match to select in the
+   corresponding render function (e.g. .replay-item).
+   The framework owns the uniform behaviour of menu items (separator, disabled state,
+   danger color, closing after a click). */
 const CTX_MENUS = [];
 
 function ctxMenuItem({ label, action, danger = false, disabled = false }) {
@@ -252,14 +271,14 @@ function buildContextMenuHtml(items) {
   const rows = items.map((it) => {
     if (it.sep) return '<div class="ctx-sep"></div>';
     const cls = "ctx-item" + (it.danger ? " danger" : "") + (it.disabled ? " disabled" : "");
-    // label 由注册项给出（调用方负责转义）；这里只做 HTML 转义兜底，避免意外注入
+    // label comes from the registered entry (the caller escapes it); this is only an HTML-escape fallback to avoid accidental injection
     return `<button type="button" class="${cls}" data-ctx-idx="${items.indexOf(it)}"` +
            (it.disabled ? " disabled" : "") + `>${escHtml(it.label)}</button>`;
   });
   return `<div class="ctx-menu" role="menu">${rows.join("")}</div>`;
 }
 
-/* 在 (x, y) 处打开右键菜单。items 为空则什么也不做（调用方应先判断）。 */
+/* Opens the context menu at (x, y). With no items it does nothing (the caller should check first). */
 function openContextMenu(items, x, y) {
   if (!items || !items.length) return null;
   const el = openPopover({
@@ -274,7 +293,7 @@ function openContextMenu(items, x, y) {
     const btn = e.target.closest(".ctx-item");
     if (!btn || btn.disabled) return;
     e.preventDefault();
-    e.stopPropagation();          // 让 popover 的"外部点击关闭"不要抢在动作之前
+    e.stopPropagation();          // keep popover's "outside click closes" from preempting the action
     const item = items[Number(btn.dataset.ctxIdx)];
     closePopover();
     if (item && item.action) {
@@ -289,17 +308,17 @@ function openContextMenu(items, x, y) {
   return el;
 }
 
-/* 文档级委托：只绑一次。closest 自内向外匹配，第一个命中的注册项胜出。 */
+/* Document-level delegation: bound once. closest matches from the inside out, and the first registered entry to match wins. */
 function bindContextMenus() {
   document.addEventListener("contextmenu", (e) => {
-    // 输入类元素保留原生菜单（复制/粘贴对文本输入是刚需）
+    // input-like elements keep the native menu (copy/paste is essential for text inputs)
     const t0 = e.target;
     if (t0 && t0.closest && t0.closest("input, textarea, [contenteditable='true']")) return;
     for (const entry of CTX_MENUS) {
       const el = e.target.closest ? e.target.closest(entry.match) : null;
       if (!el) continue;
       const items = (entry.items(el) || []).filter(Boolean);
-      if (!items.length) return;          // 命中但无可用项 → 放行原生菜单
+      if (!items.length) return;          // matched but has no usable items → let the native menu through
       e.preventDefault();
       openContextMenu(items, e.clientX, e.clientY);
       return;
@@ -307,18 +326,22 @@ function bindContextMenus() {
   });
 }
 
-/* 剪贴板辅助（copyText）已随"复制 Replay ID"一起移除（2026-09）：
-   Replay ID 是每设备唯一的 sha256，对用户没有复用价值，右键菜单不再需要复制动作，
-   于是该函数与 [data-copy] 兜底注册项都成了无人调用的死代码（仓库惯例：不留死代码）。
-   将来若某个新菜单项需要复制，再按当时的需求重新引入即可。 */
+/* The clipboard helper (copyText) was removed together with "copy Replay ID" (2026-09):
+   the Replay ID is a per-device unique sha256 with no reuse value for the user, so the
+   context menu no longer needs a copy action, which left that function and the [data-copy]
+   fallback registration as dead code nobody called (repo convention: no dead code kept).
+   If a future menu item needs copying, reintroduce it against that requirement then. */
 
-/* 注册：回放条目（总览 / 历史 / 详情页同谱历史 / 对比列表共用 .replay-item）
-   菜单项（2026-09 用户确定）：
-     打开详情 · 查看同谱面记录（按**歌名**过滤历史搜索框，见下方说明）· 分隔
-     · 打开文件所在位置 · 删除回放文件（二次确认 → 移到回收站）
-   说明：早期版本用 map_hash 填搜索框——但历史搜索只匹配歌名与 5 位 beatmap_key，
-   哈希永远搜不到东西；"复制 Replay ID"也按用户要求去掉了（ID 是每设备唯一的
-   sha256，对用户没有复用价值）。*/
+/* Registration: replay entry (shared .replay-item across overview / history / the detail
+   page's same-map history / the comparison list)
+   Menu items (settled with the user, 2026-09):
+     open detail · view same-map records (filter the history search box by **song name**,
+     see the note below) · separator
+     · open file location · delete replay file (second confirmation → move to recycle bin)
+   Note: an early version filled the search box with map_hash — but the history search only
+   matches song names and the 5-digit beatmap_key, so a hash could never find anything;
+   "copy Replay ID" was dropped as well on the user's request (the ID is a per-device unique
+   sha256 with no reuse value for the user).*/
 CTX_MENUS.push({
   match: ".replay-item",
   items(el) {
@@ -336,7 +359,7 @@ CTX_MENUS.push({
       }));
     }
     out.push(ctxSeparator());
-    // 文件不在原位时禁用（避免点开一个空文件夹/报错）
+    // disabled when the file is not where it should be (avoids opening an empty folder / an error)
     out.push(ctxMenuItem({
       label: t("ctx.reveal_file"),
       disabled: !fileAvailable,
@@ -352,9 +375,9 @@ CTX_MENUS.push({
   },
 });
 
-/* 跳转历史页并按**歌名**过滤（右键菜单 → 同一谱面的所有尝试）。
-   历史搜索（histScore）只匹配歌曲名与 5 位 beatmap_key，所以这里必须填歌名；
-   填 map_hash 会永远搜不到（2026-09 修正，用户指出）。 */
+/* Jump to the history page filtered by **song name** (context menu → all attempts on the same map).
+   The history search (histScore) only matches song names and the 5-digit beatmap_key, so the
+   song name must go in here; filling in map_hash would never find anything (fixed 2026-09, user-reported). */
 function showSameMapHistory(songName) {
   switchTab("history");
   const f = $("#hist-filter");
@@ -364,7 +387,7 @@ function showSameMapHistory(songName) {
   }
 }
 
-/* 打开回放文件所在位置（文件不在原位时后端回退到所在文件夹） */
+/* Open the replay file's location (when the file is not in place the backend falls back to its folder) */
 async function revealReplayFile(id) {
   try {
     const res = await api(`/api/replays/${id}/reveal`, { method: "POST" });
@@ -374,11 +397,14 @@ async function revealReplayFile(id) {
   }
 }
 
-/* 删除回放：二次确认 → 文件移到回收站 + SaberLab 移除该记录（**不是永久删除**）。
-   弹窗复用 openModal（actions 按钮区）；确认后才发请求，成功才关弹窗，
-   避免"弹窗关了但没删掉"的误导。
-   记录被移除后列表要刷新；若当前正在看这条回放的详情，直接返回列表
-   （记录已不存在，停留在一个空详情页没有意义）。 */
+/* Delete replay: second confirmation → the file moves to the recycle bin + SaberLab removes
+   the record (**not a permanent delete**).
+   The dialog reuses openModal (actions button area); the request is sent only after
+   confirmation and the modal closes only on success, avoiding the misleading "the dialog
+   closed but nothing was deleted".
+   Once the record is removed the list must refresh; if this replay's detail page is currently
+   open, go straight back to the list (the record no longer exists, and staying on an empty
+   detail page is pointless). */
 function confirmRecycleReplay(id, songName) {
   const body =
     `<p>${escHtml(t("ctx.recycle_confirm", { song: songName || t("replay.unknown_song") }))}</p>` +
@@ -399,7 +425,7 @@ function confirmRecycleReplay(id, songName) {
             closeModal();
             toast(t("ctx.recycled_toast", { name: res.file_name || "" }), "success");
             if (currentReplay && currentReplay.replay_id === id) {
-              goBack();                       // 记录已移除：退回列表
+              goBack();                       // record removed: back to the list
             } else {
               await Promise.allSettled([loadRecent(currentPage), loadHistory()]);
             }
@@ -413,15 +439,17 @@ function confirmRecycleReplay(id, songName) {
   });
 }
 
-/* ---------------- 毛玻璃（webview 窗口模式，见 others/毛玻璃方案探索.md） ----------------
-   宿主（backend/host.py）在 webview 模式下加载 URL 带 ?shell=webview，就绪后推送
-   window.__saberlabBackdrop 初始 payload：
-   - mode=backdrop：DWM 背景板（实验），前端只需把背景改为透明
-   - mode=wallpaper：壁纸推送方案 C —— 前端自裁切（第二轮改进，2026-08-21）：
-     后端只给 monitor 几何 + 壁纸 URL；窗口位置由前端每帧读 window.screenX/Y
-     本地计算裁切（零 IPC，消除拖动滞后）；壁纸变化由后端轮询推送新 URL
-     （带 ?v= 版本号），前端预加载后换图（支持幻灯片壁纸）。
-   浏览器模式无 shell 参数 → 完全不启用，外观与之前一致。
+/* ---------------- acrylic/glass (webview window mode, see the acrylic-scheme exploration doc under others/) ----------------
+   In webview mode the host (backend/host.py) loads the URL with ?shell=webview and pushes
+   the initial window.__saberlabBackdrop payload once ready:
+   - mode=backdrop: DWM backdrop (experimental), the frontend only has to make the background transparent
+   - mode=wallpaper: wallpaper push approach C —— frontend-side self-cropping (second round of
+     improvements, 2026-08-21): the backend only supplies the monitor geometry + wallpaper URL;
+     the window position is read every frame from window.screenX/Y and the crop is computed
+     locally (zero IPC, which eliminates drag lag); wallpaper changes are polled by the backend
+     and pushed as a new URL (with a ?v= version suffix), and the frontend preloads before
+     swapping the image (slideshow wallpapers are supported).
+   Browser mode has no shell parameter → nothing is enabled at all, and the appearance stays as before.
 */
 function initAcrylic() {
   document.body.classList.add("acrylic");
@@ -429,19 +457,20 @@ function initAcrylic() {
   layer.id = "acrylic-backdrop";
   document.body.prepend(layer);
 
-  let payload = null;      // 最近一次 host 推送
-  let wallpaperUrl = null; // 当前已应用的壁纸 URL（绝对）
-  let pendingUrl = null;   // 预加载中的 URL
+  let payload = null;      // most recent host push
+  let wallpaperUrl = null; // currently applied wallpaper URL (absolute)
+  let pendingUrl = null;   // URL being preloaded
   let rafId = null;
-  let lastPosKey = null;   // 位置写入去重（静止时零写入）
-  // —— 移动遮盖前端兜底（第四轮修复）：由后端 True 信号启动计时器，
-  //    拖动中后端每 ≤500ms 刷新信号 → 计时器持续重置；最后一个 True
-  //    后 1.5s 无条件自恢复（不依赖 rAF，拖动期间渲染可能暂停） ——
+  let lastPosKey = null;   // position-write dedupe (zero writes while stationary)
+  // —— moving mask, frontend fallback (fourth round of fixes): the backend's True signal
+  //    starts the timer, and while dragging the backend refreshes the signal every ≤500ms
+  //    → the timer keeps being reset; 1.5s after the last True it recovers unconditionally
+  //    (it does not rely on rAF, since rendering may be suspended during a drag) ——
   let selfRecoverTimer = null;
 
   const norm = (u) => new URL(u, location.href).href;
 
-  // —— 应用 payload（模式 / 壁纸 URL / 纯色兜底）；壁纸变化时预加载后再换图 ——
+  // —— apply the payload (mode / wallpaper URL / solid-color fallback); on a wallpaper change, preload before swapping the image ——
   const applyPayload = () => {
     const p = payload;
     if (!p) return;
@@ -464,7 +493,7 @@ function initAcrylic() {
         const img = new Image();
         img.onload = () => {
           pendingUrl = null;
-          // 仅当载荷仍指向这张图时才应用（避免旧图加载完成覆盖新图）
+          // apply it only while the payload still points at this image (keeps a slower old image from overwriting a newer one)
           if (payload && norm(payload.wallpaper_url || "") === img.src) {
             wallpaperUrl = img.src;
             layer.style.backgroundImage = `url("${img.src}")`;
@@ -472,22 +501,22 @@ function initAcrylic() {
         };
         img.src = norm(p.wallpaper_url);
       }
-      // 新图未就绪：保持旧图，避免闪变
+      // the new image is not ready yet: keep the old one to avoid a flash
     }
   };
 
-  // —— 每帧按窗口位置裁切（前端自取，无 IPC） ——
+  // —— crop per frame from the window position (read locally, no IPC) ——
   const applyPosition = () => {
     const p = payload;
     if (!p || p.mode !== "wallpaper" || !p.available) return;
     const dpr = window.devicePixelRatio || 1;
-    // 客户区左上角（逻辑 px）：screenX/Y 是窗口外框位置，减去边框/标题栏
+    // client-area top-left corner (logical px): screenX/Y is the window's outer frame position, minus the border/title bar
     const frameW = window.outerWidth - window.innerWidth;
     const frameH = window.outerHeight - window.innerHeight;
-    const cx = window.screenX + frameW / 2;      // 左右边框近似均分
-    const cy = window.screenY + frameH;          // 顶部标题栏（底部边框误差≈1px）
+    const cx = window.screenX + frameW / 2;      // left/right borders are roughly equal
+    const cy = window.screenY + frameH;          // top title bar (bottom border error ≈1px)
     const key = `${p.monitor.w}|${p.monitor.h}|${cx}|${cy}|${dpr}`;
-    if (key === lastPosKey) return;              // 静止：零写入
+    if (key === lastPosKey) return;              // stationary: zero writes
     lastPosKey = key;
     const monX = p.monitor.x / dpr;
     const monY = p.monitor.y / dpr;
@@ -501,7 +530,7 @@ function initAcrylic() {
     rafId = requestAnimationFrame(tick);
   };
 
-  // host 推送入口（evaluate_js 调用；初始推送 + 壁纸/显示器变化推送）
+  // host push entry point (called via evaluate_js; the initial push + pushes on wallpaper/monitor changes)
   window.__saberlabBackdrop = (p) => {
     payload = p;
     applyPayload();
@@ -513,10 +542,12 @@ function initAcrylic() {
     }
   };
 
-  // —— 移动遮盖（第三轮）：移动/缩放检测在后端（拖动期间渲染/rAF 可能暂停，
-  //    前端自检测不可靠）；这里响应 host 的 moving 状态 → 模糊拉满/恢复。
-  //    兜底：True 信号启动 1.5s 自恢复计时器（拖动中后端每 ≤500ms 刷新
-  //    信号，计时器持续重置；后端 False 信号丢失时也能恢复）——
+  // —— moving mask (third round): move/resize detection lives in the backend (rendering/rAF
+  //    may be suspended during a drag, so frontend self-detection is unreliable); here it
+  //    reacts to the host's moving state → blur all the way up / restore.
+  //    Fallback: the True signal starts a 1.5s self-recovery timer (while dragging the
+  //    backend refreshes the signal every ≤500ms, so the timer keeps being reset; this also
+  //    recovers when the backend's False signal is lost) ——
   window.__saberlabBackdropMoving = (m) => {
     clearTimeout(selfRecoverTimer);
     if (m) {
@@ -529,40 +560,46 @@ function initAcrylic() {
     }
   };
 
-  // 通知宿主"毛玻璃层已就绪"：页面加载与语言切换 reload 后都会执行到
-  // 这里——host 壁纸服务线程据此重新推送 backdrop payload。否则 reload
-  // 后壁纸/显示器未变化，服务线程不会重推，毛玻璃背景永久丢失
-  // （2026-08 修复：切换语言破坏毛玻璃）。
+  // Tell the host "the acrylic layer is ready": this runs after page load and after the
+  // language-switch reload — the host's wallpaper service thread re-pushes the backdrop
+  // payload based on it. Otherwise, since neither wallpaper nor monitor changed, that
+  // thread would not push again after the reload and the acrylic background would be lost
+  // for good (fixed 2026-08: switching language broke the acrylic).
   fetch("/api/desktop/backdrop-ready", { method: "POST" }).catch(() => {});
 }
 
 const SHELL_WEBVIEW = new URLSearchParams(location.search).get("shell") === "webview";
 if (SHELL_WEBVIEW) initAcrylic();
 
-/* ---------------- 3D 回放（chro 插件）的离开暂停 ----------------
-   回放页靠 CSS 位移切换，iframe 始终留在文档里，插件因此会在后台继续播放
-   （音频 + 场景）。这里在"回放页不在当前画面"时暂停播放，播放位置保留；
-   **回到回放页不会自动继续，由玩家自己点播放**（2026-09-14 定案）。
-   两条路径：
-     · 插件自带控制接口（文档根上有标记）→ 发一条契约消息，插件自己执行；
-     · 老插件（无标记）→ 回退：用插件自身的播放/暂停快捷键（空格），并先判定
-       它是否真的在播放（读数约 0.9s 跳一次，故取样窗口取 1.5s）。
-   插件产物缺失/跨源/派发失败时全部静默降级，界面不报错。 */
+/* ---------------- leave-pause for the 3D replay (chro plugin) ----------------
+   The replay page is switched by a CSS offset and the iframe always stays in the
+   document, so the plugin keeps playing in the background (audio + scene). This pauses
+   playback while "the replay page is not on screen", keeping the playback position;
+   **returning to the replay page does not resume automatically, the player clicks play**
+   (settled 2026-09-14).
+   Two paths:
+     · the plugin ships a control interface (a marker on the document root) → send one
+       contract message and the plugin does it itself;
+     · an old plugin (no marker) → fallback: use the plugin's own play/pause shortcut
+       (space), after first determining whether it is really playing (the readout ticks
+       about every 0.9s, so the sampling window is 1.5s).
+   When the plugin build is missing / cross-origin / dispatch fails, everything degrades
+   silently and the UI shows no error. */
 const CHRO_READOUT_RE = /^\d{1,2}:\d{2}$/;
-const CHRO_PROBE_MS = 1500;       // 读数刷新间隔（约 0.9s）的余量
-let chroPauseProbe = null;        // 判定中的定时器（连续切页时不会叠加）
+const CHRO_PROBE_MS = 1500;       // margin over the readout refresh interval (about 0.9s)
+let chroPauseProbe = null;        // pending timer for the probe (no pile-up when switching pages repeatedly)
 
 function chroFrameDoc() {
   const frame = $("#replay-frame");
   if (!frame) return null;
   try {
-    return frame.contentDocument || null;   // 同源插件；缺失/跨源时返回 null
+    return frame.contentDocument || null;   // same-origin plugin; null when missing/cross-origin
   } catch (e) {
     return null;
   }
 }
 
-// 读插件时间轴上的 MM:SS 读数：读得到 = 插件可被宿主控制（仅回退路径使用）
+// Read the MM:SS readout on the plugin's timeline: readable = the plugin can be driven by the host (fallback path only)
 function chroReadoutTime() {
   const doc = chroFrameDoc();
   if (!doc) return null;
@@ -575,7 +612,7 @@ function chroReadoutTime() {
   return null;
 }
 
-// 回退路径：插件自身的播放/暂停快捷键（与用户在插件里按空格同一条路径）
+// Fallback path: the plugin's own play/pause shortcut (the same path as the user pressing space inside the plugin)
 function chroPressPlayPause() {
   const frame = $("#replay-frame");
   if (!frame) return;
@@ -586,11 +623,11 @@ function chroPressPlayPause() {
       key: " ", code: "Space", bubbles: true, cancelable: true,
     }));
   } catch (e) {
-    /* 触发不了就当没这回事：界面不报错，播放行为退回改动前的样子 */
+    /* if it cannot be triggered, act as if it never happened: no UI error, playback behaviour reverts to what it was before the change */
   }
 }
 
-// 回退路径：读数是否仍在推进（= 插件正在播放）
+// Fallback path: is the readout still advancing (= the plugin is playing)
 function chroProgressing(done) {
   const before = chroReadoutTime();
   if (before === null) { done(false); return; }
@@ -602,14 +639,14 @@ function chroProgressing(done) {
   }, CHRO_PROBE_MS);
 }
 
-// 当前选的详情子页（三个 .dpane 是恒定的，选中态在 .dt-tab.active 上）
+// Currently selected detail sub-pane (the three .dpane elements are constant; the selected state lives on .dt-tab.active)
 function chroReplayPaneSelected() {
   const paneTab = $(".dt-tab.active");
   const onDetailTab = $("#tab-detail")?.classList.contains("active") === true;
   return paneTab?.dataset.pane === "replay" && onDetailTab;
 }
 
-// 插件是否自带宿主播放控制（标记由插件在自己文档根上设置）
+// Whether the plugin ships host playback control (the marker is set by the plugin on its own document root)
 function chroSupportsHostPlayback() {
   const doc = chroFrameDoc();
   return !!doc && doc.documentElement?.dataset?.saberlabHost === "1";
@@ -624,32 +661,32 @@ function chroSendPause() {
       window.location.origin,
     );
   } catch (e) {
-    /* 静默降级：失败就当没这回事 */
+    /* silent degradation: on failure, act as if it never happened */
   }
 }
 
-// 只在"回放页离开当前画面"时调用；回来时不发任何指令（玩家手动继续）
+// Only called when "the replay page leaves the screen"; on the way back no command is sent (the player resumes manually)
 function syncChroPlayback() {
   if (chroReplayPaneSelected()) return;
 
   if (chroSupportsHostPlayback()) {
-    chroSendPause();                             // 插件自己保证幂等：没在播就不动
+    chroSendPause();                             // the plugin guarantees idempotence itself: it does nothing when not playing
     return;
   }
 
   chroProgressing((playing) => {
-    if (!playing) return;                        // 本来就没在播，不碰
-    if (chroReplayPaneSelected()) return;        // 判定期间用户已经切回来了，作废
+    if (!playing) return;                        // it was not playing anyway, leave it alone
+    if (chroReplayPaneSelected()) return;        // the user switched back during the probe, discard
     chroPressPlayPause();
   });
 }
 
-/* ---------------- tabs / sidebar 导航 ---------------- */
+/* ---------------- tabs / sidebar navigation ---------------- */
 $$("#tabs .nav-item").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 function switchTab(name) {
   $$("#tabs .nav-item").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   $$(".tabpane").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
-  // 离开详情页时隐藏返回栏
+  // hide the back bar when leaving the detail page
   if (name !== "detail") {
     const tb = $("#detail-topbar");
     if (tb) tb.style.display = "none";
@@ -669,10 +706,10 @@ function lineChart(container, series, opts = {}) {
   series.forEach((s) => s.points.forEach((p) => { allX.push(p.x); allY.push(p.y); }));
   if (!allX.length) { container.innerHTML = `<div class="empty">${t("chart.no_data")}</div>`; return; }
 
-  // 原始数据备份（tooltip 显示真实值，不受归一化影响）
+  // backup of the raw data (tooltips show the true values, unaffected by normalization)
   const rawSeries = series.map((s) => ({ ...s, points: s.points.map((p) => ({ ...p })) }));
 
-  // 归一化模式：每条序列独立缩放到 0-100（形状清晰，量级参考靠图例真实范围）
+  // normalization mode: every series is scaled independently to 0-100 (the shape stays clear, and the real range for magnitude comes from the legend)
   if (opts.normalize) {
     series = series.map((s) => {
       const ys = s.points.map((p) => p.y);
@@ -696,16 +733,17 @@ function lineChart(container, series, opts = {}) {
   if (opts.yMax == null) yMax += yPad;
   const sx = (x) => pad.l + ((x - xMin) / (xMax - xMin || 1)) * (W - pad.l - pad.r);
   const sy = (y) => H - pad.b - ((y - yMin) / (yMax - yMin)) * (H - pad.t - pad.b);
-  // animate=false：切换/勾选重绘不重放线条动画（仅进入详情时动画）
+  // animate=false: redraws from switching/checking do not replay the line animation (only entering the detail page animates)
   const animCls = opts.animate === false ? ' class="no-anim"' : "";
   let svg = `<svg viewBox="0 0 ${W} ${H}"${animCls} preserveAspectRatio="none">`;
   for (let i = 0; i <= 4; i++) {
     const y = pad.t + i * (H - pad.t - pad.b) / 4;
     const val = yMax - i * (yMax - yMin) / 4;
     svg += `<line class="grid-line" x1="${pad.l}" y1="${y}" x2="${W - pad.r}" y2="${y}"/>`;
-    // hideYLabels（v1.6.0）：隐藏 y 轴刻度数字，网格线保留。
-    // 归一化图表轴固定 0-100 而数据按 min/max 动态缩放，固定标记与
-    // 实际数据观感割裂——隐藏数字后曲线/网格/图例真实范围照常呈现。
+    // hideYLabels (v1.6.0): hide the y-axis tick numbers, the grid lines stay.
+    // A normalized chart's axis is pinned to 0-100 while the data scales dynamically by
+    // min/max, so fixed ticks clash with the actual data — hiding the numbers still leaves
+    // the curve/grid/legend showing the true range.
     if (!opts.hideYLabels) {
       svg += `<text x="${pad.l - 6}" y="${y + 4}" fill="#8b96ab" font-size="10" text-anchor="end">${opts.fmtY ? opts.fmtY(val) : val.toFixed(opts.yDec != null ? opts.yDec : 2)}</text>`;
     }
@@ -717,9 +755,10 @@ function lineChart(container, series, opts = {}) {
   }
   series.forEach((s) => {
     if (!s.points.length) return;
-    // 线段裁剪（v1.4.1）：数据点像素超出 x 轴 [xMin, xMax] 的部分
-    // 必须裁掉（仅裁坐标轴标签不够——负/超宽像素仍在 viewBox 内可见）；
-    // 跨界线段在边界处线性插值截断，保持形状。
+    // line-segment clipping (v1.4.1): the part of a data point's pixels that falls outside
+    // the x axis [xMin, xMax] must be clipped (clipping only the axis labels is not enough —
+    // negative/over-wide pixels are still visible inside the viewBox);
+    // a segment crossing the boundary is cut by linear interpolation at the edge, keeping the shape.
     const segs = [];
     let prev = null;
     for (const p of s.points) {
@@ -746,27 +785,29 @@ function lineChart(container, series, opts = {}) {
     if (!segs.length) return;
     const d = segs.map((q, i) =>
       `${q.move ? "M" : "L"}${sx(q.x).toFixed(1)},${sy(q.y).toFixed(1)}`).join(" ");
-    // pathLength=1 归一化：CSS 用 dasharray=1 做线条绘制动画，适配任意路径长度
+    // pathLength=1 normalization: CSS draws the line animation with dasharray=1, which fits any path length
     svg += `<path pathLength="1" d="${d}" fill="none" stroke="${s.color}" stroke-width="1.8" opacity="0.95"/>`;
-    // 标记点（转折点）：miss/bad 累计线的每个失误事件画实心小点；
-    // 事件稀疏（单次 replay ≤ 100 个），点不会连成粗段；范围外不画
+    // marker dots (turning points): every miss event on the miss/bad cumulative line gets a
+    // filled dot; the events are sparse (≤ 100 per replay), so the dots never merge into a
+    // thick band; nothing is drawn outside the range
     (s.marked || []).forEach((i) => {
       const p = s.points[i];
       if (!p || p.x < xMin || p.x > xMax) return;
       svg += `<circle cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="2.5" fill="${s.color}" opacity="0.95"/>`;
     });
   });
-  // 静态标记（失败时间红线等，2026-08）：红色纵向虚线贯穿绘图区 + 底部 ✕，
-  // hover 显示 label。与 crosshair 不同：不吸附鼠标、不参与数值框。
+  // static markers (the fail-time red line and friends, 2026-08): a red vertical dashed line
+  // through the plot area + a ✕ at the bottom, with label on hover. Unlike the crosshair:
+  // it does not stick to the mouse and does not take part in the value box.
   (opts.markers || []).forEach((mk) => {
     const xpx = sx(mk.x);
-    if (xpx < pad.l || xpx > W - pad.r) return;   // 轴外不画
+    if (xpx < pad.l || xpx > W - pad.r) return;   // do not draw outside the axis
     svg += `<g class="fail-marker" data-label="${escHtml(mk.label)}">` +
       `<line x1="${xpx.toFixed(1)}" y1="${pad.t}" x2="${xpx.toFixed(1)}" y2="${(H - pad.b).toFixed(1)}" stroke="#ff3d5a" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.8"/>` +
       `<text x="${xpx.toFixed(1)}" y="${H - pad.b - 5}" fill="#ff3d5a" font-size="13" font-weight="bold" text-anchor="middle">✕</text></g>`;
   });
   svg += `</svg>`;
-  // 图例：归一化模式下附带真实数值范围（如 "刀速 (30.2–41.5 m/s)"）
+  // legend: in normalization mode it also carries the true value range (e.g. "Blade speed (30.2–41.5 m/s)")
   const legend = series.map((s) => {
     let rangeTxt = "";
     if (opts.normalize && s.rangeText) {
@@ -781,8 +822,9 @@ function lineChart(container, series, opts = {}) {
   setupMarkerTips(container, opts.markers || [], sx, pad, W);
 }
 
-/* 静态标记（失败时间红线等）的 hover tooltip：
-   复用 .chart-tip 样式；与 crosshair 完全独立（红色轴不吸附鼠标）。 */
+/* Hover tooltip for the static markers (the fail-time red line and friends):
+   reuses the .chart-tip styling; fully independent of the crosshair (the red
+   axis does not stick to the mouse). */
 function setupMarkerTips(container, markers, sx, pad, W) {
   const svg = container.querySelector("svg");
   if (!svg || !markers.length) return;
@@ -809,13 +851,13 @@ function setupMarkerTips(container, markers, sx, pad, W) {
   });
 }
 
-/* ---------------- 图表悬停 crosshair（白色竖线 + 数值框） ---------------- */
+/* ---------------- chart hover crosshair (white vertical line + value box) ---------------- */
 function setupCrosshair(container, ctx) {
   const { series, rawSeries, sx, sy, xMin, xMax, pad, W, H, opts } = ctx;
   const svg = container.querySelector("svg");
   if (!svg) return;
 
-  // 竖线 + 每序列交点圆点
+  // vertical line + an intersection dot per series
   const vline = document.createElementNS("http://www.w3.org/2000/svg", "line");
   vline.setAttribute("class", "x-crosshair");
   vline.setAttribute("y1", pad.t);
@@ -829,7 +871,7 @@ function setupCrosshair(container, ctx) {
     return c;
   });
 
-  // 数值框（HTML，绝对定位在图表容器内）
+  // value box (HTML, absolutely positioned inside the chart container)
   const tip = document.createElement("div");
   tip.className = "chart-tip";
   container.appendChild(tip);
@@ -842,7 +884,7 @@ function setupCrosshair(container, ctx) {
   vline.style.display = "none";
   dots.forEach((d) => (d.style.display = "none"));
 
-  // 二分找最近点（points 按 x 升序：时间序列窗口中心/帧时间天然有序）
+  // binary search for the nearest point (points are sorted ascending by x: time-series window centers / frame times are naturally ordered)
   const nearestIdx = (pts, x) => {
     let lo = 0, hi = pts.length - 1;
     while (lo < hi) {
@@ -856,26 +898,28 @@ function setupCrosshair(container, ctx) {
   const onMove = (e) => {
     const rect = container.getBoundingClientRect();
     const mx = e.clientX - rect.left;
-    // v1.4.1：x 值 clamp 到 [xMin, xMax]——鼠标落在图表面板边距区时
-    // 停在轴边界，不会触发"范围外"的交点对齐逻辑
+    // v1.4.1: clamp the x value to [xMin, xMax] — when the mouse is over the chart panel's
+    // padding area it stops at the axis edge instead of triggering the "out of range"
+    // intersection alignment logic
     const xVal = Math.max(xMin, Math.min(xMax,
       xMin + ((mx - pad.l) / (W - pad.l - pad.r || 1)) * (xMax - xMin)));
-    // 去掉自动吸附——crosshair 竖线直接跟随鼠标；
-    // 各序列仍取最近数据点显示数值（数值框不吸附竖线）
+    // no auto-snapping — the crosshair line follows the mouse directly;
+    // each series still takes its nearest data point to display a value (the value box does not snap to the line)
     const bestX = xVal;
     const xpx = sx(bestX);
     vline.setAttribute("x1", xpx);
     vline.setAttribute("x2", xpx);
     vline.style.display = "";
 
-    // 交点圆点 + 数值行（真实值）
+    // intersection dot + value row (true value)
     const timeTxt = opts.fmtX ? opts.fmtX(bestX) : bestX.toFixed(1);
     let rows = `<div class="tip-time">⏱ ${timeTxt}</div>`;
     series.forEach((s, i) => {
       if (!s.points.length) { dots[i].style.display = "none"; return; }
       if (s.step) {
-        // 台阶线（miss/bad 累计）：函数值 = "到该时刻为止的累计数"，
-        // 圆点对齐竖线与水平段的交点，水平段任意位置都能识别数值
+        // step line (miss/bad cumulative): the function value = "the accumulated count up to this
+        // moment"; the dot aligns with the intersection of the vertical line and the horizontal
+        // run, so the value can be read anywhere along that run
         let idx = 0;
         for (let j = s.points.length - 1; j >= 0; j--) {
           if (s.points[j].x <= bestX + 1e-9) { idx = j; break; }
@@ -891,7 +935,7 @@ function setupCrosshair(container, ctx) {
       }
       const idx = nearestIdx(s.points, bestX);
       const p = s.points[idx];
-      // 该序列在该时刻无数据点（理论上共享时间轴不会发生）
+      // this series has no data point at that moment (in theory impossible with a shared time axis)
       if (Math.abs(p.x - bestX) > (xMax - xMin) * 0.02) {
         dots[i].style.display = "none";
         return;
@@ -905,7 +949,7 @@ function setupCrosshair(container, ctx) {
     });
     tip.innerHTML = rows;
     tip.style.display = "block";
-    // 框位置：跟随鼠标 x，超右边界时翻转到左侧
+    // box position: follows the mouse x, flips to the left side when it would cross the right edge
     const tw = tip.offsetWidth || 150;
     let left = mx + 14;
     if (left + tw > rect.width - 6) left = mx - tw - 14;
@@ -913,7 +957,7 @@ function setupCrosshair(container, ctx) {
     tip.style.top = "8px";
   };
 
-  // 重绘（innerHTML 重建）会留下旧监听：先解绑再绑定
+  // a redraw (innerHTML rebuild) leaves the old listeners behind: unbind before binding
   if (container._xhMove) container.removeEventListener("mousemove", container._xhMove);
   if (container._xhLeave) container.removeEventListener("mouseleave", container._xhLeave);
   container._xhMove = onMove;
@@ -924,7 +968,7 @@ function setupCrosshair(container, ctx) {
 
 /* ---------------- mini markdown ---------------- */
 function renderMarkdown(md) {
-  // 复用全局 escHtml（原内部 esc 与它重复且少转义双引号）
+  // reuse the global escHtml (the former local esc duplicated it and escaped double quotes less often)
   const lines = escHtml(md).split("\n");
   let html = "", inList = false, inOl = false;
   const closeList = () => { if (inList) { html += "</ul>"; inList = false; } if (inOl) { html += "</ol>"; inOl = false; } };
@@ -1993,16 +2037,20 @@ function renderFatigue(f) {
    方向角（C# 世界角，0-360）；offset = 平均无符号切偏（m，BSOR 无 note
    世界坐标，无法复现原版符号判断）。 */
 
-// 9 宫格 slot 序（UpLeft,Up,UpRight,Left,Any,Right,DownLeft,Down,DownRight）
-// 方向箭头 = slicenote.svg（根目录手绘，默认 arrow 朝下，位于第三行第二列
-// = Down）。CSS 旋转（svg 朝下基准，顺时针）：Down=0 / Up=180 / Left=90 /
-// Right=270；边角 45° 倍：UpLeft=135 / UpRight=225 / DownLeft=45 / DownRight=315。
+// 9-slot order (UpLeft, Up, UpRight, Left, Any, Right, DownLeft, Down, DownRight).
+// The arrow shape below is drawn inline (500x500 viewBox), pointing DOWN by
+// default — which is the third row, second column of the 3x3 grid. CSS rotation
+// takes that downward base and turns clockwise: Down=0 / Up=180 / Left=90 /
+// Right=270; the corners are multiples of 45: UpLeft=135 / UpRight=225 /
+// DownLeft=45 / DownRight=315.
 const SLICE_DIR_CSS = [135, 180, 225, 90, 0, 270, 45, 0, 315];
 
-/* note 造型（根目录 slicenote.svg / slicenote-any.svg 内联，500x500 viewBox）：
-   主体（圆角方块 + 中心黑点）与方向箭头合成一个 svg，整体按方向旋转——
-   与游戏一致：note 方向跟随 arrow，斜向 note 的方块主体同样倾斜 45°。
-   Any（slicenote-any.svg）无箭头，不旋转。 */
+/* Note shape, inlined below (500x500 viewBox): the body (rounded square + centre
+   dot) and the direction arrow are composed into one SVG that is then rotated as
+   a whole, matching the game — the arrow leads the note, and a diagonal note's
+   square body is tilted 45° with it. "Any" has no arrow and is not rotated.
+   (v2.1.0 removed the standalone slicenote.svg / slicenote-any.svg files; the
+   paths below are the shape's single source, so do not look for those files.) */
 const SLICE_NOTE_BG =
   `<rect x="25" y="25" width="450" height="450" rx="95" ry="95" fill="#ffffff" stroke="#000000" stroke-width="12" stroke-linejoin="round"/>` +
   `<circle cx="250" cy="250" r="16" fill="#000000"/>`;
@@ -2924,15 +2972,18 @@ function settingsControl(item, key, val) {
   if (typ === "enum") {
     // 选项文案 i18n：查 set.{key}.opt.{value}；缺失（如 ai.provider 无翻译）
     // 时回退显示原始枚举值，避免显示 key 字符串
-    // item.option_meta 由后端下发每个选项的可用性（如"数据不足"的个人基准），
+    // item.option_meta 由后端下发每个选项的可用性（如证据不足的个人基准），
     // 不可用项在下拉里置灰、不响应点击；选项本身仍留在枚举里（配置值合法）
+    // reason 是稳定键（如 "insufficient"），查 scoresaber.track_* 得到当前语言
+    // 的文案；查不到就显示键本身，避免像以前那样由后端直出中文
     const meta = item.option_meta || {};
     const opts = (item.enum || []).map((o) => {
       const lk = `set.${key}.opt.${o}`;
       const label = t(lk) === lk ? o : t(lk);
       const info = meta[o] || {};
-      return { value: o, label, disabled: info.available === false,
-               reason: info.reason || "" };
+      const rk = info.reason ? `scoresaber.track_${info.reason}` : "";
+      const reason = rk ? (t(rk) === rk ? info.reason : t(rk)) : "";
+      return { value: o, label, disabled: info.available === false, reason };
     });
     // 外观与 PP 预测同源（2026-09）：不再用原生 <select>（展开列表由 OS 绘制，
     // 无法做成毛玻璃），改为「玻璃触发按钮 + 通用 openPopover 列表」。

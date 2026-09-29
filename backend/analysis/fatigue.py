@@ -46,10 +46,10 @@ def analyze_fatigue(replay: Replay, note_groups: list[dict],
     late = _segment_stats(notes, last_note - edge_seconds, last_note)
 
     def delta(key, scale=1.0):
-        e, l = early.get(key), late.get(key)
-        if e is None or l is None:
+        e, last = early.get(key), late.get(key)
+        if e is None or last is None:
             return None
-        return round((l - e) * scale, 4)
+        return round((last - e) * scale, 4)
 
     result = {
         "available": True,
@@ -99,7 +99,9 @@ def analyze_fatigue(replay: Replay, note_groups: list[dict],
 
 
 def _mean_where(values, ts, cond):
-    sel = [v for v, x in zip(values, ts) if cond(x)]
+    # strict=False: the two series are aligned by the caller; a short one must
+    # not turn a display helper into a hard failure.
+    sel = [v for v, x in zip(values, ts, strict=False) if cond(x)]
     return sum(sel) / len(sel) if sel else None
 
 

@@ -187,6 +187,23 @@ def derive_paths(instance_root: str) -> dict:
     return out
 
 
+def write_config_atomic(path: pathlib.Path, raw: dict) -> None:
+    """Atomically write a config mapping: tmp -> flush -> os.replace.
+
+    Module-level so `config/__init__.py`'s one-shot migration can reuse the same
+    durability guarantee as the settings save (a half-written config.yaml is
+    indistinguishable from a corrupt one, and the loader would then back it up
+    and start from defaults).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".yaml.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
 class ConfigService:
     """Read / modify / persist / validate configuration. config.yaml is the single source of truth."""
 
@@ -257,14 +274,8 @@ class ConfigService:
             return {}
 
     def _write_atomic(self, raw: dict) -> None:
-        """Atomic write: tmp -> flush -> os.replace."""
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.config_path.with_suffix(".yaml.tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(raw, f, allow_unicode=True, sort_keys=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, self.config_path)
+        """Atomic write: tmp -> flush -> os.replace (see write_config_atomic)."""
+        write_config_atomic(self.config_path, raw)
 
     # ---------- schema-driven read/write (§3 / §9) ----------
     def get_all_values(self) -> dict:

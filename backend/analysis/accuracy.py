@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass, field
 
 from ..bsor.models import (
-    Replay, NoteEvent, GOOD, BAD, MISS, BOMB,
+    Replay, GOOD, BAD, MISS, BOMB,
     SCORING_SLIDER_TAIL, SCORING_SLIDER_HEAD,
     SCORING_BURST_SLIDER_HEAD, SCORING_BURST_SLIDER_ELEMENT,
 )

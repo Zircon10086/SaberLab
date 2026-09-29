@@ -2,6 +2,7 @@
 report when the LLM is not configured (or fails)."""
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -28,7 +29,7 @@ def run_ai_report(repo: Repository, cfg: Config, replay_id: str,
     """
     if context is None:
         context = build_context(repo, cfg, replay_id)
-    ctx_json = __import__("json").dumps(context, ensure_ascii=False, indent=1)
+    ctx_json = json.dumps(context, ensure_ascii=False, indent=1)
 
     report_id = uuid.uuid4().hex[:12]
     base = {"report_id": report_id, "replay_id": replay_id,
@@ -53,7 +54,6 @@ def run_ai_report(repo: Repository, cfg: Config, replay_id: str,
         return {"status": "rule_based", "report_id": report_id}
 
     try:
-        import json as _json
         content = client.chat([
             {"role": "system", "content": build_system_prompt(lang)},
             {"role": "user",

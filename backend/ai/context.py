@@ -69,7 +69,6 @@ def build_context(repo: Repository, cfg: Config, replay_id: str,
     if replay is None:
         raise KeyError(f"replay 不存在: {replay_id}")
     metrics = repo.get_metrics(replay_id)
-    motion_series = repo.get_motion_series(replay_id)
 
     # Historical attempts on the same map (same difficulty)
     history = repo.previous_attempts_on_map(

@@ -53,7 +53,7 @@
       </button>
       <button class="nav-item" data-tab="scoresaber">
         <svg viewBox="0 0 500 500" fill="none">
-  <!-- 1. 外层圆角正方形轮廓 -->
+  <!-- 1. Outer rounded-square outline -->
   <rect 
     x="25" 
     y="25" 
@@ -67,8 +67,8 @@
     stroke-linejoin="round" 
   />
 
-  <!-- 2. 核心图形轮廓（透明填充，黑色描边） -->
-  <!-- 顶点：左上(118, 125) -> 右上(382, 125) -> 右侧(382, 150) -> 底部中心(250, 215) -> 左侧(118, 150) -->
+  <!-- 2. Core shape outline (transparent fill, black stroke) -->
+  <!-- Vertices: top-left(118, 125) -> top-right(382, 125) -> right(382, 150) -> bottom-center(250, 215) -> left(118, 150) -->
   <polygon 
     points="118,125 382,125 382,150 250,215 118,150" 
     fill="none" 
@@ -86,9 +86,10 @@
         <span data-i18n="nav.settings">设置</span>
       </button>
     </nav>
-    <!-- 侧栏底部整块（2026-09）：玩家卡片 + 服务器状态。
-         卡片数据来自云端同步缓存（/api/player/card），未同步过云端数据时
-         整块卡片保持隐藏（无错误态）。 -->
+    <!-- Sidebar bottom block (2026-09): player card + server status.
+         The card data comes from the cloud sync cache (/api/player/card); when
+         cloud data has never been synced the whole card stays hidden (no error
+         state). -->
     <div class="sidebar-bottom">
       <div class="player-card hidden" id="player-card">
         <div class="pc-avatar">
@@ -116,7 +117,7 @@
   <!-- ============ Main ============ -->
   <main class="main-content">
 
-    <!-- ====== 总览 ====== -->
+    <!-- ====== Overview ====== -->
     <section id="tab-overview" class="tabpane active">
       <h1 class="page-title" data-i18n="overview.title">总览</h1>
       <p class="page-desc" data-i18n="overview.desc">本地 Replay 分析实验室 · 数据全部本地计算</p>
@@ -147,16 +148,18 @@
               <span data-i18n="btn.search">搜索</span>
             </button>
           </div>
-          <!-- 分页控件（v1.6.0：从列表底部移到顶部行；grid 三栏对称布局，
-               左栏=标题/模式/搜索，中栏=分页，右栏=空占位 → 分页严格水平居中，
-               不同数量 replay 不再影响分页位置） -->
+          <!-- Pagination controls (v1.6.0: moved from the bottom of the list to the
+               top row; symmetric three-column grid layout — left column = title /
+               mode / search, middle = pagination, right = empty placeholder → the
+               pagination is strictly horizontally centered, and the number of
+               replays no longer affects its position) -->
           <div id="pagination" class="pagination"></div>
         </div>
         <div id="recent-replays" class="day-groups" data-i18n="common.loading">加载中…</div>
       </div>
     </section>
 
-    <!-- ====== 详情 ====== -->
+    <!-- ====== Detail ====== -->
     <section id="tab-detail" class="tabpane">
       <div id="detail-empty" class="empty" data-i18n="detail.empty">在总览或历史中点击一个 Replay 查看详情。</div>
       <div class="detail-topbar" id="detail-topbar" style="display:none">
@@ -166,17 +169,19 @@
         </button>
       </div>
       <div id="detail-content" class="hidden">
-        <!-- 详情骨架由 app.js 渲染 -->
+        <!-- The detail skeleton is rendered by app.js -->
       </div>
     </section>
 
-    <!-- ====== 历史 ====== -->
+    <!-- ====== History ====== -->
     <section id="tab-history" class="tabpane">
       <h1 class="page-title" data-i18n="history.title">历史</h1>
       <p class="page-desc" data-i18n="history.desc">全部 Replay 游玩记录</p>
       <div class="surface">
-        <!-- 与总览一致：三栏对称 grid（左栏=筛选，中栏=分页 → 严格水平居中，右栏空占位），
-             分页置顶显示；历史页分页按数量分页、一页 300 条（2026-09） -->
+        <!-- Same as the overview: a symmetric three-column grid (left = filters,
+             middle = pagination → strictly horizontally centered, right = empty
+             placeholder), with the pagination shown at the top; the history page
+             paginates by count, 300 per page (2026-09) -->
         <div class="surface-title">
           <div class="title-left">
             <div class="filters">
@@ -195,7 +200,7 @@
       </div>
     </section>
 
-    <!-- ====== 对比 ====== -->
+    <!-- ====== Compare ====== -->
     <section id="tab-compare" class="tabpane">
       <h1 class="page-title" data-i18n="compare.title">对比</h1>
       <p class="page-desc" data-i18n="compare.desc">选择两次游玩进行指标对比（B − A）</p>
@@ -220,7 +225,7 @@
       <div id="ss-scores" class="surface"></div>
     </section>
 
-    <!-- ====== 设置 ====== -->
+    <!-- ====== Settings ====== -->
     <section id="tab-settings" class="tabpane">
       <h1 class="page-title" data-i18n="settings.title">设置</h1>
       <p class="page-desc" data-i18n="settings.desc">配置 SaberLab 运行环境</p>
@@ -267,8 +272,10 @@
       </div>
 
       <div class="actions">
-        <!-- 2026-09：设置项改为「焦点离开即自动保存」（app.js autoSaveOnBlur → saveSettings），
-             原先的「保存全部设置」按钮与旁边的保存提示已移除，保存结果用 toast 反馈。 -->
+        <!-- 2026-09: settings now auto-save as soon as focus leaves the field
+             (app.js autoSaveOnBlur → saveSettings); the former "save all settings"
+             button and the save hint next to it were removed, and the save result is
+             reported through a toast. -->
         <button id="btn-set-restart" data-i18n="settings.restart" data-i18n-title="settings.restart_title">重启 SABER LAB</button>
       </div>
     </section>

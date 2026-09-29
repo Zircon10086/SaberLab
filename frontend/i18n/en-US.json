@@ -428,7 +428,9 @@
     "数据库为空：请先点击总览「⚡ 一键刷新」完成首次扫描": "Database is empty — click \"⚡ Quick Refresh\" on the overview to run the first scan",
     "配置中无该设置项，旧回放会被保留": "The setting is absent from the config, so older replays are kept",
     "未找到 BeatLeader 配置，可忽略": "BeatLeader config not found — ignore if the mod is not installed",
-    "旧回放会被删除，请关闭游戏内 BeatLeader 的「keep latest only」": "On = older replay files of the same map & difficulty are deleted on every save. Turn \"keep latest only\" off in the in-game BeatLeader replay settings."
+    "旧回放会被删除，请关闭游戏内 BeatLeader 的「keep latest only」": "On = older replay files of the same map & difficulty are deleted on every save. Turn \"keep latest only\" off in the in-game BeatLeader replay settings.",
+    "请求已被拒绝，操作没有执行": "Request refused; the action was not performed",
+    "该文件不在回放目录中": "That file is not inside a replay directory"
   },
   "msg": {
     "设置已保存。": "Settings saved.",

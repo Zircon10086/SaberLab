@@ -7,6 +7,8 @@ validates and reads/writes against it.
 """
 from __future__ import annotations
 
+from . import LOOPBACK_HOSTS
+
 # type set:
 #   string / integer / float / boolean / enum / directory / file / url / secret
 
@@ -155,8 +157,10 @@ SETTINGS_SCHEMA: list[dict] = [
         "restart_required": False,
         "required": False,
         "sensitive": False,
-        # 注意：必须留在 ui.* 而不是 analysis.*——后者一变更就会清空分析缓存
-        # （metrics/motion_series 清空 + replay 全部转 pending），而它不参与任何分析计算
+        # NOTE: this key must stay under ui.*, never under analysis.* — changing any
+        # analysis.* value wipes the analysis cache (metrics/motion_series cleared,
+        # every replay back to pending), while this threshold takes part in no
+        # analysis at all.
         "group": "界面",
         "default": 60,
     },
@@ -176,13 +180,17 @@ SETTINGS_SCHEMA: list[dict] = [
     {
         "key": "server.host",
         "label": "监听地址",
-        "type": "string",
-        "description": "FastAPI 监听地址（默认 127.0.0.1）",
+        "type": "enum",
+        # Only the loopback names: the request origin guard refuses any request
+        # whose Host is not loopback, so a wider bind address would produce an app
+        # that cannot be reached (2026-09). Same source as the guard and loader.
+        "enum": list(LOOPBACK_HOSTS),
+        "description": "本机监听地址（默认 127.0.0.1）。程序只接受本机访问，其他设备无法连接",
         "restart_required": True,
         "required": False,
         "sensitive": False,
         "group": "服务器",
-        "default": "127.0.0.1",
+        "default": LOOPBACK_HOSTS[0],
     },
     {
         "key": "server.port",

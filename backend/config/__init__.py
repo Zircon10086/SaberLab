@@ -8,6 +8,29 @@ from dataclasses import dataclass, field
 
 import yaml
 
+#: The only host names the app binds to and accepts requests from. The request
+#: origin guard (backend/main.py) refuses every request whose Host is not in this
+#: set, so a bind address outside it leaves the UI unable to reach the server at
+#: all. Single source: the guard, the settings schema and the loader all read it.
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _loopback_host(value: object) -> str:
+    """Keep ``server.host`` inside LOOPBACK_HOSTS.
+
+    A config written before 2026-09 could name any interface (e.g. 0.0.0.0, to
+    reach the app from another device). With the origin guard in place such a
+    value produces an app that looks broken and says nothing, so fall back to the
+    default and leave a trace instead of honouring it.
+    """
+    host = str(value or "").strip()
+    if host in LOOPBACK_HOSTS:
+        return host
+    print(f"[config] server.host {host!r} is not a loopback address; using "
+          f"{LOOPBACK_HOSTS[0]!r} (the app only accepts local requests)", flush=True)
+    return LOOPBACK_HOSTS[0]
+
+
 # Project root resolution:
 # - Running from source: backend/config/__init__.py -> three parent levels = project root
 # - PyInstaller bundle: writable data (data/, config/) must live next to the exe,
@@ -100,7 +123,7 @@ class Config:
     # Optional second replay source (LocalLeaderboard mod, 2026-09):
     # derived from instance_root, auto-enabled when the directory exists;
     # it stores one copy per session (no exit replays) and doubles as a
-    # safety copy for missing-file repair (HANDOFF §4.25 待办 2).
+    # safety copy for missing-file repair (HANDOFF §4.25, to-do item 2).
     local_leaderboard_dir: str = ""
     scoresaber_id: str = ""
     player_name_fallback: str = ""
@@ -215,8 +238,11 @@ def load_config(path: pathlib.Path | None = None) -> Config:
             ui["session_gap_minutes"] = moved
         raw["ui"] = ui
         try:
-            path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
-                            encoding="utf-8")
+            # Lazy import: config/service.py imports this module, so a top-level
+            # import would be circular. Reuse its atomic write — a half-written
+            # config.yaml would be backed up as "corrupt" on the next load.
+            from .service import write_config_atomic
+            write_config_atomic(path, raw)
             print("[config] migrated analysis.session_gap_minutes -> ui.session_gap_minutes",
                   flush=True)
         except OSError as e:      # read-only config dir: keep the in-memory value
@@ -253,7 +279,7 @@ def load_config(path: pathlib.Path | None = None) -> Config:
             ui.get("session_gap_minutes",
                    analysis.get("session_gap_minutes", 60))))),
         fatigue_edge_seconds=float(analysis.get("fatigue_edge_seconds", 30)),
-        host=server.get("host", "127.0.0.1"),
+        host=_loopback_host(server.get("host", LOOPBACK_HOSTS[0])),
         port=int(server.get("port", 6980)),
         ai_provider=provider,
         ai_base_url=ai.get("base_url") or DEFAULT_AI_BASE_URLS.get(provider, ""),

@@ -257,7 +257,7 @@ class Repository:
 
         # --- player_palette_cache: ACC-weighted skill ratings (2026-09) ---
         # Additive only: NULL means "that track has insufficient direct evidence",
-        # which the UI turns into "数据不足" and a disabled palette option.
+        # which the UI turns into its "not enough data" label and a disabled option.
         cols = {row["name"] for row in c.execute("PRAGMA table_info(player_palette_cache)")}
         for column, decl in (
             ("r80", "REAL"), ("r94", "REAL"), ("r96", "REAL"),

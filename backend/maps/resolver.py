@@ -261,7 +261,10 @@ class MapResolver:
             stats["scanned"] += 1
             try:
                 self._process_folder(folder, sc_cache, stats, force_recompute)
-            except Exception:  # noqa: BLE001 - one failing level must not abort the whole pass
+            except Exception as e:  # noqa: BLE001 - one failing level must not abort the whole pass
+                # Counted in stats, but the reason would otherwise be lost: a
+                # "3 maps failed to scan" report needs the cause to be actionable.
+                print(f"[maps] scan failed for {folder.name}: {e}", flush=True)
                 stats["errors"] += 1
         stats["duration_sec"] = round(time.time() - t0, 2)
         return stats
