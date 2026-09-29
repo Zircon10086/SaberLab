@@ -75,6 +75,8 @@ frontend/i18n/ 语言对照表（zh-CN/en-US/ja-JP.json，含 lang.name 自述�
 （仓库外）Local-ChroViewer/   3D 回放外部组件（独立 GPL-2.0 项目，Vite 构建；
                         后端按候选路径自动检测其 dist/，见 §5.6）
 tests/         单元测试（黄金夹具回归 + schema 自举/升级）
+site/          项目网站（GitHub Pages，独立于应用，见 §10）
+.github/workflows/pages.yml  网站构建与发布流程
 config/        config.yaml
 packaging/     PyInstaller spec + 打包文档
 _tools/        调试工具（cdp_stack/chro_smoke 等）
@@ -499,9 +501,14 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
 - **id 命名（2026-09-14 用户定调）**：对外一律 `personal80` / `personal94` / `personal96`
   （配置枚举、`/api` 载荷、i18n、`option_meta`），为将来引入别的目标 ACC 留出空间；
   **缓存列名保持短名 `r80`/`r94`/`r96`**（内部存储细节，且在线库已是这套列名）——
-  翻译只发生在 `backend/main.py` 的 `TRACK_CACHE_COLUMNS` / `_track_column()` 一处。
-  `_palette_public_payload()` 还会把旧缓存里 `method='r80'` 这类短名映射回公开 id，
-  否则改名后旧行的"当前生效档"会读不出来。
+  翻译只发生在 `backend/services/skill_tracks.py` 的 `TRACK_CACHE_COLUMNS` /
+  `track_column()` 一处。`palette_public_payload()` 还会把旧缓存里 `method='r80'`
+  这类短名映射回公开 id，否则改名后旧行的"当前生效档"会读不出来。
+- **接线位置（2026-09 瘦身）**：这些函数原本长在 `backend/main.py`，现已下沉到
+  `backend/services/skill_tracks.py`（本文件 §5.13 描述的全部缓存/转译/可用性逻辑）
+  与 `backend/services/energy_curve.py`（时间轴能量曲线的取样与有界缓存）。
+  两个模块都把 `repo` 作为**显式参数**接收，不再读路由层的模块级全局；
+  路由层只保留调用。改动这两块逻辑时改服务层，不要在 `main.py` 里重建副本。
 - **旧 `classify_player` 已停用保留**（模块头有 DEPRECATED 说明）：不再被运行时调用，
   测试仍能跑；新功能稳定一个周期后删除（用户决定）。
 - **参数校准**：`_tools/calibrate_skill_model.py`。默认读**云端缓存**（与线上模型同源，
@@ -567,7 +574,8 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
     （notes/metrics/windows/motion_series/accuracy_curve/ai_reports），
     `experiments` 的 baseline/candidate 引用置空（实验记录本身保留）。
     **先成功进回收站才删记录**——中途失败不会留下"记录没了但文件还在"；
-    文件本就不在时允许仅清理记录。内存里的 `_energy_curve_cache` 同步失效
+    文件本就不在时允许仅清理记录。内存里的能量曲线缓存（`services/energy_curve.py`
+    的模块级 `_CACHE`）经 `energy_curve.clear(replay_id)` 同步失效
   - **`explorer /select` 必须拆成两个 argv 项**：`["explorer.exe", "/select,", path]`。
     写成单参数 `"/select," + path` 会被 explorer 判为无效开关并**回退打开"文档"目录**
     （2026-09 用户报告的 bug）。这一条极易被"整理代码"时改坏，改动前先看这里
@@ -736,6 +744,33 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
      （包括将来的导出自检）都无法区分它与真 Key。需要 key 形状时在运行时拼装
      （`"sk-" + "a1b2c3…"`），源码里不要出现字面量（现有测试已按此写）。
 
+6. **发布后先更新 HANDOFF §1，再继续开发**（2026-09 加固，同类事故已两次）：
+   每完成一次发布，第一件事是把 `docs/HANDOFF.md` §1 的**当前快照**改成与实际一致
+   （HEAD 提交、工作树状态、测试基线计数），然后才动下一轮代码。HANDOFF §1 声称的
+   状态与 `git log -1` 不符时，以仓库为准——旧快照要求过"不要清理工作树"这类
+   保护性动作，会让下一位开发者拒绝正常操作。**不要**只改 §1 以外的章节。
+7. **发布前跑测试纳管差集检查**（2026-09 加固，同类漏项已两次）：
+   `tests/` 是否进仓库由 `.gitignore` 决定；发布前必须确认**本地测试文件集合与
+   仓库跟踪集合完全相等**，否则公开仓库跑的测试集与本地不一致。
+   ⚠️ 不要用 `git ls-files --others --exclude-standard tests/` 做这个检查——
+   被 `.gitignore` 忽略的目录在该命令下**恒为空**，漏掉的文件根本不会出现。
+   正确做法是比较两个集合：
+
+   ```bat
+   .venv\Scripts\python.exe -c "import pathlib,subprocess; local={p.name for p in pathlib.Path('tests').glob('*.py')}; tracked={pathlib.Path(l).name for l in subprocess.run(['git','ls-files','tests'],capture_output=True,text=True).stdout.split()}; print('missing:', sorted(local-tracked))"
+   ```
+8. **文档语言与代码注释语言**（2026-09-16 用户决策，规则原文见 `AGENTS.md` §16.1）：
+   - **文档只有中文**：`AGENTS.md` 与 `docs/` 下的文件（两个 README 除外）只保留中文版。
+     **不要新增译文副本，也不要保留已有的**——副本会静默过期，需要别的语言时用工具翻
+     一份即可。删除译文前必须先确认它是中文版的子集（本章程曾因此藏过一条只存在于英文
+     版的记录）。
+   - **README 是唯一例外**：`README.md`（英文）与 `README.zh.md`（中文）都维护。
+   - **代码注释与文档字符串一律英文**：`#`、`//`、`/* */`、`<!-- -->` 与 Python
+     docstring。读代码不需要切换语言。
+   - **用户可见文案仍是中文**（§9.1）：界面文案是产品面，不是文档。特别注意 `err` /
+     `msg` / `task.current` 三段的**中文原文就是查表键**，改一个字译文就静默失效
+     （由 `tests/test_i18n_mapping.py` 兜住）。
+
 ## 9. 常见坑速查
 
 1. **venv 无 pip**：装包一律 `py -3 -m pip --python .venv\Scripts\python.exe install ...`
@@ -749,3 +784,93 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
 5. **打包**：`uvicorn.Config(app=app)` 传对象而非导入字符串（frozen 下不可解析）；
    `PROJECT_ROOT` 在 frozen 下 = exe 同目录
 6. **控制台编码**：中文输出在 GBK 控制台正常；管道重定向时确认编码/加 flush
+7. **`server.host` 只能是回环名**（2026-09）：来源闸门拒绝一切非回环 Host，所以
+   `0.0.0.0` 之类的监听地址会让界面完全连不上、且没有任何提示。设置项已收紧为本机
+   枚举，加载时越界值回退到默认并打日志；回环集合由 `backend/config/__init__.py` 的
+   `LOOPBACK_HOSTS` 单点定义，闸门与设置 schema 都读它（改集合只改这一处）。
+   启动器 `host.py` 固定绑回环，不受该设置影响——**不要把闸门放开去支持局域网访问**，
+   本程序是本地应用。
+
+## 10. 项目网站（GitHub Pages，2026-09）
+
+项目宣传网站放在 `site/`，与应用本体完全独立：构建脚本（`build.py` / `site_charts.py`）
+不 import `backend/`、不读用户数据，也不参与应用打包。唯一的例外是本地开发工具
+`site/tools/export_run.py`（见下文"真实一局"），它不在发布流程里运行。
+发布地址 `https://zircon10086.github.io/SaberLab/`（仓库子路径）。
+
+页面顺序：开场切割动画 → 首屏读数面板（一刀的 Pre / Center / Post）→ 真实一局
+（逐刀图表 + 4×3 网格）→ 工作方式 → 应用截图 → 功能 → 下载。视觉语言是"测量仪器"：
+细线、角标、等宽读数；红/蓝只表示左/右手，琥珀色只表示丢分。
+
+```bat
+.venv\Scripts\python.exe site\build.py           :: 构建到 site\dist（已被 .gitignore 的 dist/ 覆盖）
+.venv\Scripts\python.exe site\build.py --serve   :: 构建并在 http://127.0.0.1:8000/SaberLab/ 预览
+```
+
+- **纯静态 + 零依赖**：`site/build.py` 只用标准库，Pages 流程只需 runner 自带的
+  `python3`。模板在 `site/templates/`，文案在 `site/i18n/<语言>.json`（扁平键），
+  语言与路径在 `site/site.json`（默认语言在根目录，其余语言各占一个子目录，如 `zh/`）。
+- **构建即闸门**：某语言缺键、有键没被模板用到、未知占位符、坏的相对链接/图片
+  （含 `srcset`）、坏的页内锚点——任何一项都让构建失败，于是发布流程不会上线半翻译
+  或断链的页面。`tests/test_site_build.py` 证明每道闸门都会真的触发。
+- **转义规则**：文案值默认 HTML 转义；只有以 `_html` 结尾的键可以含标签，且只能嵌套
+  上下文占位符（`{{repo_url}}` 等），不能嵌套别的文案键。
+- **链接用相对路径**：普通页面的 `{{root}}` 是 `./` / `../`，所以从磁盘直接打开
+  `dist/` 也能看；`404.html` 会被任意 URL 返回，因此用绝对子路径 `/SaberLab/`。
+  以后换自定义域名，只改 `site.json` 的 `base_url`。
+- **404 只有一张**：GitHub Pages 只认根目录的 `404.html`，它包含每种语言各一段
+  （用 `templates/_not_found_block.html` 按语言渲染），标题保持语言中立。
+- **截图是派生物**：`site/assets/img/*.webp` 由 `docs/screenshots/*.png` 生成
+  （原图 3840px、共 12MB → 两档宽度共约 660KB）。换截图后重新生成：
+
+  ```bash
+  for n in overview replay chro; do for w in 1920 960; do
+    ffmpeg -y -i docs/screenshots/$n.png -vf "scale=$w:-2:flags=lanczos" \
+      -c:v libwebp -quality 82 -compression_level 6 site/assets/img/$n-$w.webp; done; done
+  ffmpeg -y -i docs/screenshots/saberlab-logo-transparent.png -vf "scale=972:-2:flags=lanczos" \
+    -c:v libwebp -quality 90 site/assets/img/logo.webp
+  ffmpeg -y -i docs/screenshots/overview.png -vf "scale=1200:-2:flags=lanczos,crop=1200:630:0:0" \
+    -q:v 3 site/assets/img/og.jpg
+  ```
+- **发布流程** `.github/workflows/pages.yml`：只在 `main` 上 `site/**` 或流程文件本身
+  变化时运行（也可手动触发）；构建 → 上传产物 → 部署。第三方 action 全部**固定到
+  提交 SHA**（注释里写版本号），升级时同时改 SHA 与注释。仓库需一次性设置
+  **Settings → Pages → Source：GitHub Actions**，默认 token 无法替你打开 Pages。
+- **网站文案**：读者是潜在用户，规则沿用 AGENTS §9.1 的精神——只写已经实现的功能，
+  不写计划；数字与说法以 README 与本文档为准。当前没有任何统计/追踪脚本、也不加载
+  外部字体或 CDN；要接入属于产品决策（本地优先是卖点，先问用户）。
+- **开场动画** `site/assets/intro.js`（WebGL2 手写，无第三方库）：蓝色光剑慢动作切开
+  方块，HUD 按游戏计分口径依次测出切前挥刀、离中心距离、切后跟随，读数面板逐行点亮、
+  总分计数，然后页面在面板周围淡入。
+  - **几何取自读数面板**的 `data-pre-deg` / `data-center-cm` / `data-post-deg`；面板上
+    印的分数、进度条与总分由 `tests/test_site_build.py` 用
+    `backend.analysis.scoring.cut_scores` 按官方规则核对。换示例刀时改这三个属性和
+    面板数字，二者不一致测试会失败——动画、HUD 与印刷数字不可能各说各的。
+  - **何时不播**：每个标签页会话只播一次（sessionStorage `saberlab.intro`）；带 `#`
+    的深链、`prefers-reduced-motion`、没有 WebGL2 或浮点渲染目标、着色器/上下文任何
+    错误，都直接显示页面。`<head>` 内联脚本另设 2.5 s 兜底：intro.js 没接管就撤掉遮罩。
+    无 JS 时页面原样可读。播放中按键（Tab 除外）、点击、滚轮、触摸、切走标签页、
+    明显改变窗口尺寸都会跳过；面板上的「重播」可再看。
+  - **可复现**：画面是时间轴位置的纯函数，`?intro-t=2.4` 冻结在 2.4 s，
+    `window.__saberlabIntro.seek(t)` 移动冻结帧（仅冻结模式暴露）。
+    `_tmp/intro_frames.py [desktop|phone] [t…]` 批量截帧到 `_tmp/intro_*.png`。
+  - **构图**：相机用离轴镜头把方块、手与挥刀弧线框进读数面板让出的区域（桌面 >980px
+    面板在右；更窄时面板缩小贴底）；HUD 标签被限制在该区域内，不会钻到面板下面。
+  - **滚动条**：播放期间锁滚动，落地时滚动条回来造成的布局位移由读数面板的 FLIP
+    过渡吸收。不要改用 `scrollbar-gutter: stable`：保留的滚动条槽画在固定定位的舞台
+    之上，会在右侧留下一条暗边（已踩过）。
+- **真实一局**：`site/data/run.json` 是开发者本人一局回放的逐刀数据，由
+  `.venv\Scripts\python.exe site\tools\export_run.py <回放 ID 前缀>` 经 Repository
+  从本地库导出（只读；不含玩家名/ID、文件路径与回放 ID；去掉炸弹与连击段元素）。
+  `site/site_charts.py` 在构建时把它排成内联 SVG 图表、网格与各项数字——纯排版，唯一
+  的派生量是"最弱的 10 秒"（按起点滑动的 10 s 均分，Miss/Bad 计 0，取第一个最小值）。
+  数据字段缺失或与文案键重名都会让构建失败。换一局：重新导出再构建。
+- **字体**：字标用 Beon（Bastien Sozeau，SIL OFL 1.1），自托管在
+  `site/assets/fonts/`，许可证 `OFL.txt` 同目录随站点发布，页脚注明出处；正文用系统
+  字体栈。
+- 渲染验收（非应用 UI，可用 headless Edge）：`_tmp/verify_site.py` 在桌面 1440px 与
+  手机 375px 下检查样式生效、单个 h1、图片全部解码、滚动后无未揭示元素、无横向溢出、
+  无控制台错误、404 与语言切换；再验开场动画的完整播放（桌面/手机，终态逐项核对）、
+  Escape 跳过、重播 + 跳过按钮、二次访问、深链、减少动态效果、无 WebGL2、无 JS，
+  以及图表悬停读数。需要带 WebGL2 的 headless Edge：本机
+  `_tools/start_headless_edge.ps1` 启动的实例即为硬件 WebGL2。

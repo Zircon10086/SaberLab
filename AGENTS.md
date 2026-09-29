@@ -32,7 +32,7 @@ Your primary objective is:
 
 
 
-> \\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\*Extend SaberLab without breaking SaberLab.\\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\*
+> **Extend SaberLab without breaking SaberLab.**
 
 
 
@@ -1123,6 +1123,31 @@ Do not update documentation merely to make the diff look larger.
 
 Documentation should describe actual behavior, not planned behavior, unless explicitly marked as a roadmap.
 
+## 16.1 Language Policy (2026-09-16, user decision)
+
+Two languages, two audiences. Never maintain one document in both.
+
+* **Documents are Chinese.** `AGENTS.md` and everything under `docs/` (except the
+  two READMEs) is written in Chinese, and only in Chinese. Do not create a translated
+  twin, and do not keep one: a reader who needs another language can run a translator
+  over the single source, whereas a second copy is a file that silently drifts out of
+  date. When an English twin already exists, confirm it is a subset of the Chinese
+  version and then delete it.
+* **The README is the only exception** — `README.md` (English) and `README.zh.md`
+  (Chinese) are both maintained; they are the project's public face.
+* **Code comments and docstrings are English.** Everything a maintainer reads while
+  reading code — `#` comments, `//`, `/* */`, `<!-- -->` blocks and Python
+  docstrings — is written in English, so understanding the code never requires
+  switching languages.
+* **User-facing text stays Chinese.** Strings the app renders to a player are a
+  product surface, not documentation, and they follow §9.1. In particular the Chinese
+  originals in the `err` / `msg` / `task.current` i18n sections are lookup KEYS:
+  editing one silently breaks its translation (guarded by
+  `tests/test_i18n_mapping.py`).
+
+An English comment explaining a Chinese UI string is correct. An English UI string,
+or a Chinese code comment, is not.
+
 
 
 \---
@@ -1381,29 +1406,29 @@ Before considering a task complete, verify:
 
 ```text
 
-\\\\\\\\\\\\\\\[ ] The implementation solves the requested problem.
+- [ ] The implementation solves the requested problem.
 
-\\\\\\\\\\\\\\\[ ] Existing architecture is preserved.
+- [ ] Existing architecture is preserved.
 
-\\\\\\\\\\\\\\\[ ] No unnecessary files/modules were introduced.
+- [ ] No unnecessary files/modules were introduced.
 
-\\\\\\\\\\\\\\\[ ] No unrelated behavior was changed.
+- [ ] No unrelated behavior was changed.
 
-\\\\\\\\\\\\\\\[ ] Original replay data remains untouched.
+- [ ] Original replay data remains untouched.
 
-\\\\\\\\\\\\\\\[ ] Deterministic analysis remains deterministic.
+- [ ] Deterministic analysis remains deterministic.
 
-\\\\\\\\\\\\\\\[ ] API boundaries remain intact.
+- [ ] API boundaries remain intact.
 
-\\\\\\\\\\\\\\\[ ] Database/config conventions remain intact.
+- [ ] Database/config conventions remain intact.
 
-\\\\\\\\\\\\\\\[ ] Plugin boundaries remain intact.
+- [ ] Plugin boundaries remain intact.
 
-\\\\\\\\\\\\\\\[ ] Relevant tests/checks pass.
+- [ ] Relevant tests/checks pass.
 
-\\\\\\\\\\\\\\\[ ] User-visible behavior is documented when necessary.
+- [ ] User-visible behavior is documented when necessary.
 
-\\\\\\\\\\\\\\\[ ] No secrets or sensitive local data were added.
+- [ ] No secrets or sensitive local data were added.
 
 ```
 
@@ -1447,5 +1472,5 @@ Its architecture, data contracts, deterministic analysis, and accumulated histor
 
 
 
-> \\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\*Build on SaberLab. Do not fight SaberLab.\\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\*
+> **Build on SaberLab. Do not fight SaberLab.**
 
