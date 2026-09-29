@@ -160,14 +160,19 @@ main[id] { scroll-margin-top: 76px; }
 
 /* ---- readout: one illustrative cut ---- */
 .readout { padding: 22px 22px 18px; box-shadow: 0 30px 80px -40px rgba(61, 155, 255, 0.45); }
-.readout-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.readout-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-bottom: 14px; }
+.readout-head > * { white-space: nowrap; }   /* narrow screens wrap the row, not the words */
 .readout-title { font-size: 0.8rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-2); margin: 0; }
 .readout-tag, .readout-replay {
   font-size: 0.7rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
   border: 1px solid var(--line-strong); border-radius: 99px; padding: 1px 8px;
 }
-.readout-replay { margin-left: auto; background: none; cursor: pointer; font-family: var(--mono); }
-.readout-replay:hover { color: var(--text); border-color: rgba(140, 196, 255, 0.5); }
+/* a real control, not a tag: larger and in the accent colour */
+.readout-replay { margin-left: auto; background: none; cursor: pointer; font-family: var(--mono);
+                  font-size: 0.8rem; padding: 5px 14px; color: var(--blue-hi);
+                  border-color: rgba(61, 155, 255, 0.45); }
+.readout-replay:hover { color: var(--text); border-color: rgba(140, 196, 255, 0.75);
+                        background: rgba(61, 155, 255, 0.1); }
 .readout-row {
   display: grid; grid-template-columns: 5.2em minmax(0, 1fr) auto; align-items: baseline;
   column-gap: 12px; row-gap: 6px; padding: 12px 0; border-top: 1px solid var(--line);

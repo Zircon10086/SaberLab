@@ -228,6 +228,12 @@ frontend/
 └── Main SaberLab UI
 
 
+site/
+
+└── Public project website (GitHub Pages; static, stdlib-only build;
+    independent of the app, see docs/DEVELOPMENT.md §10)
+
+
 plugins/
 
 └── First-party plugins (detected & loaded at startup by convention;
@@ -471,6 +477,37 @@ Rules:
 * Use the existing HTTP/API contract.
 * Keep UI state separate from persistent backend state.
 * Do not introduce a second communication mechanism merely for convenience.
+
+
+
+\---
+
+
+
+## Website (`site/`)
+
+
+
+The public project website, published to GitHub Pages. It is a separate product
+surface, not part of the app.
+
+
+
+Rules:
+
+
+
+* Keep the build standard-library only and never import `backend/` from the build;
+  the one exception is the local tool `site/tools/export_run.py`, which is not part of
+  the publishing workflow.
+* The site only claims features that already ship; numbers come from the README and
+  `docs/DEVELOPMENT.md`.
+* No analytics, tracking or third-party CDNs/fonts without an explicit user decision
+  (local-first is part of what the site promises).
+* A push to `main` that touches `site/**` redeploys the live site: treat site edits as
+  public changes, and run the site checks (`docs/DEVELOPMENT.md` §10) before pushing.
+* Any drawing of a Beat Saber note uses the game's solid-wedge arrow outline
+  (`frontend/app.js` `SLICE_NOTE_ARROW`); tests pin the icon and the intro to it.
 
 
 

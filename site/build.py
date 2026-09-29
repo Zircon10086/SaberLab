@@ -71,6 +71,19 @@ def load_site(src: Path) -> dict:
     for code, meta in langs.items():
         if meta["path"] and not meta["path"].endswith("/"):
             raise BuildError(f"site.json: path of {code} must end with '/'")
+    # "detect": primary browser languages (lowercase prefixes, e.g. "zh" covers zh-CN /
+    # zh-TW / zh-HK) that the default-language page sends to this language.
+    seen: dict[str, str] = {}
+    for code, meta in langs.items():
+        prefixes = meta.get("detect", [])
+        if prefixes and code == default:
+            raise BuildError(f"site.json: {code} is the default language; it needs no detect list")
+        for p in prefixes:
+            if not isinstance(p, str) or not re.fullmatch(r"[a-z]{2,3}(-[a-z0-9]+)*", p):
+                raise BuildError(f"site.json: detect prefix {p!r} of {code} must be a lowercase language tag")
+            if p in seen:
+                raise BuildError(f"site.json: detect prefix {p!r} is claimed by both {seen[p]} and {code}")
+            seen[p] = code
     return site
 
 
@@ -131,8 +144,26 @@ def page_context(site: dict, code: str, page: str, absolute: bool) -> tuple[dict
         "license_url": repo + "/blob/main/LICENSE",
         "hreflang": hreflang,
         "lang_switch": "\n".join(switch),
+        "lang_pick": _lang_pick(site, code, page, root) if not absolute else "null",
     }
-    return ctx, {"hreflang", "lang_switch"}
+    return ctx, {"hreflang", "lang_switch", "lang_pick"}
+
+
+def _lang_pick(site: dict, code: str, page: str, root: str) -> str:
+    """JSON for the head script that picks a language on arrival (`null` = stay here).
+
+    Only the default-language page picks: its URL is the one visitors type, bookmark and
+    get from search, while an explicit /zh/ link must keep working for everyone. `urls`
+    maps each other language to its relative page URL; `detect` maps browser-language
+    prefixes to those languages; `home` is the site root, for the same-site referrer test.
+    """
+    langs, default = site["languages"], site["default_lang"]
+    if code != default:
+        return "null"
+    others = {c: root + _page_url(site, c, page) for c in langs if c != default}
+    detect = {p: c for c, meta in langs.items() for p in meta.get("detect", [])}
+    data = json.dumps({"home": root, "urls": others, "detect": detect}, ensure_ascii=False)
+    return data.replace("<", "\\u003c")   # inline <script>: never let data close the tag
 
 
 def render(template: str, ctx: dict, raw: set, table: dict, used: set, name: str) -> str:

@@ -5,6 +5,14 @@
   "use strict";
   var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  /* ---- language switcher: remember the choice, so the site root opens in it next time
+     (read by the head script of the default-language page) ---- */
+  Array.prototype.forEach.call(document.querySelectorAll(".lang-switch a[hreflang]"), function (a) {
+    function remember() { try { localStorage.setItem("saberlab.lang", a.hreflang); } catch (e) { /* blocked */ } }
+    a.addEventListener("click", remember);
+    a.addEventListener("auxclick", remember);   // middle click: opens in a new tab
+  });
+
   /* ---- reveals: only elements that start below the fold are hidden first, so a
      reload in the middle of the page never blanks what is already on screen ---- */
   var targets = [document.getElementById("run-chart"),

@@ -25,9 +25,31 @@
   <link rel="apple-touch-icon" href="{{root}}assets/apple-touch-icon.png">
   <link rel="stylesheet" href="{{root}}assets/site.css">
   <script>
-    /* The opening cut plays once per tab session, never with reduced motion or a deep
-       link. intro.js must claim it (class intro-live) within 2.5 s or the page shows. */
-    (function (d) {
+    (function (d, pick) {
+      /* Language on arrival (default-language page only; pick is null elsewhere): a visit
+         from another page of this site stays put, otherwise the language the visitor last
+         chose in the switcher (site.js stores it), otherwise the browser's primary
+         language. Runs first, so a redirect happens before the intro is armed. */
+      try {
+        if (pick && d.referrer.indexOf(new URL(pick.home, location.href).href) !== 0) {
+          var want = null, pref = localStorage.getItem("saberlab.lang");
+          if (pref) want = pick.urls[pref] || null;   // the default language is not in urls: stay
+          else {
+            var tag = ((navigator.languages && navigator.languages[0]) || navigator.language || "").toLowerCase();
+            for (var p in pick.detect) {
+              if (tag === p || tag.indexOf(p + "-") === 0) { want = pick.urls[pick.detect[p]]; break; }
+            }
+          }
+          if (want) {
+            d.documentElement.style.visibility = "hidden";   // no flash of this language
+            setTimeout(function () { d.documentElement.style.visibility = ""; }, 2500);
+            location.replace(want + location.search + location.hash);
+            return;
+          }
+        }
+      } catch (e) { /* storage or URL blocked: stay on this page */ }
+      /* The opening cut plays once per tab session, never with reduced motion or a deep
+         link. intro.js must claim it (class intro-live) within 2.5 s or the page shows. */
       try {
         if (!location.hash && !sessionStorage.getItem("saberlab.intro") &&
             !matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -37,7 +59,7 @@
           }, 2500);
         }
       } catch (e) { /* storage blocked: no intro */ }
-    })(document);
+    })(document, {{lang_pick}});
   </script>
 </head>
 <body>

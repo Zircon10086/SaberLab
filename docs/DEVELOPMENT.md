@@ -79,8 +79,10 @@ site/          项目网站（GitHub Pages，独立于应用，见 §10）
 .github/workflows/pages.yml  网站构建与发布流程
 config/        config.yaml
 packaging/     PyInstaller spec + 打包文档
-_tools/        调试工具（cdp_stack/chro_smoke 等）与图标生成（make_icon，见 §11）
-_tmp/          测试临时区（探针/截图脚本，可随时清空）
+_tools/        本地开发工具（不入仓库）：调试（cdp_stack/chro_smoke 等）、图标生成
+               （make_icon，见 §11）、可重跑的验收脚本（verify_site / intro_frames /
+               verify_guard_*）、注释语言检查（check_comment_lang）
+_tmp/          测试临时区（一次性探针/截图，可随时清空——要留的脚本放 _tools/）
 ```
 
 ## 5. 后端要点
@@ -683,9 +685,16 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
   E2E 验证。独立窗口截图/交互需按窗口标题 `SaberLab — Beat Saber 本地分析实验室`
   定位
 - Golden Fixture #001：SECRET BOSS Expert（`tests/test_bsor_parser.py`，2069 notes 全断言）
-- `_tmp/` 探针（可复用）：`probe_transparent.py`/`probe_dwm.py`（毛玻璃能力）、
-  `probe_kpi*.py`（KPI/任务卡片样式）、`probe_layout.py`（详情图表高度）、`probe_height.py`
-- `_tmp/shot.ps1` 按窗口标题截图、`_tmp/pngstats.py` numpy 像素统计（无视觉模型时验证 UI 用）
+- **可重跑的验收脚本都在 `_tools/`**（`_tmp/` 会被清空，2026-09-29 已因此丢过一批
+  `_tmp/probe_*.py` 毛玻璃/KPI/布局探针，文中其他章节提到的 `_tmp/verify_*` 多数也已不在）：
+  - 真实窗口：`run.bat` 前设 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`，
+    再用 `_tools/cdp.py`（标准库 CDP 客户端）驱动；`_tools/verify_guard_ui_e2e.py`（33 项
+    UI 流程）、`_tools/verify_guard_live.py`（来源闸门 35 个原始 socket 探针）
+  - 网站：`_tools/verify_site.py`、`_tools/intro_frames.py`（§10）
+  - 图标：`_tools/icon_preview.py`、`_tools/make_icon.py --check`（§11）
+  - 注释语言：`_tools/check_comment_lang.py`（AGENTS §16.1，列出仍含中文的注释行）
+  - `_tools/shot.ps1` 按窗口标题截图、`_tools/pngstats.py` numpy 像素统计（无视觉模型时
+    验证 UI 用）
 - 调试注意：窗口模式日志在 run.bat 控制台；`print` 到管道/重定向需 `flush=True`
 
 ## 8. 构建与发布约定（2026-08 用户决策，强制）
@@ -809,7 +818,8 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
 
 - **纯静态 + 零依赖**：`site/build.py` 只用标准库，Pages 流程只需 runner 自带的
   `python3`。模板在 `site/templates/`，文案在 `site/i18n/<语言>.json`（扁平键），
-  语言与路径在 `site/site.json`（默认语言在根目录，其余语言各占一个子目录，如 `zh/`）。
+  语言与路径在 `site/site.json`（默认语言在根目录，其余语言各占一个子目录，如 `zh/`；
+  `detect` 决定哪些浏览器语言从首页进入该语言，见下文"到站语言"）。
 - **构建即闸门**：某语言缺键、有键没被模板用到、未知占位符、坏的相对链接/图片
   （含 `srcset`）、坏的页内锚点——任何一项都让构建失败，于是发布流程不会上线半翻译
   或断链的页面。`tests/test_site_build.py` 证明每道闸门都会真的触发。
@@ -854,7 +864,7 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
     明显改变窗口尺寸都会跳过；面板上的「重播」可再看。
   - **可复现**：画面是时间轴位置的纯函数，`?intro-t=2.4` 冻结在 2.4 s，
     `window.__saberlabIntro.seek(t)` 移动冻结帧（仅冻结模式暴露）。
-    `_tmp/intro_frames.py [desktop|phone] [t…]` 批量截帧到 `_tmp/intro_*.png`。
+    `_tools/intro_frames.py [desktop|phone] [t…]` 批量截帧到 `_tmp/intro_*.png`。
   - **构图**：相机用离轴镜头把方块、手与挥刀弧线框进读数面板让出的区域（桌面 >980px
     面板在右；更窄时面板缩小贴底）；HUD 标签被限制在该区域内，不会钻到面板下面。
   - **滚动条**：播放期间锁滚动，落地时滚动条回来造成的布局位移由读数面板的 FLIP
@@ -869,12 +879,31 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
 - **字体**：字标用 Beon（Bastien Sozeau，SIL OFL 1.1），自托管在
   `site/assets/fonts/`，许可证 `OFL.txt` 同目录随站点发布，页脚注明出处；正文用系统
   字体栈。
-- 渲染验收（非应用 UI，可用 headless Edge）：`_tmp/verify_site.py` 在桌面 1440px 与
-  手机 375px 下检查样式生效、单个 h1、图片全部解码、滚动后无未揭示元素、无横向溢出、
-  无控制台错误、404 与语言切换；再验开场动画的完整播放（桌面/手机，终态逐项核对）、
-  Escape 跳过、重播 + 跳过按钮、二次访问、深链、减少动态效果、无 WebGL2、无 JS，
-  以及图表悬停读数。需要带 WebGL2 的 headless Edge：本机
-  `_tools/start_headless_edge.ps1` 启动的实例即为硬件 WebGL2。
+- 渲染验收（非应用 UI，可用 headless Edge）：`_tools/verify_site.py`（32 项）在桌面
+  1440px 与手机 375px 下检查样式生效、单个 h1、图片全部解码、滚动后无未揭示元素、无横向
+  溢出、无控制台错误、404 与语言切换；再验到站语言（见下条，12 项）、开场动画的完整播放
+  （桌面/手机，终态逐项核对）、Escape 跳过、「重播」按钮尺寸与换行、重播 + 跳过按钮、
+  二次访问、深链、减少动态效果、无 WebGL2、无 JS，以及图表悬停读数。需要带 WebGL2 的
+  headless Edge：本机 `_tools/start_headless_edge.ps1` 启动的实例即为硬件 WebGL2；先起
+  预览服务器 `site\build.py --serve`。
+  - ⚠️ **本机 Edge 报告的语言是 `zh-CN`**，网站首页会把它送去 `/zh/`。所以两个脚本都用
+    `Emulation.setUserAgentOverride` 的 `acceptLanguage` 把语言钉成 `en-US`，并清掉
+    `saberlab.lang`；新写的网站脚本也要这样做，否则访问首页的检查会落到中文页。
+- **到站语言**（2026-09-30，用户需求）：只有默认语言的首页（英文根目录）会选语言，按
+  顺序：① 从本站其他页面来的（`document.referrer` 以站点根开头）→ 不动；② 访客在语言
+  切换处选过 → 按选择（`localStorage` `saberlab.lang`，由 `site.js` 在点击 / 中键点击
+  切换链接时写入）；③ 浏览器首选语言（`navigator.languages[0]`）匹配某语言的 `detect`
+  前缀 → 去该语言（`zh` 覆盖 zh-CN / zh-TW / zh-HK，都进简体中文）。跳转用
+  `location.replace`，保留查询串与锚点，跳转前隐藏页面避免闪一下英文。
+  - **`/zh/` 本身永远不跳转**：分享出去的中文链接对谁都得是中文，搜索引擎也要能收录它。
+    所以"选过英文的人打开 `/zh/` 链接"看到的仍是中文——这是有意的。
+  - 配置：`site/site.json` 里非默认语言的 `"detect": ["zh"]`；构建检查前缀是小写语言
+    标签、不被两种语言同时认领、默认语言不能有。构建把 `{"home", "urls", "detect"}`
+    写进首页 `<head>` 内联脚本（其余页面为 `null`），脚本在开场动画判定**之前**运行，
+    跳转时不会先启动动画。
+  - 测试：`tests/test_site_build.py` 的 `LanguagePickTest` 用 Node 在假浏览器里跑构建
+    出来的真实内联脚本，逐条核对上面的判定表（含繁体、前缀误配、站内来源、失效的记忆值、
+    锚点、`/zh/` 不跳转）；真实浏览器里的同一组行为由 `_tools/verify_site.py` 复核。
 
 ## 11. 应用图标（2026-09）
 
