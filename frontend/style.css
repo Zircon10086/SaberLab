@@ -480,6 +480,7 @@ button.mini { padding: 3px 10px; font-size: var(--fs-xs); }
 button.icon-btn {
   display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
 }
+
 input[type="checkbox"] { cursor: pointer; accent-color: var(--blue); }
 select, input[type="text"], input:not([type]) {
   background: var(--surface-2); border: 1px solid var(--border-strong);
@@ -516,8 +517,8 @@ select, input[type="text"], input:not([type]) {
   max-width: 960px;
 }
 /* In multi-column mode the header is left-aligned to match the list
-   (breakpoint kept in sync with .replay-list) */
-@media (min-width: 2240px) {
+   (breakpoint kept in sync with .replay-list — see the derivation there) */
+@media (min-width: 2248px) {
   .day-header { max-width: none; margin-left: 0; margin-right: 0; }
 }
 .day-header::before {
@@ -535,14 +536,15 @@ select, input[type="text"], input:not([type]) {
 }
 /* Wide screens: entries share the row evenly (equal share of the free space,
    flush against the container edges).
-   The breakpoint is derived from the content area: 2 columns need
-   2×960+20 = 1940px of content width, and the content area is
-   viewport − 208 sidebar − padding ≈ viewport − 300, hence a 2240px breakpoint.
-   Below the breakpoint (including the 2200-2240 band in between) the base
-   max-width:960 caps and centers the list, and a single column never stretches
-   (auto-fill's 1fr fills the full width when only one column fits, which is
-   where the bug came from). */
-@media (min-width: 2240px) {
+   The breakpoint is derived from the content area: 2 columns need 2×960+20 = 1940px of content
+   width, and the content area is viewport − 208 sidebar − padding = viewport − 307 (measured
+   2026-10 at several widths), so two columns only fit from viewport ≈ 2247px.
+   ⚠️ The breakpoint must be at least that value. At 2240 the media query already said "two
+   columns fit" while the content area could not hold the second one, and auto-fill then fell
+   back to ONE column whose 1fr stretched it across the whole row — the "map card is super long"
+   bug (the intermediate band was measured at 2240-2259px).
+   Below the breakpoint the base max-width:960 caps and centers the list. */
+@media (min-width: 2248px) {
   .replay-list {
     grid-template-columns: repeat(auto-fill, minmax(960px, 1fr));
     max-width: none;
@@ -660,6 +662,19 @@ select, input[type="text"], input:not([type]) {
   font-size: 10.5px; color: var(--muted); background: var(--surface-2);
   font-family: "Cascadia Mono", "Consolas", monospace;
 }
+/* Map management list (2026-10): a map row uses the replay row grid, with its own
+   content: a title + meta line, a difficulty pill row, and numeric columns.
+   The difficulty column of the grid is not used by maps, so the count goes in its place.
+   The sort control is the shared glass list popover (.enum-select / .enum-trigger), sized
+   like the filter controls instead of the settings form's 190px. */
+.map-item .pills { margin-top: 4px; }
+.maps-count { color: var(--muted); font-size: var(--fs-xs); margin-left: 4px; }
+.enum-select.maps-sort { min-width: 132px; vertical-align: middle; }
+/* Direction toggle next to the sort control: the label names the state it switches TO, so a
+   press is never a surprise; the arrow flips to match. */
+button.maps-dir { display: inline-flex; align-items: center; gap: 5px; }
+button.maps-dir .dir-icon { transition: transform var(--t-fast); }
+button.maps-dir[aria-pressed="true"] { color: var(--text); border-color: var(--border-strong); }
 /* Search-hit highlight */
 mark {
   background: rgba(245, 197, 66, 0.35);
@@ -695,6 +710,25 @@ mark {
   border: 1px solid rgba(245, 197, 66, 0.22);
   border-radius: 10px;
   padding: 2px 12px;
+}
+
+/* Map detail (2026-10): shares the replay detail's skeleton (hero card, tabs, card grid). The
+   tabs are one page per difficulty, so they wrap and each carries the play count of that chart. */
+.map-hero .cover { background: var(--surface-2); }
+.map-hero h2 .k { font-size: var(--fs-sm); color: var(--muted); font-weight: 400; }
+.map-hero .hero-kpi .v .k { font-size: 10px; }
+.md-diff-tabs { flex-wrap: wrap; }
+.dt-tab.md-diff { padding: 6px 14px; font-size: var(--fs-sm); }
+.md-diff-played {
+  display: inline-block; margin-left: 6px; padding: 0 6px;
+  border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border);
+  color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums;
+}
+#mapdetail-topbar { z-index: 2; }
+/* Map difficulty cards use the replay detail's responsive grid and chart sizing. */
+@media (max-width: 1200px) {
+  .map-hero { flex-wrap: wrap; }
+  .map-hero .hero-kpis { flex: 1 1 100%; justify-content: flex-start; flex-wrap: wrap; }
 }
 
 /* Pagination (v1.6.0: moved into the surface-title row; the grid's middle
@@ -853,6 +887,10 @@ mark {
 /* 3D replay (ChroViewer): embedded at info-column size, never covering the nav
    bar; the 16:9 height is set dynamically by JS */
 #replay-frame-wrap { padding: 2px; }
+
+#replay-frame {
+  height: 100%; border: 0; border-radius: 0;
+}
 #replay-frame {
   width: 100%;
   border: 1px solid var(--border); border-radius: var(--radius-md);
@@ -1187,10 +1225,10 @@ mark {
    Detail loading skeleton (shimmer; understated, because loading is fast and
    the user does not need to see it clearly)
    ============================================================ */
-#detail-content { transition: opacity 140ms ease; }
-#detail-content.no-transition { transition: none !important; }
-#detail-content.detail-fade-out { opacity: 0; }
-#detail-content.detail-fade-in { opacity: 1; transition: opacity 420ms ease; }
+:is(#detail-content, #mapdetail-content, #md-page) { transition: opacity 140ms ease; }
+:is(#detail-content, #mapdetail-content, #md-page).no-transition { transition: none !important; }
+:is(#detail-content, #mapdetail-content, #md-page).detail-fade-out { opacity: 0; }
+:is(#detail-content, #mapdetail-content, #md-page).detail-fade-in { opacity: 1; transition: opacity 420ms ease; }
 .detail-skeleton { display: flex; flex-direction: column; gap: var(--space-4); }
 .sk-hero {
   display: flex; gap: var(--space-5); align-items: flex-start;
@@ -1213,6 +1251,7 @@ mark {
    visible; the rest scrolls beyond the viewport) */
 .sk-grid .sk-card:nth-child(-n+3) { min-height: 750px; }
 .sk-grid .sk-card:nth-child(n+4) { min-height: 920px; }
+.map-detail-skeleton .sk-card:nth-child(n) { min-height: 340px; }
 .sk-title { flex: none; }
 .sk-content { display: flex; flex-direction: column; gap: var(--space-3); margin-top: var(--space-4); }
 .sk-line, .sk-block {
@@ -1230,7 +1269,7 @@ mark {
    Detail card entry animation (stagger; the duration is fixed and does not get
    slower with loading)
    ============================================================ */
-.dpane .surface {
+.dpane .surface, #md-page .surface {
   animation: cardIn 0.3s ease both;
 }
 .detail-grid .surface:nth-child(1) { animation-delay: 0.02s; }
@@ -1239,7 +1278,7 @@ mark {
 .detail-grid .surface:nth-child(4) { animation-delay: 0.17s; }
 .detail-grid .surface:nth-child(5) { animation-delay: 0.22s; }
 .detail-grid .surface:nth-child(6) { animation-delay: 0.27s; }
-.dpane .same-map-history { animation-delay: 0.32s; }
+.dpane .same-map-history, #md-page .same-map-history { animation-delay: 0.32s; }
 @keyframes cardIn {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: none; }

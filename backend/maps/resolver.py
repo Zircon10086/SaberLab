@@ -37,8 +37,259 @@ def _find_ci(folder: pathlib.Path, name: str) -> Optional[pathlib.Path]:
     return None
 
 
+def _read_level_info_v4(folder: pathlib.Path, raw: dict) -> Optional[dict]:
+    """Read an info.dat using the v4 schema (nested song/audio objects).
+
+    v4.0.0+ restructured the whole file: metadata moved into "song" / "audio", the difficulty
+    list became "difficultyBeatmaps", and a difficulty's chart lives in "beatmapDataFilename".
+    Without this the reader returned an empty level for every v4 map - the library then showed
+    them as blank rows with no difficulties (2026-10, found while building map management).
+    Returns None when the file does not look like v4, so the v2/v3 path keeps handling the rest.
+    """
+    song = raw.get("song")
+    if not isinstance(song, dict):
+        return None
+    audio = raw.get("audio") if isinstance(raw.get("audio"), dict) else {}
+
+    difficulties = []
+    for d in raw.get("difficultyBeatmaps") or []:
+        if not isinstance(d, dict):
+            continue
+        authors = d.get("beatmapAuthors") if isinstance(d.get("beatmapAuthors"), dict) else {}
+        mappers = [m for m in (authors.get("mappers") or []) if isinstance(m, str)]
+        difficulties.append({
+            "characteristic": d.get("characteristic") or "",
+            "difficulty": d.get("difficulty") or "",
+            "label": d.get("difficultyLabel") or "",
+            "filename": d.get("beatmapDataFilename") or "",
+            "njs": d.get("noteJumpMovementSpeed"),
+            "lightshow": d.get("lightshowDataFilename") or "",
+            "mappers": mappers,
+        })
+
+    # v4 keeps the length in beats; the seconds value the rest of the code expects is derived
+    # from the last note of the hardest chart, exactly like the v2/v3 path does.
+    bpm = float(audio.get("bpm") or 0) or 0.0
+    return {
+        "raw": raw,
+        "version": raw.get("version") or "",
+        "song_name": song.get("title") or "",
+        "song_sub_name": song.get("subTitle") or "",
+        "song_author": song.get("author") or "",
+        "mapper": ", ".join(sorted({m for d in difficulties for m in d.get("mappers", [])})),
+        "bpm": bpm,
+        "song_length": _length_from_last_note(folder, difficulties, bpm),
+        "song_filename": audio.get("songFilename") or raw.get("songPreviewFilename") or "",
+        "cover_filename": raw.get("coverImageFilename") or "",
+        "environment": (raw.get("environmentNames") or [""])[0],
+        "difficulties": difficulties,
+    }
+
+
+def _length_from_last_note(folder: pathlib.Path, difficulties: list[dict],
+                           bpm: float) -> float:
+    """Song length in seconds from the last note beat of the hardest chart (0 when unknown).
+
+    Shared by the v4 reader; the v2/v3 path computes the same thing inline while walking its
+    own difficulty list.
+    """
+    if bpm <= 0:
+        return 0.0
+    for diff_info in reversed(difficulties):
+        fname = diff_info.get("filename")
+        if not fname:
+            continue
+        diff_path = _find_ci(folder, fname)
+        if diff_path is None:
+            continue
+        try:
+            data = json.loads(diff_path.read_bytes().decode("utf-8-sig"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        notes = (data.get("_notes") or data.get("notes") or data.get("colorNotes") or [])
+        last_beat = 0.0
+        for n in notes:
+            t = n.get("_time", n.get("time", n.get("b", 0)))
+            if t:
+                last_beat = max(last_beat, float(t))
+        if last_beat > 0:
+            return (last_beat / bpm) * 60
+    return 0.0
+
+
+def read_chart_stats(folder: pathlib.Path, info: dict, bpm: float) -> dict:
+    """Per-difficulty chart facts for the map detail view: notes, span and file size.
+
+    Counts only the objects a player cuts - color notes plus, when present, bombs, arcs and
+    chains - because that is the number BeatSaver shows and the one a player recognises. Only
+    ScoreSaber/BeatLeader-style "notes" (the classic `_notes` / `notes` / `colorNotes` array) are
+    the minimum; the extra arrays are added when the chart carries them.
+
+    Chart data in v4 can live in a side file: the array entry holds only an index into
+    `<name>Data`. A chart whose data is stored that way is reported as unavailable (note count
+    would be zero otherwise, which would read as "this difficulty has no notes").
+    """
+    out: dict[str, dict] = {}
+    for d in info.get("difficulties") or []:
+        characteristic = d.get("characteristic") or ""
+        difficulty = d.get("difficulty") or ""
+        key = f"{characteristic}|{difficulty}"
+        fname = d.get("filename") or ""
+        entry: dict = {"notes": None, "seconds": None, "size": None, "available": False}
+        out[key] = entry
+        if not fname:
+            continue
+        path = _find_ci(folder, fname)
+        if path is None:
+            continue
+        try:
+            raw = path.read_bytes()
+            entry["size"] = len(raw)
+            data = json.loads(raw.decode("utf-8-sig"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        # inlined data: count the real objects, skip anything referenced by index
+        if any(isinstance(data.get(a), list) and data[a] and isinstance(data[a][0], dict)
+               for a in ("colorNotes", "notes", "_notes")):
+            notes = (data.get("colorNotes") or data.get("notes") or data.get("_notes") or [])
+            extra = sum(len(data.get(a) or []) for a in ("bombNotes", "arcs", "chains")
+                        if isinstance(data.get(a), list))
+            entry["notes"] = len(notes) + extra
+            entry["available"] = True
+        elif any(isinstance(data.get(a), list) and data[a] and isinstance(data[a][0], int)
+                 for a in ("colorNotesData", "_notesData")):
+            entry["notes"] = 0      # data lives in a side file: count not available here
+            entry["available"] = False
+        else:
+            entry["notes"] = 0      # a chart that genuinely has no cuttable object
+            entry["available"] = True
+        if bpm > 0 and entry["available"]:
+            first = last = 0.0
+            for n in (data.get("colorNotes") or data.get("notes") or data.get("_notes") or []):
+                t = n.get("_time", n.get("time", n.get("b", 0)))
+                if not t:
+                    continue
+                t = float(t)
+                first = t if first == 0 or t < first else first
+                last = t if t > last else last
+            if last > 0:
+                entry["seconds"] = (last / bpm) * 60
+    return out
+
+
+def read_chart_timeseries(folder: pathlib.Path, filename: str, bpm: float,
+                          bucket_seconds: float = 1.0) -> dict:
+    """Density over time for ONE chart, bucketed per second (the map detail's chart card).
+
+    Answers "how dense is this chart, and where" without a replay: notes and blocks are placed at
+    their own beat time (`t = b * 60 / bpm`), then counted into fixed buckets. Four series come out
+    of one pass:
+
+      * ``density``   - every cuttable object (color notes, arcs, chains)
+      * ``left`` / ``right`` - the same split by column (<2 = left hand, >=2 = right hand; arcs and
+        chains carry a head column, so they land in the hand that starts them)
+      * ``bombs``     - bombs, counted separately (they are never cut, so they must not inflate the
+        note density; the replay timeline excludes them from its density for the same reason)
+
+    Same units as everywhere else in the app: notes per second, y values are densities (not raw
+    counts), so the four series are directly comparable. Buckets run from the first to the last
+    object, and a bucket with no object is a real 0 (a gap in the chart), not missing data. Each
+    series is then smoothed over +-2 buckets - a single 1s bucket can hold a chord burst, which
+    reads as a spike that says nothing about the passage (the replay timeline smooths its per-note
+    density the same way, see timeline.DENSITY_SMOOTH).
+    """
+    out = {"density_t": [], "density": [], "left": [], "right": [], "bombs": [],
+           "counts": {"density": 0, "left": 0, "right": 0, "bombs": 0},
+           "available": False, "first_beat": 0.0, "last_beat": 0.0}
+    if bpm <= 0 or not filename:
+        return out
+    path = _find_ci(folder, filename)
+    if path is None:
+        return out
+    try:
+        data = json.loads(path.read_bytes().decode("utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return out
+
+    def beat(n):
+        # a beat of 0 is a REAL position (the chart's first note often sits there), so a missing
+        # key must be told apart from a zero value
+        for key in ("_time", "time", "b"):
+            if key in n and n[key] is not None:
+                return float(n[key])
+        return 0.0
+
+    def placed(objs) -> list:
+        """Objects with a usable position, ignoring the index-only form of a v4 side file."""
+        if not objs or not isinstance(objs[0], dict):
+            return []
+        return [n for n in objs if isinstance(n, dict)]
+
+    colors = (data.get("colorNotes") or data.get("notes") or data.get("_notes") or [])
+    if colors and not isinstance(colors[0], dict):
+        # v4 chart whose note data lives in a side file: index-only arrays, so nothing to measure
+        return out
+    cuts = placed(colors) + placed(data.get("arcs")) + placed(data.get("chains"))
+    cuts = [n for n in cuts if beat(n) > 0 or "b" in n or "_time" in n or "time" in n]
+    if not cuts:
+        return out
+
+    total = [beat(n) for n in cuts]
+    left = [beat(n) for n in cuts if int(n.get("x", n.get("_lineIndex", 0)) or 0) < 2]
+    right = [beat(n) for n in cuts if int(n.get("x", n.get("_lineIndex", 0)) or 0) >= 2]
+    bomb_beats = [beat(n) for n in (data.get("bombNotes") or data.get("_bombs") or [])
+                  if isinstance(n, dict)]
+
+    first, last = min(total), max(total)
+    span_seconds = (last - first) / bpm * 60
+    buckets = max(1, int(span_seconds / bucket_seconds) + 1)
+    scale = 60.0 / bpm / bucket_seconds         # seconds per beat -> bucket index
+
+    def counts(beats: list) -> list:
+        c = [0] * buckets
+        for b in beats:
+            idx = int((b - first) * scale)
+            if idx < 0:
+                idx = 0
+            elif idx >= buckets:
+                idx = buckets - 1
+            c[idx] += 1
+        return c
+
+    def rates(c: list) -> list:
+        """Counts per bucket -> notes/second, smoothed over ±2 buckets."""
+        raw = [x / bucket_seconds for x in c]
+        if not raw:
+            return []
+        window = 2
+        span = window * 2 + 1
+        out_series = []
+        for i in range(len(raw)):
+            lo, hi = max(0, i - window), min(len(raw) - 1, i + window)
+            segment = raw[lo:hi + 1]
+            out_series.append(round(sum(segment) / min(span, len(segment)), 3))
+        return out_series
+
+    out["density_t"] = [round(first / bpm * 60 + i * bucket_seconds, 3) for i in range(buckets)]
+    counts_total, counts_left = counts(total), counts(left)
+    counts_right, counts_bombs = counts(right), counts(bomb_beats)
+    out["density"] = rates(counts_total)
+    out["left"] = rates(counts_left)
+    out["right"] = rates(counts_right)
+    out["bombs"] = rates(counts_bombs) if bomb_beats else [0.0] * buckets
+    # raw per-bucket object counts (before smoothing): what the chart really contains, which is
+    # what callers verify against - the smoothed series is a view, not the measurement
+    out["bucket_counts"] = {"density": counts_total, "left": counts_left,
+                            "right": counts_right, "bombs": counts_bombs}
+    out["counts"] = {"density": sum(counts_total), "left": sum(counts_left),
+                     "right": sum(counts_right), "bombs": sum(counts_bombs)}
+    out["available"] = True
+    out["first_beat"], out["last_beat"] = first, last
+    return out
+
+
 def read_level_info(folder: pathlib.Path) -> Optional[dict]:
-    """Read info.dat, compatible with V2 (underscore-prefixed) and V3 fields."""
+    """Read info.dat, compatible with V2 (underscore-prefixed), V3 and V4 fields."""
     info_path = _find_ci(folder, "info.dat")
     if info_path is None:
         return None
@@ -46,6 +297,10 @@ def read_level_info(folder: pathlib.Path) -> Optional[dict]:
         raw = json.loads(info_path.read_bytes().decode("utf-8-sig"))
     except (json.JSONDecodeError, OSError):
         return None
+
+    v4 = _read_level_info_v4(folder, raw)
+    if v4 is not None:
+        return v4
 
     def g(*keys, default=None):
         for k in keys:
@@ -251,6 +506,16 @@ class MapResolver:
             stats["error"] = f"CustomLevels 目录不存在: {self.levels_dir}"
             return stats
 
+        # Before touching the folders: give every row that entered the library without a
+        # timestamp its real one. This runs first on purpose - the upsert below stamps
+        # added_at with the scan time for rows that have none, which would freeze every
+        # existing map at "when the library was migrated" and make the sort useless (measured:
+        # 1032 rows inside 11 seconds). A one-time migration cost, then it stays a no-op.
+        try:
+            stats["added_at_backfilled"] = self._backfill_added_at()
+        except Exception as e:  # noqa: BLE001 - a missing sort key must not fail the scan
+            print(f"[maps] added_at backfill failed: {e}", flush=True)
+
         folders = [p for p in self.levels_dir.iterdir() if p.is_dir()]
         sc_cache = self.load_songcore_cache()
         total = len(folders)
@@ -269,6 +534,34 @@ class MapResolver:
         stats["duration_sec"] = round(time.time() - t0, 2)
         return stats
 
+    def _backfill_added_at(self) -> int:
+        """Give every map row an added_at value, once. Returns how many rows were filled.
+
+        Skips repositories that do not expose the backfill API (the scan tests use small stand-ins):
+        that is a "nothing to do", not an error, and printing a failure for it only made the test
+        output look broken.
+        """
+        pending_of = getattr(self.repo, "maps_without_added_at", None)
+        setter = getattr(self.repo, "set_maps_added_at", None)
+        if not callable(pending_of) or not callable(setter):
+            return 0
+        pending = pending_of()
+        if not pending:
+            return 0
+        now = _now()
+        values: dict[str, str] = {}
+        for row in pending:
+            ts = None
+            path = row.get("path")
+            if path:
+                mtime = self._folder_mtime(pathlib.Path(path))
+                if mtime:
+                    ts = datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+            values[row["map_hash"]] = ts or now
+        filled = setter(values)
+        print(f"[maps] added_at backfilled for {filled} maps", flush=True)
+        return filled
+
     def _process_folder(self, folder: pathlib.Path, sc_cache: dict[str, str],
                         stats: dict, force_recompute: bool) -> None:
         info = read_level_info(folder)
@@ -281,10 +574,15 @@ class MapResolver:
             stats["from_songcore_cache"] += 1
             source = "songcore_cache"
         else:
-            # Try to reuse the DB cache: skip recomputation when the folder is unchanged
+            # Try to reuse the DB cache: skip recomputation when the folder is unchanged.
+            # A row that stored no song name is never trusted, whatever its timestamps say: it
+            # is either a level the reader could not parse back then (an older reader returned
+            # an empty level for info v4 maps - 2026-10) or a half-written row, and the folder
+            # would otherwise stay blank forever because nothing about it changed.
             existing = self._db_map_by_path(str(folder))
             folder_mtime = self._folder_mtime(folder)
-            if (not force_recompute and existing and existing.get("last_scanned")
+            stored_ok = bool(existing and (existing.get("song_name") or "").strip())
+            if (not force_recompute and stored_ok and existing.get("last_scanned")
                     and folder_mtime <= self._parse_ts(existing["last_scanned"])):
                 stats["reused_db"] += 1
                 return

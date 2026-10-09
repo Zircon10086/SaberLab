@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS maps (
     scoresaber_updated TEXT,      -- last update time
     beatmap_key     TEXT,          -- BeatSaver key (extracted from the folder name "16633 (song)")
     nps_json        TEXT DEFAULT '{}',  -- JSON: {"Standard|Expert": nps, ...}
+    added_at        TEXT,          -- when the map first entered this library (ISO Z; the map
+                                   --   management list sorts by it). Never updated afterwards
     last_scanned    TEXT
 );
 

@@ -34,7 +34,8 @@ from backend.config.schema import STAR_PALETTES
 from backend.config.service import ConfigService, check_paths
 import backend.beatleader as beatleader
 from backend.db.repository import Repository
-from backend.maps.resolver import MapResolver
+from backend.maps.resolver import (MapResolver, read_chart_stats, read_chart_timeseries,
+                                   read_level_info)
 from backend.services.enrichment import EnrichmentService
 from backend.services import energy_curve, player_assets, skill_tracks, timeline
 from backend.watcher import ReplayPipeline
@@ -1029,6 +1030,374 @@ def api_map_package(map_hash: str):
 @app.get("/api/maps")
 def api_maps():
     return repo.list_maps()
+
+
+def _map_library_item(row: dict) -> dict:
+    """Shape one map row for the map-management list (display only, no file access).
+
+    difficulties carries the counts the row shows (notes per difficulty, plus the BeatSaver
+    length when it is recorded); NPS is the scanner's per-difficulty value. Both are stored
+    as JSON in the maps table, and a broken/legacy row must never take the page down, hence
+    the guarded parses.
+    """
+    def _json(raw, fallback):
+        if not raw:
+            return fallback
+        try:
+            value = json.loads(raw)
+            return value if value else fallback
+        except (ValueError, TypeError):
+            return fallback
+
+    info = _json(row.get("info_json"), {})
+    diffs = _json(row.get("difficulties"), [])
+    nps = _json(row.get("nps_json"), {})
+    # NOTE: no note totals here on purpose. The scanner stores info.dat metadata and the NPS
+    # task stores notes-per-second, but nothing in the app records how many notes a chart has
+    # (info.json never carries it), so inventing a number from NPS would be a different metric
+    # wearing the same label. The list shows NPS instead.
+
+    out_diffs = []
+    for d in diffs if isinstance(diffs, list) else []:
+        if not isinstance(d, dict):
+            continue
+        characteristic = d.get("characteristic") or ""
+        difficulty = d.get("difficulty") or ""
+        key = f"{characteristic}|{difficulty}"
+        out_diffs.append({
+            "characteristic": characteristic,
+            "difficulty": difficulty,
+            "label": d.get("label") or "",
+            "njs": d.get("njs"),
+            "nps": nps.get(key),
+        })
+    values = [v for v in nps.values() if isinstance(v, (int, float))]
+    # Stars come from the enrichment index (per map, active platform, rating OF THE LEVEL, not
+    # the player's score) - the SAME source the star sort uses. The maps.stars column is NOT a
+    # fallback: it is written by an older sync path and can carry a rating of a mode the index
+    # deliberately ignores, which is exactly how a row once got sorted by one number and shown
+    # with another.
+    platform = _active_platform()
+    star = enrichment.map_star_index(platform).get((row.get("map_hash") or "").upper(), {})
+    stars = star.get("stars")
+    return {
+        "map_hash": row.get("map_hash"),
+        "song_name": row.get("song_name") or "",
+        "song_sub_name": info.get("song_sub_name") or "",
+        "song_author": row.get("song_author") or "",
+        "mapper": row.get("mapper") or "",
+        "bpm": round(float(row["bpm"])) if row.get("bpm") else None,
+        "song_length": row.get("song_length") or None,
+        "beatmap_key": row.get("beatmap_key") or "",
+        "version": info.get("version") or "",
+        "folder_name": row.get("folder_name") or "",
+        "added_at": row.get("added_at") or "",
+        "plays": int(row.get("plays") or 0),
+        "platform": platform,
+        "rated": bool(stars and stars > 0),
+        "stars": stars if (stars and stars > 0) else None,
+        # A rated map that is NOT formally ranked (BeatLeader publishes ratings for those):
+        # the list marks it the same way the replay list does - yellow star, hover shows
+        # "this song is not ranked yet".
+        "ranked": bool(star.get("ranked", True)),
+        "ranked_difficulty": row.get("ranked_difficulty") or "",
+        "nps_max": max(values) if values else None,
+        "nps_min": min(values) if values else None,
+        "difficulties": out_diffs,
+    }
+
+
+@app.get("/api/maps/library")
+def api_maps_library(q: str = Query(""), page: int = Query(1, ge=1),
+                     per_page: int = Query(50, ge=1, le=500),
+                     sort: str = Query("name"), dir: str = Query("asc")):
+    """Local map library: one page of CustomLevels maps for the map-management module.
+
+    Read-only and local: the rows come from the maps table, which the map scan builds from
+    CustomLevels (the same data the covers and the replay enrichment use). Paging and sorting
+    happen in SQL because the library is thousands of rows.
+
+    sort: name | author | length | stars | added | plays (unknown values fall back to name).
+    dir:  asc | desc. The star sort always lists the highest rating first and the unrated maps
+    last, so it only takes the direction for its name tie-break.
+    """
+    offset = (page - 1) * per_page
+    platform = _active_platform()
+    rows, total = repo.list_maps_page(query=q.strip(), offset=offset, limit=per_page,
+                                      sort=sort, direction=dir, platform=platform)
+    items = [_map_library_item(r) for r in rows]
+    return {
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "sort": sort,
+        "dir": "desc" if str(dir).lower() == "desc" else "asc",
+        "platform": platform,
+        # Whether any map on this page has a star rating: most local maps are unranked, and a
+        # column of dashes reads like a broken field, so the page hides it when it is empty.
+        "rated_on_page": any(item["rated"] for item in items),
+        "items": items,
+    }
+
+
+_chart_stats_cache: dict[str, tuple[float, dict]] = {}
+_chart_stats_lock = threading.Lock()
+
+
+def _chart_stats_for(row: dict) -> dict:
+    """Per-difficulty chart facts of one map, read from the level folder and cached.
+
+    This is the map detail view's version of the replay detail's slice-details parse: it reads the
+    level folder on demand instead of storing anything at scan time, so the library scan stays
+    untouched. Results are cached by folder identity plus the newest file timestamp, so a repeated
+    visit is free and an edited map is re-read.
+    """
+    folder = pathlib.Path(row.get("path") or "")
+    signature = 0.0
+    try:
+        for p in folder.iterdir():
+            if p.is_file():
+                signature = max(signature, p.stat().st_mtime)
+    except OSError:
+        return {}
+    key = str(folder)
+    with _chart_stats_lock:
+        cached = _chart_stats_cache.get(key)
+        if cached and cached[0] == signature:
+            return cached[1]
+    info = read_level_info(folder)
+    if not info:
+        return {}
+    try:
+        stats = read_chart_stats(folder, info, float(info.get("bpm") or 0))
+    except Exception as e:  # noqa: BLE001 - a broken chart must not fail the whole page
+        print(f"[maps] chart stats failed for {folder.name}: {e}", flush=True)
+        return {}
+    with _chart_stats_lock:
+        _chart_stats_cache[key] = (signature, stats)
+        # keep the cache bounded: it is a convenience, not a store
+        if len(_chart_stats_cache) > 200:
+            for old in list(_chart_stats_cache)[:100]:
+                _chart_stats_cache.pop(old, None)
+    return stats
+
+
+@app.get("/api/maps/{map_hash}/detail")
+def api_map_detail_page(map_hash: str):
+    """Everything the map detail page shows, in one read-only local request.
+
+    `difficulties` is the page list: one entry per characteristic x difficulty, in the order the
+    map's info.dat declares them (Easy -> ExpertPlus), each with the facts of that chart (stars,
+    NPS, NJS, and - computed on demand - note count, span and file size). `plays` is the map-scoped
+    play history summary plus the replays themselves, which the page lists with the replay card.
+    """
+    row = repo.get_map(map_hash)
+    if not row:
+        raise HTTPException(404, "谱面不存在")
+    platform = _active_platform()
+    star_entry = enrichment.map_star_index(platform).get((row.get("map_hash") or "").upper(), {})
+
+    def _json(raw, fallback):
+        try:
+            value = json.loads(raw) if raw else fallback
+            return value if value else fallback
+        except (ValueError, TypeError):
+            return fallback
+
+    info = _json(row.get("info_json"), {})
+    nps = _json(row.get("nps_json"), {})
+    diffs = _json(row.get("difficulties"), [])
+    chart = _chart_stats_for(row)
+    per_diff_stars = _difficulty_star_index(platform)
+
+    difficulties = []
+    for d in diffs if isinstance(diffs, list) else []:
+        if not isinstance(d, dict):
+            continue
+        characteristic = d.get("characteristic") or ""
+        difficulty = d.get("difficulty") or ""
+        key = f"{characteristic}|{difficulty}"
+        cs = chart.get(key) or {}
+        st = per_diff_stars.get(((row.get("map_hash") or "").upper(), difficulty)) or {}
+        difficulties.append({
+            "characteristic": characteristic,
+            "difficulty": difficulty,
+            "key": key,
+            "label": d.get("label") or "",
+            "filename": d.get("filename") or "",
+            "njs": d.get("njs"),
+            "nps": nps.get(key),
+            "notes": cs.get("notes"),
+            "notes_available": bool(cs.get("available")),
+            "seconds": cs.get("seconds"),
+            "filesize": cs.get("size"),
+            "stars": st.get("stars"),
+            "ranked": bool(st.get("ranked", True)) if st.get("stars") else None,
+        })
+
+    plays = repo.map_play_stats(row["map_hash"])
+    per_diff_plays: dict[str, dict] = {}
+    best_score = best_acc = None
+    cleared = 0
+    for p in plays:
+        dk = f"{p.get('mode') or 'Standard'}|{p.get('difficulty') or ''}"
+        bucket = per_diff_plays.setdefault(dk, {"plays": 0, "best_score": None, "best_acc": None,
+                                                "full_combo": False})
+        bucket["plays"] += 1
+        if p.get("won"):
+            cleared += 1
+        if p.get("score_effective") is not None:
+            bucket["best_score"] = max(bucket["best_score"] or 0, p["score_effective"])
+            best_score = max(best_score or 0, p["score_effective"])
+        if p.get("accuracy") is not None:
+            bucket["best_acc"] = max(bucket["best_acc"] or 0, p["accuracy"])
+            best_acc = max(best_acc or 0, p["accuracy"])
+        if p.get("full_combo"):
+            bucket["full_combo"] = True
+    for entry in difficulties:
+        entry["plays"] = per_diff_plays.get(entry["key"], {}).get("plays", 0)
+        entry["best_score"] = per_diff_plays.get(entry["key"], {}).get("best_score")
+        entry["best_acc"] = per_diff_plays.get(entry["key"], {}).get("best_acc")
+        entry["full_combo"] = per_diff_plays.get(entry["key"], {}).get("full_combo", False)
+
+    return {
+        "map_hash": row["map_hash"],
+        "song_name": row.get("song_name") or "",
+        "song_sub_name": info.get("song_sub_name") or "",
+        "song_author": row.get("song_author") or "",
+        "mapper": row.get("mapper") or "",
+        "bpm": round(float(row["bpm"])) if row.get("bpm") else None,
+        "song_length": row.get("song_length") or None,
+        "beatmap_key": row.get("beatmap_key") or "",
+        "version": info.get("version") or "",
+        "folder_name": row.get("folder_name") or "",
+        "folder_path": row.get("path") or "",
+        "added_at": row.get("added_at") or "",
+        "last_scanned": row.get("last_scanned") or "",
+        "platform": platform,
+        "rated": bool(star_entry.get("stars")),
+        "stars": star_entry.get("stars"),
+        "ranked": bool(star_entry.get("ranked", True)),
+        "hash_source": row.get("hash_source") or "",
+        "difficulties": difficulties,
+        "plays": {
+            "count": len(plays),
+            "cleared": cleared,
+            "best_score": best_score,
+            "best_accuracy": best_acc,
+            "first_ts": min((p.get("timestamp") or 0) for p in plays) if plays else None,
+            "last_ts": max((p.get("timestamp") or 0) for p in plays) if plays else None,
+        },
+    }
+
+
+@app.get("/api/maps/{map_hash}/chart/{difficulty_key}")
+def api_map_chart(map_hash: str, difficulty_key: str):
+    """One difficulty's on-demand analysis: note count, span, file size and play records.
+
+    Split from the map-detail request on purpose (the same staging the replay detail uses): the
+    page renders as soon as the map facts arrive, and this parse - it reads the chart file from the
+    level folder - fills in the difficulty page right after. `difficulty_key` is the
+    "characteristic|difficulty" key the detail response lists.
+    """
+    row = repo.get_map(map_hash)
+    if not row:
+        raise HTTPException(404, "谱面不存在")
+    key = difficulty_key.replace("-_-", "|") if "|" not in difficulty_key else difficulty_key
+    characteristic, _, difficulty = key.partition("|")
+
+    title = None
+    try:
+        info = read_level_info(pathlib.Path(row.get("path") or ""))
+        title = info
+    except Exception as e:  # noqa: BLE001 - an unreadable level still has a page
+        print(f"[maps] level read failed for {map_hash}: {e}", flush=True)
+    stats = {}
+    series = {}
+    entry: dict = {}
+    if title:
+        bpm = float(title.get("bpm") or 0)
+        try:
+            stats = read_chart_stats(pathlib.Path(row["path"]), title, bpm)
+        except Exception as e:  # noqa: BLE001
+            print(f"[maps] chart parse failed for {map_hash}: {e}", flush=True)
+        entry = stats.get(f"{characteristic}|{difficulty}") or {}
+        fname = ""
+        for d in title.get("difficulties") or []:
+            if (d.get("characteristic") or "") == characteristic \
+                    and (d.get("difficulty") or "") == difficulty:
+                fname = d.get("filename") or ""
+                break
+        try:
+            series = read_chart_timeseries(pathlib.Path(row["path"]), fname, bpm)
+        except Exception as e:  # noqa: BLE001 - a broken chart must not fail the page
+            print(f"[maps] chart timeseries failed for {map_hash} {key}: {e}", flush=True)
+
+    # plays of THIS chart: the replay's mode maps to the chart's characteristic (Standard is
+    # stored as "Standard" for BeatLeader replays; the same rule the list's mode column shows)
+    history = [p for p in repo.map_play_stats(map_hash)
+               if (p.get("difficulty") or "") == difficulty
+               and (p.get("mode") or "Standard") == characteristic]
+    enrichment.enrich_flat(history, _active_platform())
+    _attach_file_available(history)
+
+    plays = len(history)
+    best_score = max((p["score_effective"] for p in history
+                      if p.get("score_effective") is not None), default=None)
+    best_acc = max((p["accuracy"] for p in history if p.get("accuracy") is not None),
+                   default=None)
+    return {
+        "key": f"{characteristic}|{difficulty}",
+        "notes": entry.get("notes"),
+        "notes_available": bool(entry.get("available")),
+        "seconds": entry.get("seconds"),
+        "filesize": entry.get("size"),
+        "plays": plays,
+        "best_score": best_score,
+        "best_acc": best_acc,
+        "full_combo": any(p.get("full_combo") for p in history),
+        # Density over time (per second) for this chart: the page draws it with the same chart
+        # component the replay timeline uses, so the payload shape matches that one.
+        "series": {
+            "density_t": series.get("density_t") or [],
+            "density": series.get("density") or [],
+            "left": series.get("left") or [],
+            "right": series.get("right") or [],
+            "bombs": series.get("bombs") or [],
+            "available": bool(series.get("available")),
+        },
+        "history": history,
+    }
+
+
+def _difficulty_star_index(platform: str) -> dict[tuple[str, str], dict]:
+    """{(map_hash, difficulty): {stars, ranked}} for the active platform's STANDARD charts.
+
+    The map page's per-difficulty facts read this; it is the same source the list's star sort uses
+    (scoresaber_leaderboards, which carries both integrations' ratings), so a difficulty's star and
+    the map's best star never disagree.
+
+    Only standard-mode rows are counted, for the same reason enrichment.map_star_index does it: a
+    map's 90°/OneSaber/Lightshow/Lawless variants carry their OWN ratings, and using them here
+    labelled the Standard difficulty with a Lawless number (measured: Cyaegha ExpertPlus showed the
+    Lawless 12.29 instead of the Standard 12.04).
+    """
+    out: dict[tuple[str, str], dict] = {}
+    for lb in repo.list_ss_leaderboards(limit=100000, platform=platform):
+        stars = lb.get("stars")
+        if not isinstance(stars, (int, float)) or stars <= 0:
+            continue
+        mode = (lb.get("game_mode") or "")
+        if platform == "beatleader":
+            if mode != "Standard":
+                continue
+        elif mode != "SoloStandard":
+            continue
+        key = ((lb.get("map_hash") or "").upper(), lb.get("difficulty_name") or "")
+        cur = out.get(key)
+        if cur is None or stars > cur["stars"]:
+            out[key] = {"stars": float(stars), "ranked": bool(lb.get("ranked"))}
+    return out
 
 
 def _run_map_scan():

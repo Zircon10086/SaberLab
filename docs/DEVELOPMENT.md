@@ -237,21 +237,6 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
 `_tmp/verify_chro_pause2.mjs`（DOM 回退四路径，全 PASS）、
 `_tmp/probe_chro_readout_cadence.mjs`（读数节奏，判定窗口参数的依据）。
 
-**待办：chro 独立构建**（用户 2026-09-14 决定延期）。调查结论（`_tools` 外的实验已清理）：
-`scripts/build.py` 只产桌面版，没有产插件包的那一步；要产可静态部署的 `/chro/` 包需要
-① 新增静态入口（现源码没有 index.html，由框架生成）② 构建配置分模式（`base:'/chro/'`、
-去掉 nitro/Start 服务端插件）③ 把服务端专属路由与函数从客户端路由树隔离出去并重新生成
-路由树（生成的路由树会把 `routes/api/preview.*` 一起拉进来，那条链依赖
-`@resvg/resvg-js` 原生二进制与 `satori`）④ 在真实窗口里验证地图包加载与 3D 渲染。
-服务端面很小（3 个元数据函数 + 4 个 API 路由，只服务分享预览），播放引擎本身零服务端依赖；
-难点不是"问题多"而是"根本没有静态产物这条路"。估计 1–2 天。
-
-- **提交归属**：chro 的源码改动提交到它自己的仓库（同款 GPL-2.0）；
-  SaberLab 提交**不得包含 `plugins/` 下任何文件**（`.gitignore` 已排除 `plugins/chro/`）。
-  桥接补丁属于**产物文件**，随 `plugins/chro/` 一起走（发布打包会带上整个目录）。
-
-
-
 ### 5.7 双平台云端数据（scoresaber | beatleader，2026-08）
 - **数据源切换**：设置 → 玩家 →「云端数据源」卡片（segmented control，
   `player.data_source` 配置项，schema 驱动）；点击即保存并刷新页面
@@ -525,6 +510,206 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
   `_tools/cdp.py`（标准库实现的 CDP 客户端，供 Python 侧 UI 验证使用）。
 - **待办**：按预测 ACC 的五色分档（`skill_model.predicted_acc()` 已实现未接线）。
 
+### 5.14 谱面管理（2026-10，基础界面；管理页下一步）
+
+导航「对比」下方的**谱面管理**：把本地 CustomLevels 谱面库列出来，点一条进入
+**谱面详情**（§5.15），查看各难度的数据、密度曲线与本地游玩记录。
+
+- **数据源 = `maps` 表**（不是实时遍历目录）：`/api/maps/library` 从
+  `Repository.list_maps_page()` 分页取；这张表由谱面扫描（`MapResolver.scan()`）从
+  CustomLevels 建立，与封面接口、回放富化同源。实测本机 1037 个目录 → **1032 行**
+  （差集 = 1 个没有 info.dat 的残留目录 + 4 个此前无法解析的 v4 谱面，见下）。
+  行内容全部来自数据库，**不触发任何文件访问**（封面走既有的 `/api/maps/{hash}/cover`）。
+- **info v4 支持（2026-10 补）**：`read_level_info()` 原先只认 v2/v3（`_songName` /
+  `_difficultyBeatmapSets`），而 4.0.0+ 的结构是 `song{title,author}` / `audio{bpm}` /
+  `difficultyBeatmaps[]{characteristic,difficulty,beatmapDataFilename,beatmapAuthors}`。
+  旧读取器对 v4 返回**空谱面**，于是这 4 张在库里是空白行（无歌名、无难度、无 NPS）。
+  修法：新增 `_read_level_info_v4()` 分支（返回 None 表示"不是 v4"，v2/v3 路径不变），
+  时长仍由最难的谱面文件末音符推出（v4 的 `song.duration` 是拍数，不是秒）。
+  实测这 4 张现在都能读出歌名/作者/谱师/BPM/时长/难度/NPS。
+- **顺带的缓存自愈**：`_process_folder()` 原先只要"目录未变 + 有行"就跳过重算，因此
+  **解析器修好后这些空白行也不会被刷新**（目录本身没变）。现在**歌名为空的行永不复用**，
+  下次扫描会重读它们。修完跑一次扫描（1037 目录 / 15.8s）→ 空白行 0。
+- **行内容与列**：封面缩略图、歌名（无歌名时退回目录名）、`作者 · 谱师 · BPM · 版本`、
+  难度徽标（沿用 `.pill.diff-*` 配色）、难度数 / NPS（取该谱面各难度的最大值）/
+  时长 / BPM；**星级列只在当前页确实有已评级谱面时才出现**（本机 1032 张里只有 158 张有
+  星级，常驻一列"–"会被读成坏字段）。
+- **排序（2026-10 第三版：六个键 + 正序/倒序按钮）**：`/api/maps/library?sort=&dir=`，
+  `sort ∈ {name, author, length, stars, added, plays}`（未知值回落 `name`），
+  `dir ∈ {asc, desc}`。SQL 侧实现见 `Repository._map_order_table()` / `_map_library_sql()`：
+  - `name` 歌名、`author` 曲师（同名再按歌名）、`length` 时长、`added` 下载时间、
+    `plays` 游玩次数（`replays` 按 map_hash 计数的子查询 JOIN）；
+  - **只有一个星级键**（原来的 SC / BL 两项已合并，用户 2026-10 决定）：本地能拿到的星级
+    永远属于**当前数据源**（设置 → 云端数据源），所以分平台两项只会在只同步了一边时排出
+    完全相同的顺序——两项并列只会误导。现在这一项天然跟随当前数据源。
+  - `stars` 难度：按**谱面本身**的星级排（不是玩家成绩）。方向**会**翻转数值列：
+    **正序 = 星级最高在前**（与其它键一致——时长 / 下载时间 / 游玩次数的正序都是"最大在前"，
+    对难度列这是最有用的读法），倒序 = 最低在前；同组的歌名次序跟随方向。
+    **没有星级的谱面一律排到末尾**（用户明确要求；"没有星级"不等于"0 星"）。
+  - ⚠️ **两个与方向相关的坑（用户报过"按星级排序的正序/倒序切换不反应"）**：
+    1. 星级的 ORDER BY 一度写死 `stars_src DESC`（只有歌名跟随方向），于是这条排序在两个
+       方向下顺序完全相同，看起来像按钮失灵。数值列必须由方向驱动：`_map_library_sql()`
+       对 `stars_src` 单独处理——基句写 DESC，`desc` 时翻成 ASC（其余键仍是 `{dir}` 直接替换）。
+    2. **不能给星级加 `COALESCE(..., 0)`**：那会把"无评级"变成 0 星（一个真实星级，且是最低），
+       于是"未评级排末尾"会**依赖方向**——某一边它们会窜到最前面。取数保持 `NULL`，
+       由 ORDER BY 里的 `stars_src IS NULL` 明确放到末尾。
+    3. 回归：`test_every_sort_key_reacts_to_the_direction` 逐个键断言"两个方向必须给出不同
+       顺序"（这条正是用户报的 bug 的通用化），`test_star_sort_direction_flips_the_rating`
+       断言正序=最高在前、倒序=最低在前、未评级在两个方向都在末尾。
+  - 时长 / 下载时间为空的行同样排末尾（未知不等于"最短/最早"）。
+  - ⚠️ **排序用的星级必须与显示用的星级同源同算法**（踩过两次）：
+    1. 显示值来自 `enrichment.map_star_index()`；SQL 侧是 `rated` 子查询（按平台 GROUP BY
+       取 MAX）。**两者取数规则必须一致**，否则会出现"按 18.25★ 排、格子显示 13.44★"。
+    2. 两个平台对 mode 的命名不同：**ScoreSaber 写 `SoloStandard`**，BeatLeader 写
+       `Standard`。ScoreSaber 的每个 characteristic 各自有评级，展示与排序都只认它的
+       standard 图（`SoloStandard`）；BeatLeader 一张谱只有一个评级（其各 mode 一致），
+       全部计入。写成 `game_mode = 'Standard'` 会让 ScoreSaber 一行都匹配不到，整列退化成
+       库里的旧星级列（基本为空）。
+    3. **绝不能在 SELECT 列表里裸写 `MAX(...)`**：没有 GROUP BY 的聚合会把整个结果压成
+       **一行**（SQLite 会为该行挑任意一条记录的其它列），列表会静默只剩一张谱面。
+       星级必须来自带 GROUP BY 的子查询 JOIN；ORDER BY 在子查询**外层**执行，这样排序键
+       可以直接引用 JOIN 出来的列，不必重复聚合表达式（重复会让 SQLite 报列名歧义，
+       也会打乱占位符绑定顺序——`?` 的个数要与参数列表逐个对齐）。
+- **"下载时间"是什么**：`maps.added_at`（新列，2026-10 迁移）。**不能用 `last_scanned`**——
+  `upsert_map` 每次扫描都重写它，实测 1032 行只有 12 个不同值、全部落在 11 秒内，排序会
+  退化成随机。做法：
+  - 列由 `_migrate()` 加到旧库；新插入时取 `COALESCE(:added_at, :last_scanned)`，
+    老行由**谱面扫描开头的 `_backfill_added_at()`** 一次性回填，值为**谱面文件夹自身的时间戳**
+    （玩家视角的"装进游戏的时间"），文件夹不可读则用当时时间；
+  - `ON CONFLICT ... added_at=COALESCE(maps.added_at, excluded.added_at)`：**已写入的值永不
+    被覆盖**，重扫不会把历史时间刷成今天（实测回填后跨度 2021-04 → 2026-08）；
+  - 回填只对 `added_at IS NULL` 的行生效，第二次扫描是空操作。
+- **"未认证"星级（黄色底）**：BeatLeader 会给**尚未正式认证**的谱面也打星级。回放列表对这种
+  星级用黄底 + hover"该歌曲尚未认证，无 pp 得分"（`.star-unranked`）；谱面管理沿用同一标记
+  （实测当前 BL 数据里 rated 的谱面大多数是这一类：前 3 页 150 张有星级，其中 108 张未认证）。
+  后端把 `ranked` 随星级一起下发：**只要该谱面有一条带星级的榜单是正式认证的，就算已认证**
+  （不能在都是未认证时随便挑一行）。
+  - ⚠️ **黄底不等于黄字**：`.star-unranked` 只提供背景/边框/圆角，**不含 `color`**——文字颜色
+    必须由星级分档类给出（`star-gray/green/yellow/red/purple`，档位来自 `player.star_palette`，
+    由 `/api/status` 的 `ui.star_palettes` 下发）。只挂 `star-unranked`（谱面管理最初就是这样）
+    会让文字**继承卡片颜色（白）**，白字压在黄底上。回放列表的写法是
+    `class="${starColor(stars)} star-unranked"`（实测：6.89★ 未认证 = 黄底 + `rgb(245,197,66)`
+    文字）；谱面管理与它共用 `starChipHtml(stars, ranked)`，并把 `star-gray` 作为**最后兜底**，
+    以防分档函数返回空类名时又退回继承色。
+- **不加音符总数**：`info.json` 里没有音符数，库里也没存（`note_counts` 这个名字只出现在
+  谱面内部字段，从未落库），所以不做"NPS × 时长"这类冒充同名指标的估算，列表用 NPS 表示。
+- **布局**：完全照「历史」一栏——`.surface` + 三栏对称标题行（左筛选 / 中分页 / 右空位）+
+  `.replay-list`，行也用 `.replay-item` 网格，因此与历史页对齐一致（实测行宽 960、网格列
+  相同）。分页在 SQL 侧（`per_page` 默认 50、上限 500），因为库是上千行。
+  - ⚠️ **宽屏两列断点极易踩的坑（用户报过两次）**：`.replay-list` 在 `min-width` 断点后
+    切到 `repeat(auto-fill, minmax(960px, 1fr))`。**断点若比"内容区真的放得下两列"的最小
+    视口宽度还小**，媒体查询已经认为该排两列、但 `auto-fill` 只放得下一列，于是那一列被
+    `1fr` 拉满整行——表现为"卡片超长，没有像 replay 那样变成一行两条"。
+    - 实测（CDP + 视口仿真，2026-10）：**内容区 = 视口 − 307**（208 侧栏 + 99 页面内边距），
+      两列需要 `2×960 + 20 = 1940`，所以断点必须 **≥ 2247**；原值 2240 让 **2240–2259px**
+      整段变成死区（实测 2240 视口：列表 1933px 一行；2260：两列 966px）。
+      现断点为 **2248**，`.day-header` 的断点必须与它一致（两处注释互相引用）。
+    - 回归：`tests/test_wide_list_layout.py`（5 项）用 CSS 算术守住"断点 − chrome ≥ 两列"、
+      两个断点一致、单列有 `max-width` 上限、多列仍用同一 `minmax(960px, 1fr)`，
+      并**守住 chrome 的测量值**（侧栏 token 变化即失败，提醒重新测量）。
+    - 无论哪种宽度，`.replay-list` 单列都必须有 `max-width: 960px` + `margin: 0 auto`：
+      `1fr` 在只剩一列时会把列拉满，只有 max-width 能兜住。
+    - 验证脚本：`_tmp/probe_map_width.py`（扫宽度量几何，含死区定位）、
+      `_tmp/probe_map_overflow.py`（查横向溢出与控件是否被压坏）。
+- **搜索**：歌名 / 谱师 / 曲师 / BeatSaver key 的 LIKE 匹配（`q` 参数），前端 250ms 去抖后
+  回到第 1 页。
+- **排序控件**：下拉用 §6.3 的毛玻璃列表下拉（值放隐藏 input `#maps-sort`），旁边是
+  **正序/倒序按钮** `#maps-dir`——一个按钮两个状态，`data-dir` 为唯一事实来源，
+  按钮文案写"按下去会切到哪种"（升序时显示"倒序"）、`aria-pressed` 表示当前状态、箭头随之翻转；
+  点击即 `loadMaps(1)` 刷新。两处状态都在 `loadMaps()` 里同步到界面。
+- **重新扫描**按钮复用既有任务通道：`POST /api/maps/rescan` → `map_scan` 后台任务，
+  前端 `pollTask()` 显示进度（与总览的进度卡片同一套）。
+- **验收**：`tests/test_map_library.py`(23) 覆盖查询（过滤/总数/分页不相交/文本与数值键的
+  双向排序/星级排序的各平台取数规则/未评级永远在末尾/未知排序与方向回落）与行整形
+  （难度明细、未评级不谎报、未认证标记、坏 JSON 不炸整页、接口形状与 sort/dir 回显、
+  参数透传），以及**端到端一致性**：受控小库上经真实接口取星级排序，返回行数、顺序、
+  "排序键 == 显示值"三者同时断言（这是两个用户可见 bug 的回归测试）；
+  UI 侧用 `_tmp/probe_maps_sort_all.py` 在真实窗口逐键点过、`_tmp/probe_star_sort_bl.py`
+  核对星级顺序 + 黄底标记 + tooltip、`_tmp/probe_all_sorts.py` 逐键核对两个平台的次序。
+
+### 5.15 谱面详情（2026-10，一难度一页）
+
+导航「谱面详情」页 + 从谱面列表点进来的详情页。**结构照 replay 详情**（顶栏返回 + 头部大卡 +
+页签），差别在"一页是什么"：**replay 是一次游玩**，页签是这一场的不同视角；**谱面是一首歌带多个
+难度**，所以**一个难度一页**（用户 2026-10 决定），每页只讲那一张谱面的数据与本难度的游玩记录。
+
+- **三个接口**（都只读、都本地）：
+  - `GET /api/maps/{hash}/detail`：头部大卡 + 每个难度的清单（`difficulties[]`，按 info.dat 的
+    顺序 Easy→ExpertPlus）+ 谱面级游玩汇总（次数 / 通关数 / 最佳分数 / 最佳准确率 / 首末时间）。
+  - `GET /api/maps/{hash}/chart/{characteristic|difficulty}`：**打开时现场分析**这张谱面文件，
+    返回音符数 / 音符跨度 / 文件大小 + **密度时间序列** + 本难度的游玩记录（`history[]`，
+    已富化 + 带 file_available）。与 replay 详情同款「分层加载」：详情先渲染，这一页的结果随后补上。
+  - ~~`/api/maps/{hash}/files`~~ **已删除**（用户 2026-10：不需要文件卡片）。
+- **密度时间序列**（`maps/resolver.read_chart_timeseries`，用户 2026-10 要求）：一条谱面的
+  "整体 / 左手 / 右手 / 炸弹"密度，**按 1 秒一桶**统计，不需要回放：
+  - 只数玩家切得到的东西（color note + arc + chain）；手别取自对象的**头列**（`x < 2` 左、
+    `>= 2` 右；arc/chain 归到起始那只手）；**炸弹单独一条曲线**（炸弹不切，混进音符密度会虚高
+    ——回放详情的时间轴同样把炸弹排除在 density 之外）。
+  - y 是**每秒密度**（notes/s），四条例线可直接比较；桶从第一个对象到最后一个对象，
+    **空桶是真实的 0**（谱面里的空档），不是缺数据。再对 ±2 桶平滑：单个 1 秒桶可能装着一串
+    和弦，尖峰会盖住整段（回放详情的 per-note 密度也做了同性质的平滑，见
+    `timeline.DENSITY_SMOOTH`）。
+  - **原始逐桶计数**也一并返回（`bucket_counts`）：平滑序列是"视图"，**计量是计数**，
+    界面与测试都以计数为准。
+  - **拍与秒必须同向换算**：`t = beat × 60 / BPM`，桶位置为
+    `floor((beat − first_beat) × 60 / BPM / bucket_seconds)`。2026-10 修正前曾误用
+    `BPM / 60`，把大量音符夹到尾桶；旧记录中「Cyaegha 尾端数百音符是谱面设计」的判断
+    已被三音符夹具与真实谱面复核推翻。修正后 Cyaegha Expert 的平滑峰值从 **278 → 10.6
+    个/秒**，计数总量不变；只影响谱面详情的密度序列，不改变 Replay 的分析结果或数据库。
+    回归以多个 BPM、非零首拍、半秒桶与空档逐桶核对，不能只检查曲线长度或总数。
+  - ⚠️ **v4 侧文件**：音符数据若存在 `<name>Data` 里（数组元素是索引），这一难度返回
+    `available=false`，界面写"无法绘制"，而不是画一条 0 线。
+  - ⚠️ **0 拍是真实位置**：早期写法用 `n.get("b") or 0` 判断，会把**第 0 拍上的音符整批丢掉**
+    （v3 谱面第一小节很常见）；现在按"键存在"判断（`key in n and n[key] is not None`）。
+- **音符数怎么算**（`maps/resolver.read_chart_stats`）：只数玩家切得到的东西——color notes
+  加上该谱面有的 bomb / arc / chain（与 BeatSaver 的口径一致）。**v4 的谱面数据可能在独立文件里**
+  （数组元素是索引），这种难度返回 `available=false`，界面写"谱面数据存在独立文件里，暂不统计
+  音符数"，**绝不把 0 当成"这个难度没有音符"**。实测：v4 5 个难度 1–6ms，v2 大谱面 46ms。
+  结果按「文件夹 + 最新文件 mtime」缓存（上限 200 条），改过的谱面会重读。
+- **每页三张卡**（用户 2026-10 定稿）：**难度数据 / 时间序列 / 我的成绩**（文件卡片已按用户要求
+  移除）。时间序列卡用 `lineChart` + `.chart-controls`，与回放详情的时间轴同一套组件与观感，
+  但取数是**谱面本身**：四个勾选项"整体密度 / 左手密度 / 右手密度 / 炸弹密度"，
+  默认勾选前三个（`drawMapTimeline()` 独立维护自己的曲线注册表与开关接线）。
+  - **共用布局与渐入**：沿用 `.detail-grid` 的响应式三栏，时间序列使用普通 `.chart`
+    而不是运动小图的 `.chart.small`；`freezeDetailCharts(root)` 只测量并固定本页图表一次，
+    再无动画重绘以对齐 SVG viewBox。勾选曲线不改变高度，窗口缩放只重绘内容，不重复增高。
+  - **共用入场流程**：`renderDetailTransition()` 处理两页的快速加载渐入与慢速骨架交接，
+    容器从透明态进入 **420ms** 过渡；卡片同用 `cardIn 300ms` 与错峰延迟。
+    取消旧渐入定时器后再渲染，防止快速连切被上一轮清理提前结束；骨架仍延迟 1.5 秒，
+    难度骨架对应三张卡，不借用 Replay 的六卡高度。
+  - **难度状态隔离**：每次切难度有自己的 `AbortController` 与请求序号；成功、错误、
+    骨架定时器和延迟交接都核对当前谱面对象、难度、请求序号与页面节点。缓存只存响应，
+    不写当前页面；缓存命中和新响应都在这条守卫后的渲染里提交 `chartSeries`。
+    旧成功响应、旧错误和离开页面后的响应不得改图。重新打开同一谱面仍恢复该难度的数据。
+  - **页签边界**：Replay 的绑定、active 切换与回放可见性查询只用
+    `#detail-tabs .dt-tab`，不能全局查 `.dt-tab`——谱面难度同样使用这套视觉类名。
+- **骨架屏延迟（用户 2026-10 反馈）**：难度页**必须**与 replay 详情一样等
+  `MAP_DETAIL_SKELETON_DELAY`（1.5s）才出骨架。原先一点页签就出骨架，而解析只要几毫秒，
+  骨架刚出现就被替换，观感是闪烁而不是加载。实测切页签时骨架出现次数 = 0。
+- **每难度星级**：`_difficulty_star_index()` 按 `(map_hash, difficulty)` 取**标准玩法**的星级
+  （BeatLeader `Standard` / ScoreSaber `SoloStandard`）。**不能混用其它玩法**：实测 Cyaegha 的
+  ExpertPlus 标准是 12.04★、Lawless 是 12.29★，混用会让 Standard 那一行顶着 Lawless 的数值。
+  同一规则也用在 `enrichment.map_star_index()`：**谱面头部的星级 = 它自己标准难度的最高星**，
+  这样头部大卡与难度页永远同源（此前是"所有玩法取最大"，头部会显示 Lawless 的数）。
+- **默认打开哪一页**：先看玩家自己的记录（打过的那一页，次数最多者优先），没有记录再退到
+  最难的 Standard；都没有则取最后一个难度。理由：打开一张谱面通常是看"我练的那张"。
+- **`maps.stars` 列不再是兜底**：`_map_library_item()` 只用 enrichment 索引。该列由旧的同步路径
+  写入，可能带着被索引刻意忽略的玩法数值——曾经因此出现"排序用一个数、格子显示另一个数"。
+- **返回 / Esc**：`.detail-topbar` 同款结构；Esc 由全局 keydown 处理，先判谱面详情
+  （`mapDetailIsOpen()`）再判 replay 详情，两条路径都走各自的返回按钮。**返回按钮在 `init()` 里
+  绑定一次**——早前绑在 replay 详情的渲染函数里，导致谱面详情页的返回与 Esc 全都无效（用户可见
+  的 bug）。
+- **导航项**：`nav.mapdetail`。直接点它而没有打开过谱面时显示提示语；打开过则恢复那张谱面
+  （`switchTab` 里恢复页面/顶栏，离开时隐藏顶栏）。两条通路：谱面列表点行、导航项。
+  注：**replay 详情还没有"跳到它的谱面详情"入口**（需要一个 map_hash → 是否在库里的查询）；
+  目前用列表搜索代替，待办见 §9。
+- **验收**：`tests/test_chart_timeseries.py` 验证时间桶位置与计数；
+  `tests/test_map_detail_frontend.py` 用 Node 执行源码中的函数，固定缓存、旧响应隔离、
+  页签作用域、图表一次性高度与渐入清理；真实窗口用 `_tools/verify_map_detail_timeline.py`
+  （**45 项通过**），覆盖首次打开/切难度渐入、缓存切回、重复打开、勾选恢复、Replay 页签、
+  乱序成功/失败、延迟骨架、错误/无图/无游玩状态、离开取消与窗口缩放。
+  探针只在页面内注入受控响应，不修改真实谱面、回放、配置或数据库。
+
 ## 6. 前端要点
 
 - 零依赖单文件：`index.html`（静态骨架 + 设置/详情模板）、`app.js`（渲染 + 交互）、`style.css`
@@ -545,6 +730,9 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
 - 毛玻璃层：`#acrylic-backdrop`（fixed inset 0 + blur），移动中 `.moving` class 拉满模糊
 
 ### 6.1 右键菜单框架（context menu，2026-09）
+- **下拉/浮层别再造第二套**：菜单与下拉都建立在通用 `openPopover` 之上；如果要做的是
+  "从固定选项里选一个"，直接用 **§6.3 的毛玻璃列表下拉**（`openListPopover`），不要用
+  原生 `<select>`，也不要另写浮层。
 - **目标**：新增右键功能 = 往注册表加一条，**不改框架代码**。文件都在 `frontend/app.js`：
   - `CTX_MENUS`：注册表，每项 `{ match: 选择器, items(el) -> 菜单项[] }`
   - `bindContextMenus()`：**文档级委托，只绑一次**（在 `init()` 里 `I18N.init` 之后调用，
@@ -601,8 +789,7 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
     ——验收脚本已改为页面内 `MouseEvent` 分发（确定性），真实鼠标路径单独验证过；
     ② 固定 `sleep` 等待应用初始化会在慢启动时假失败，应**轮询等待列表项出现**
 
-### 6.1b 大库规模下的搜索与分页（2026-09 实测 + 待办压力测试）
-- **历史页分页**：复用总览同款分页组件（`renderPagination(total, page, pages, unit,
+### 6.1b 大库规模下的搜索与分页（2026-09 实测 + 待办压力测试）- **历史页分页**：复用总览同款分页组件（`renderPagination(total, page, pages, unit,
   onPage, el)`，历史页传 `unit="count"`、容器 `#history-pagination`、注入 `onPage`），
   **只按数量分页、一页 300 条**；搜索词/时间范围变化时回到第 1 页
 - **分页位置**：与总览**同款三栏对称 grid**（`#tab-history .surface-title` 复制
@@ -663,7 +850,38 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
   （Chrome 139+ 生效，旧浏览器回退 12px；**须放样式表末尾**——放前面会被
   `.kpi` 自身的 border-radius 覆盖，见 §4.18 踩坑）
 
-### 6.3 AI 报告语言
+### 6.3 可复用组件：毛玻璃列表下拉（**下拉选择一律用它**，2026-10 用户指定）
+
+**任何"从几个固定选项里选一个"的控件都用这个组件，不要用原生 `<select>`**——原生下拉的
+展开列表由操作系统绘制，页面完全无法改外观，在毛玻璃界面里是一块突兀的系统控件。用户已把
+这套外观定为标准，并要求标记为可复用（2026-10）。
+
+- **调用**：`openListPopover({ id, options, value, trigger, ariaLabel, onPick })`
+  （`frontend/app.js`，紧邻设置页的 enum 控件）：
+  - `id` 稳定字符串，同时作为"同一个触发按钮再点一次 = 收起（不是重播入场动画）"的判重键；
+  - `options` = `[{ value, label, disabled?, reason? }]`，`disabled` 项置灰不可点、右侧显示原因；
+  - `value` 当前值（打勾项）；`trigger` 触发按钮元素；`onPick(value, label)` 选中回调；
+  - **状态归调用方**：本函数只渲染、标记当前值与回调，不保存任何业务状态。
+- **外观与交互全部继承通用 `openPopover`**：毛玻璃材质、`popIn/popOut` 出入场、锚定在触发
+  按钮下方且空间不足自动翻转、点击外部 / Escape / 滚动 / 缩放关闭。**不要另写一套浮层。**
+- **样式类**（`style.css`，与设置页同一套，改一处两处同时变）：
+  `.enum-select`（含 `min-width`）→ `.enum-trigger`（+ `.open` / `.enum-caret` /
+  `.enum-value`）；列表内 `.popover-list` / `.popover-opt`（+ `.active` / `.disabled` /
+  `.popover-opt-label` / `.popover-opt-check` / `.popover-opt-reason`）。
+- **标记结构**（值放隐藏 input，按钮只显示文案）：
+  `<div class="enum-select"><input type="hidden" id="X" value="...">` +
+  `<button class="enum-trigger" id="X-trigger" aria-haspopup="listbox" aria-expanded="false">` +
+  `<span class="enum-value">当前项文案</span><svg class="enum-caret">…</svg></button></div>`；
+  选中后由 `onPick` 写回隐藏 input 并更新 `.enum-value`。
+- **已采用**：
+  1. 设置页 enum 控件（`settingsControl()` 的 `type: "enum"` 分支 → `openEnumPopover(cid)`；
+     **首个使用者是设置 → 星级色谱**，外观标准即出自这里）。它多一层 schema 语义，值存在
+     `input[data-key][data-enum]` 上，`collectSettings()` 的读取与脏值检测链路不变。
+  2. 谱面管理的排序（`openMapsSortPopover()`，值在隐藏 `#maps-sort` 上，选中即 `loadMaps(1)`）。
+- **i18n**：`data-i18n*` 只覆盖 `i18n` / `i18n-placeholder` / `i18n-title` 三种属性；
+  需要 aria-label 时**在 JS 里用 `t()` 设置**（`data-i18n-aria-label` 不被识别，静默无效）。
+
+### 6.4 AI 报告语言
 - `ai/prompts.py`：`build_system_prompt(lang)` = 英文基础规则 + 强制输出语言指令
   （MUST/务必/必ず）+ 语言化小节名（## 结论 / ## Conclusion / ## 結論）——提示词
   主体必须保持英文，否则 LLM 偏向跟随主体语言（§4.16 实测教训）

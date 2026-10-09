@@ -52,6 +52,14 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M10 19V9"/><path d="M16 19V13"/><path d="M20 19V3"/></svg>
         <span data-i18n="nav.compare">对比</span>
       </button>
+      <button class="nav-item" data-tab="maps">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3-6-3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>
+        <span data-i18n="nav.maps">谱面管理</span>
+      </button>
+      <button class="nav-item" data-tab="mapdetail">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5V6a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v13.5"/><path d="M4 19.5h16"/><path d="M8.5 8.5h7"/><path d="M8.5 12h7"/><path d="M8.5 15.5h4"/></svg>
+        <span data-i18n="nav.mapdetail">谱面详情</span>
+      </button>
       <button class="nav-item" data-tab="scoresaber">
         <svg viewBox="0 0 500 500" fill="none">
   <!-- 1. Outer rounded-square outline -->
@@ -211,6 +219,57 @@
       </div>
       <div class="actions"><button id="btn-compare" class="primary" data-i18n="compare.btn">对比 A vs B（B − A）</button></div>
       <div id="compare-result"></div>
+    </section>
+
+    <!-- ====== Map management (2026-10) ====== -->
+    <!-- Layout mirrors the history tab: a symmetric three-column title row (left = filters,
+         middle = pagination, right = empty) over a list. Each map is one row; clicking a row
+         opens the management view (next step). -->
+    <section id="tab-maps" class="tabpane">
+      <h1 class="page-title" data-i18n="maps.title">谱面管理</h1>
+      <p class="page-desc" data-i18n="maps.desc">本地 CustomLevels 谱面库</p>
+      <div class="surface">
+        <div class="surface-title">
+          <div class="title-left">
+            <div class="filters">
+              <input id="maps-filter" data-i18n-placeholder="maps.filter" placeholder="按歌名 / 谱师筛选…" />
+              <!-- sort control: same glass list popover as 设置 → 星级色谱 (see DEVELOPMENT
+                   §6.3). The value lives in the hidden input; the button shows its label.
+                   The direction button next to it switches 正序/倒序 and reloads the list. -->
+              <div class="enum-select maps-sort">
+                <input type="hidden" id="maps-sort" value="name">
+                <button type="button" class="enum-trigger" id="maps-sort-trigger"
+                        aria-haspopup="listbox" aria-expanded="false" onclick="openMapsSortPopover()">
+                  <span class="enum-value" data-i18n="maps.sort_name">按歌名</span>
+                  <svg class="enum-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+              </div>
+              <button type="button" id="maps-dir" class="mini maps-dir" aria-pressed="false">
+                <svg class="dir-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M6 11l6-6 6 6"/></svg>
+                <span class="dir-label" data-i18n="maps.dir.asc">正序</span>
+              </button>
+              <button id="btn-maps-scan" class="mini" data-i18n="maps.rescan">重新扫描</button>
+              <span id="maps-count" class="maps-count"></span>
+            </div>
+          </div>
+          <div id="maps-pagination" class="pagination"></div>
+        </div>
+        <div id="maps-list" class="replay-list" data-i18n="common.loading">加载中…</div>
+      </div>
+    </section>
+
+    <!-- ====== Map detail (2026-10) ====== -->
+    <!-- Reached from the map list (click a row) or from the nav; same shape as the replay
+         detail: a back bar + a rendered hero, then one page per difficulty. -->
+    <section id="tab-mapdetail" class="tabpane">
+      <div id="mapdetail-empty" class="empty" data-i18n="mapdetail.empty">在「谱面管理」里点击一张谱面查看详情。</div>
+      <div class="detail-topbar" id="mapdetail-topbar" style="display:none">
+        <button class="back-btn" id="btn-mapdetail-back">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+          <span data-i18n="detail.back">返回</span>
+        </button>
+      </div>
+      <div id="mapdetail-content" class="hidden"></div>
     </section>
 
     <!-- ====== ScoreSaber ====== -->

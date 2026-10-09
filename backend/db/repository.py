@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import sqlite3
 import pathlib
 import threading
@@ -20,6 +21,32 @@ def _now() -> str:
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     return {k: row[k] for k in row.keys()}
+
+
+# The column list every "replay row" projection shares. The UI renders a replay the same way
+# wherever it appears (list, history, same-map history), so a projection that quietly drops a
+# column makes the same replay look different in two places - twice already (2026-10:
+# file_path missing -> every same-map entry claimed "file missing"; analysis_status missing ->
+# every same-map entry claimed "pending"). Both queries below use this one list; do not hand
+# -write a shorter one.
+REPLAY_ROW_COLUMNS = (
+    "replay_id, file_path, file_name, timestamp, song_name, difficulty, mode,"
+    " map_hash, score, score_effective, has_nf, accuracy, good_count, bad_count, miss_count,"
+    " bomb_count, max_combo, full_combo, won, modifiers, status, analysis_status, profile_id,"
+    " analysis_version, analyzed_at, duration, fps_median, player_name, player_id,"
+    " completion_status"
+)
+
+# The map-library projection (map management list). Everything is qualified with the table
+# name: the sorted queries join aggregates that also expose a map_hash, and an unqualified
+# column would make those joins ambiguous. Added_at and the star columns are what the list
+# sorts and displays by.
+MAP_LIBRARY_COLUMNS = (
+    "maps.map_hash, maps.folder_name, maps.path, maps.song_name, maps.song_author,"
+    " maps.mapper, maps.bpm, maps.song_length, maps.version, maps.difficulties,"
+    " maps.info_json, maps.nps_json, maps.beatmap_key, maps.ranked_difficulty, maps.stars,"
+    " maps.added_at, maps.last_scanned"
+)
 
 
 def _moving_average(values: list[float], window: int = 5) -> list[float]:
@@ -217,6 +244,14 @@ class Repository:
                               (key, row["map_hash"]))
         if "nps_json" not in cols:
             c.execute("ALTER TABLE maps ADD COLUMN nps_json TEXT DEFAULT '{}'")
+        # --- maps.added_at (2026-10): when a map first entered this library ---
+        # The map list can sort by it, so it has to be a column. last_scanned is NOT usable for
+        # that: upsert_map rewrites it on every scan, so after a rescan every map shares the
+        # same timestamp (measured: 1032 rows, 12 distinct values inside one 11-second window).
+        # Existing rows are left NULL here and backfilled once by the map scan, which is the
+        # only place that can read the level folders.
+        if "added_at" not in cols:
+            c.execute("ALTER TABLE maps ADD COLUMN added_at TEXT")
 
         # --- windows.t_ref (v1.4.1 plan E: window timeline anchor = median note event time within the window) ---
         cols = {row["name"] for row in c.execute("PRAGMA table_info(windows)")}
@@ -404,18 +439,19 @@ class Repository:
         # overwrite already-computed NPS (it was once wiped by scan due to the "{}" default — parallel one-click refresh scenario).
         for k, default in (("ranked_difficulty", None), ("stars", None),
                            ("scoresaber_updated", None), ("nps_json", None),
-                           ("beatmap_key", "")):
+                           ("beatmap_key", ""), ("added_at", None)):
             m.setdefault(k, default)
         with self._conn() as c:
             c.execute("""
                 INSERT INTO maps(map_hash, folder_name, path, song_name, song_author,
                                  mapper, bpm, song_length, version, difficulties, info_json,
                                  ranked_difficulty, stars, scoresaber_updated,
-                                 beatmap_key, nps_json, hash_source, last_scanned)
+                                 beatmap_key, nps_json, hash_source, last_scanned, added_at)
                 VALUES(:map_hash,:folder_name,:path,:song_name,:song_author,:mapper,
                        :bpm,:song_length,:version,:difficulties,:info_json,
                        :ranked_difficulty,:stars,:scoresaber_updated,
-                       :beatmap_key,:nps_json,:hash_source,:last_scanned)
+                       :beatmap_key,:nps_json,:hash_source,:last_scanned,
+                       COALESCE(:added_at, :last_scanned))
                 ON CONFLICT(map_hash) DO UPDATE SET
                     folder_name=excluded.folder_name, path=excluded.path,
                     song_name=excluded.song_name, song_author=excluded.song_author,
@@ -428,7 +464,8 @@ class Repository:
                     scoresaber_updated=COALESCE(excluded.scoresaber_updated, maps.scoresaber_updated),
                     beatmap_key=COALESCE(NULLIF(excluded.beatmap_key, ''), maps.beatmap_key),
                     nps_json=COALESCE(excluded.nps_json, maps.nps_json),
-                    hash_source=excluded.hash_source, last_scanned=excluded.last_scanned
+                    hash_source=excluded.hash_source, last_scanned=excluded.last_scanned,
+                    added_at=COALESCE(maps.added_at, excluded.added_at)
             """, {**m, "last_scanned": _now()})
 
     def get_map(self, map_hash: str) -> Optional[dict]:
@@ -436,6 +473,28 @@ class Repository:
             row = c.execute("SELECT * FROM maps WHERE map_hash=?",
                             (map_hash.upper(),)).fetchone()
             return _row_to_dict(row) if row else None
+
+    def set_maps_added_at(self, values: dict[str, str]) -> int:
+        """Backfill maps.added_at for rows that have none (map_hash -> ISO Z timestamp).
+
+        The column is only ever written when it is empty, so a map keeps the time it first
+        entered the library no matter how often it is rescanned. batched in one transaction:
+        the backfill covers the whole library at once.
+        """
+        if not values:
+            return 0
+        with self._conn() as c:
+            cur = c.executemany(
+                "UPDATE maps SET added_at=? WHERE map_hash=? AND added_at IS NULL",
+                [(ts, mh) for mh, ts in values.items()])
+            return cur.rowcount or 0
+
+    def maps_without_added_at(self) -> list[dict]:
+        """Rows the added_at backfill still has to resolve (map_hash + folder path)."""
+        with self._conn() as c:
+            rows = c.execute("SELECT map_hash, path, folder_name FROM maps"
+                             " WHERE added_at IS NULL").fetchall()
+            return [_row_to_dict(r) for r in rows]
 
     def get_map_by_path(self, path: str) -> Optional[dict]:
         """Find a map exactly by its folder path (DB reuse fallback path for map scanning).
@@ -455,6 +514,133 @@ class Repository:
                 " hash_source, last_scanned"
                 " FROM maps ORDER BY song_name LIMIT ?", (limit,)).fetchall()
             return [_row_to_dict(r) for r in rows]
+
+    def _map_order_table(self) -> dict:
+        """sort key -> (select columns needed, joins needed, ORDER BY with a {dir} slot).
+
+        Built fresh on every call: the join lists are mutated while assembling the query, and a
+        class-level dict of lists kept appending to the same list across requests (the second
+        query then joined the same aggregate twice and SQLite rejected the duplicate alias).
+        """
+        return {
+            "name": ([], [], "song_name COLLATE NOCASE {dir}"),
+            "author": ([], [],
+                       "song_author COLLATE NOCASE {dir}, song_name COLLATE NOCASE {dir}"),
+            # NULL last for the optional numeric keys, whatever the direction (a map with no
+            # length or no timestamp is not "the shortest"/"the oldest", it is unknown).
+            "length": ([], [],
+                       "song_length IS NULL, song_length {dir}, song_name COLLATE NOCASE {dir}"),
+            "added": ([], [],
+                      "added_at IS NULL, added_at {dir}, song_name COLLATE NOCASE {dir}"),
+            "plays": ([], [" LEFT JOIN (SELECT map_hash, COUNT(*) AS plays FROM replays"
+                           " GROUP BY map_hash) pl ON pl.map_hash = maps.map_hash"],
+                      "COALESCE(pl.plays, 0) {dir}, song_name COLLATE NOCASE {dir}"),
+            # One star sort, not one per integration: the rating that is actually available
+            # locally always belongs to the ACTIVE data source, so a separate "ScoreSaber"
+            # and "BeatLeader" key would sort identically whenever only one of them is synced
+            # (the user's report).
+            #
+            # The direction flips the RATING like every other key. Its base clause is written so
+            # that 正序/asc means "highest first" - the useful reading for a difficulty column and
+            # consistent with the other keys, whose ascending side is the biggest number first
+            # (length 28:39 -> 0:03, plays 10 -> 0, added newest -> oldest). Only the unrated
+            # maps keep a fixed place at the very end: "no rating" is not the lowest rating, and
+            # the user asked for them to sit at the end. Sorting the rating in one direction only
+            # made the 正序/倒序 button look broken for this key.
+            "stars": ([], [],
+                      "stars_src IS NULL, stars_src DESC, song_name COLLATE NOCASE {dir}"),
+        }
+
+    def _map_library_sql(self, sort: str, direction: str,
+                         platform: str) -> tuple[str, list, str]:
+        """Inner SELECT (+ joins), bound parameters and ORDER BY for one map-library query.
+
+        The inner query always carries the per-platform star rating and the play count, and the
+        ORDER BY is applied OUTSIDE it. Sorting outside is what lets a sort key reuse a joined
+        column: repeating an aggregate expression in both places made SQLite report an ambiguous
+        column, and repeating its placeholder in the ORDER BY broke the binding order.
+
+        The rating MUST come from a grouped subquery, never from a bare MAX() in the outer select
+        list: an aggregate with no GROUP BY collapses the whole result to ONE row (SQLite then
+        returns an arbitrary map's values for the other columns), which is exactly how the list
+        silently shrank to a single map.
+        """
+        table = self._map_order_table()
+        sort = sort if sort in table else "name"
+        direction = "desc" if str(direction).lower() == "desc" else "asc"
+        platform = "beatleader" if platform == "beatleader" else "scoresaber"
+        # Both integrations keep one rating per mode and the numbers differ (measured: Cyaegha
+        # ExpertPlus is 12.04 Standard but 12.29 Lawless), so only the standard mode counts - the
+        # same rule enrichment.map_star_index applies, because a row must never be sorted by a
+        # different number than the one it shows. The mode is spelled differently per platform
+        # (BeatLeader "Standard", ScoreSaber "SoloStandard").
+        mode_filter = (" AND game_mode = 'Standard'" if platform == "beatleader"
+                       else " AND game_mode = 'SoloStandard'")
+        _columns, joins, order = table[sort]
+        params: list = []
+        # NO COALESCE around the rating: wrapping it turned "no rating" into 0.0, which is a
+        # rating (the lowest one) - the unrated maps then sorted FIRST in one direction and the
+        # "unrated last" rule silently depended on the direction. NULL must stay NULL here so
+        # ORDER BY can place those rows explicitly at the end.
+        select = MAP_LIBRARY_COLUMNS + ", rated.stars AS stars_src"
+        joins.insert(0,
+                     " LEFT JOIN (SELECT map_hash, MAX(stars) AS stars"
+                     " FROM scoresaber_leaderboards WHERE platform = ?"
+                     f"{mode_filter} AND stars IS NOT NULL AND stars > 0"
+                     " GROUP BY map_hash) rated"
+                     " ON rated.map_hash = maps.map_hash")
+        params.append(platform)
+        if sort == "plays":
+            select += ", COALESCE(pl.plays, 0) AS plays"
+        inner = f"SELECT {select} FROM maps{''.join(joins)}"
+        if sort == "stars":
+            # This key's base clause asks for the highest rating first, which is what 正序/asc
+            # means for it (and matches the other keys, whose ascending side is the biggest
+            # number first). "desc" therefore has to invert the value column; the name tie-break
+            # already took the direction above.
+            star_order = "ASC" if direction == "desc" else "DESC"
+            order = order.replace("stars_src DESC", f"stars_src {star_order}")
+        # referenced from the outer query, so every key is qualified with the derived table
+        order = order.replace("{dir}", direction).replace("stars_src", "lib.stars_src")
+        order = re.sub(r"(?<![\w.])(song_name|song_author|song_length|added_at)\b", r"lib.\1",
+                       order)
+        order = re.sub(r"(?<![\w.])(pl\.plays)", r"lib.plays", order)
+        return inner, params, order
+
+    def list_maps_page(self, query: str = "", offset: int = 0, limit: int = 50,
+                       sort: str = "name", direction: str = "asc",
+                       platform: str = "scoresaber") -> tuple[list[dict], int]:
+        """One page of the local map library, with the total that matches the same filter.
+
+        The library is the maps table (one row per CustomLevels folder the scanner could read:
+        a folder with a broken info.dat or an unresolvable hash has no map to show). Search
+        matches song name / mapper / song author / BeatSaver key, which is what the map manager
+        filters on.
+
+        Sorting: see _map_order_table(). The star sort reads the rating OF THE LEVEL for the
+        requested platform (scoresaber_leaderboards carries both integrations' ratings), not the
+        player's scores, so a map nobody has played still sorts by its own difficulty, and
+        unrated maps always land at the end.
+        """
+        inner, order_params, order = self._map_library_sql(sort, direction, platform)
+        where = ""
+        if query:
+            like = f"%{query}%"
+            where = (" WHERE LOWER(song_name) LIKE LOWER(?)"
+                     " OR LOWER(mapper) LIKE LOWER(?)"
+                     " OR LOWER(song_author) LIKE LOWER(?)"
+                     " OR LOWER(beatmap_key) LIKE LOWER(?)")
+            filter_params = [like] * 4
+        else:
+            filter_params = []
+        with self._conn() as c:
+            total = c.execute(f"SELECT COUNT(*) FROM maps{where}", filter_params).fetchone()[0]
+            rows = c.execute(f"SELECT * FROM ({inner}{where}) lib ORDER BY {order}"
+                             " LIMIT ? OFFSET ?",
+                             [*order_params, *filter_params, max(1, limit),
+                              max(0, offset)]).fetchall()
+
+            return [_row_to_dict(r) for r in rows], int(total)
 
     def map_count(self) -> int:
         with self._conn() as c:
@@ -581,11 +767,7 @@ class Repository:
     def list_replays(self, limit: int = 30, offset: int = 0,
                      map_hash: str | None = None,
                      days: int | None = None) -> list[dict]:
-        sql = ("SELECT replay_id, file_path, file_name, timestamp, song_name, difficulty, mode,"
-               " map_hash, score, score_effective, has_nf, accuracy, good_count, bad_count, miss_count,"
-               " bomb_count, max_combo, full_combo, won, modifiers, status, analysis_status, profile_id,"
-               " analysis_version, analyzed_at, duration, fps_median, player_name, player_id,"
-               " completion_status"
+        sql = (f"SELECT {REPLAY_ROW_COLUMNS}"
                " FROM replays")
         where, params = [], []
         if map_hash:
@@ -617,6 +799,28 @@ class Repository:
             sql += " WHERE " + " AND ".join(where)
         with self._conn() as c:
             return c.execute(sql, params).fetchone()[0]
+
+    def map_play_stats(self, map_hash: str) -> list[dict]:
+        """One row per replay of a map, with the fields the map detail view shows and summarizes.
+
+        Kept to a single query and a small projection: the map detail page shows counts and bests,
+        so the timeline/metrics tables are not needed here (the replay list itself brings those).
+        Ordered newest first, which is also the order the "recent plays" list wants.
+
+        song_name and map_hash belong in the projection because the map detail LIST these rows with
+        the SAME replay card the overview uses (replayItem), which renders them from the row: without
+        the song name every history entry read "unknown song", and without the hash the cover and the
+        per-replay enrichment lookups had nothing to key on (user-reported, 2026-10).
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT replay_id, map_hash, song_name, timestamp, difficulty, mode, score,"
+                " score_effective, accuracy, good_count, bad_count, miss_count, bomb_count,"
+                " max_combo, full_combo, won, has_nf, completion_status, analysis_status,"
+                " status, file_path"
+                " FROM replays WHERE map_hash=? ORDER BY timestamp DESC",
+                (map_hash.upper(),)).fetchall()
+            return [_row_to_dict(r) for r in rows]
 
     def most_common_player_id(self) -> str:
         """Resolve the most common player ID from stored replays (provided by BSOR, includes ScoreSaber ID).
@@ -819,13 +1023,17 @@ class Repository:
     def previous_attempts_on_map(self, map_hash: str, difficulty: str,
                                   before_ts: int, exclude_id: str | None = None,
                                   limit: int = 5) -> list[dict]:
-        """Historical plays on the same map and difficulty (excluding exclude_id itself)."""
+        """Historical plays on the same map and difficulty (excluding exclude_id itself).
+
+        Uses the shared replay-row projection on purpose: the detail endpoint feeds these rows
+        to the same renderer and to main._attach_file_available, so a column missing here makes
+        the same replay look different than in the list. Both misses were real bugs (2026-10:
+        file_path -> "file missing" on every entry, analysis_status -> "pending" on every
+        entry, Bad Apple test case).
+        """
         if not map_hash or not difficulty:
             return []   # Guard: abnormal rows (missing hash/difficulty) skip same-map history lookup
-        sql = ("SELECT replay_id, file_name, timestamp, song_name, difficulty, mode,"
-               " map_hash, score, score_effective, has_nf, accuracy, good_count,"
-               " bad_count, miss_count, bomb_count, max_combo, full_combo, won,"
-               " modifiers, status, duration, player_name, completion_status"
+        sql = (f"SELECT {REPLAY_ROW_COLUMNS}"
                " FROM replays"
                " WHERE map_hash=? AND difficulty=? AND timestamp<? AND status!='error'")
         params: list = [map_hash.upper(), difficulty, before_ts]

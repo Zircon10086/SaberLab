@@ -90,10 +90,13 @@ class EnrichmentService:
         # torn-read window during a platform switch, where a concurrent reader
         # could enrich one response with the other platform's stars/pp.
         self._snapshot: tuple[str, tuple[dict, dict, dict]] | None = None
+        # (platform, {map_hash: {stars, ranked}}) for the map library's difficulty sorts
+        self._star_index: tuple[str, dict[str, dict]] | None = None
 
     def invalidate(self) -> None:
         """Call after data changes (rescan / ranked sync / NPS update / cache clear / platform switch)."""
         self._snapshot = None
+        self._star_index = None
 
     def _ensure_snapshot(self, platform: str) -> tuple[dict, dict, dict]:
         entry = self._snapshot
@@ -120,6 +123,68 @@ class EnrichmentService:
             rc[(r["map_hash"], r["difficulty"])] = r
         self._snapshot = (platform, (key_map, lb_map, rc))
         return self._snapshot[1]
+
+    def map_star_index(self, platform: str = "scoresaber") -> dict[str, dict]:
+        """Per-map star rating for the LEVEL itself, keyed by uppercase map hash.
+
+        Returns {map_hash: {"stars": float|None, "ranked": bool}}. This is what the map library
+        sorts and shows: the rating of the map, not of the player's scores, so a map nobody has
+        played is included too.
+
+        The rating is the map's HIGHEST rating. Which rows count depends on the integration:
+        BeatLeader publishes one rating per level (its modes agree), so everything counts;
+        The rating is the map's HIGHEST STANDARD rating. Only standard-mode leaderboards count, for
+        both integrations: ScoreSaber rates each characteristic separately under "SoloStandard" /
+        "SoloLawless" / ... names, and BeatLeader also stores per-mode rows whose numbers differ,
+        while the star a player recognises is the standard chart's. `ranked` is true as soon as one
+        of the counted rows is formally ranked: BeatLeader publishes ratings for levels that are not
+        formally ranked ("unranked"), and the list marks those differently, but a map with any
+        ranked rating is not one of them. The SQL star sort in Repository applies the same rule,
+        so a row can never be sorted by a number other than the one it shows.
+
+        A single row per map is deliberately NOT chosen (the earlier version did, with the
+        replay list's per-difficulty tie-break): with every row unranked and every row Standard
+        that tie-break scores them all equal and the first one wins, so a map whose Easy chart
+        is rated 5.25★ was labelled 5.25★ while its ExpertPlus chart is 18.25★ - the list then
+        showed a number that disagreed with the sort key.
+        """
+        entry = self._star_index
+        if entry is not None and entry[0] == platform:
+            return entry[1]
+        standard_mode = "Standard" if platform == "beatleader" else "SoloStandard"
+        best: dict[str, float] = {}
+        ranked: set[str] = set()
+        for lb in self._repo.list_ss_leaderboards(limit=100000, platform=platform):
+            mh = (lb.get("map_hash") or "").upper()
+            if not mh:
+                continue
+            # Only standard-mode rows count, for both integrations: each mode carries its OWN
+            # rating and they disagree (measured: Cyaegha ExpertPlus is 12.04 Standard but 12.29
+            # Lawless), so counting every mode made a map's headline star disagree with its own
+            # Standard difficulty.
+            if (lb.get("game_mode") or "") != standard_mode:
+                continue
+            stars = lb.get("stars")
+            # ScoreSaber writes stars=0 / ranked=0 for unranked leaderboards; the display layer
+            # treats 0 stars as "no rating" everywhere, so do the same here.
+            if not isinstance(stars, (int, float)) or stars <= 0:
+                continue
+            best[mh] = max(best.get(mh, 0.0), float(stars))
+            if lb.get("ranked"):
+                ranked.add(mh)
+        index: dict[str, dict] = {}
+        for mh, stars in best.items():
+            index[mh] = {"stars": stars, "ranked": mh in ranked}
+        # The ranked cache exists only for maps somebody played or synced; use it to fill in
+        # ratings no leaderboard covered (never to override one).
+        for r in self._repo.list_ranked_cache(limit=100000, platform=platform):
+            mh = (r.get("map_hash") or "").upper()
+            stars = r.get("stars")
+            if not mh or mh in index or not isinstance(stars, (int, float)) or stars <= 0:
+                continue
+            index[mh] = {"stars": float(stars), "ranked": True}
+        self._star_index = (platform, index)
+        return index
 
     def enrich(self, days: list[dict], platform: str = "scoresaber") -> None:
         """Attach beatmap_key / stars / pp / nps to the per-day grouped replay lists."""

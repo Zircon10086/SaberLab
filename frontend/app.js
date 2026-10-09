@@ -641,7 +641,7 @@ function chroProgressing(done) {
 
 // Currently selected detail sub-pane (the three .dpane elements are constant; the selected state lives on .dt-tab.active)
 function chroReplayPaneSelected() {
-  const paneTab = $(".dt-tab.active");
+  const paneTab = $("#detail-tabs .dt-tab.active");
   const onDetailTab = $("#tab-detail")?.classList.contains("active") === true;
   return paneTab?.dataset.pane === "replay" && onDetailTab;
 }
@@ -691,7 +691,24 @@ function switchTab(name) {
     const tb = $("#detail-topbar");
     if (tb) tb.style.display = "none";
   }
+  // the map detail is reached by opening a map: leaving the tab hides its back bar, coming back
+  // to it restores the map that was open (or the prompt when none was)
+  if (name !== "mapdetail") {
+    const mtb = $("#mapdetail-topbar");
+    if (mtb) mtb.style.display = "none";
+  } else {
+    const mc = $("#mapdetail-content");
+    const me = $("#mapdetail-empty");
+    if (currentMapDetail && mc) {
+      mc.classList.remove("hidden");
+      if (me) me.classList.add("hidden");
+      $("#mapdetail-topbar").style.display = "flex";
+    } else if (me) {
+      me.classList.remove("hidden");
+    }
+  }
   if (name === "history") loadHistory();
+  if (name === "maps") loadMaps(1);
   if (name === "compare") loadCompareOptions();
   if (name === "scoresaber") loadScoreSaber();
   if (name === "settings") loadSettings();
@@ -1218,6 +1235,20 @@ $$("#page-mode .pm-tab").forEach((btn) => {
   });
 });
 
+/* One star chip: tier colour from the active palette, yellow background when the rating is not
+   formally ranked. Both the replay list and the map library use this, so the same map's rating
+   cannot be coloured (or marked) differently on the two pages.
+   star-gray sits last as the fallback: starColor() returns "" when the palette defines no tier
+   for the value, and without it the text would inherit the card's colour (white on the yellow
+   background) instead of a star-tier colour. */
+function starChipHtml(stars, ranked) {
+  const cls = starColor(stars);
+  const unranked = ranked === false;
+  return `<span class="${cls}${unranked ? " star-unranked" : ""} star-gray"`
+       + `${unranked ? ` title="${t("replay.stars_unranked")}"` : ""}>`
+       + `${Number(stars).toFixed(2)}★</span>`;
+}
+
 function starColor(stars) {
   if (stars == null) return "";
   // 星级色谱（player.star_palette 设置）：定义由后端 /api/status 下发
@@ -1543,7 +1574,6 @@ async function openDetail(id, pane = "data") {
   // 上一轮的 iframe 会被下面的 content.innerHTML="" 一并移除（插件随之重置播放），
   // 这里把还在飞的播放判定取消掉，避免它落到新的 iframe 上
   if (chroPauseProbe) { clearTimeout(chroPauseProbe); chroPauseProbe = null; }
-
   // 取消上一轮还在飞的详情请求（释放连接，防止请求堆积拖慢）
   if (detailAbort) detailAbort.abort();
   const abort = new AbortController();
@@ -1557,6 +1587,7 @@ async function openDetail(id, pane = "data") {
   $("#detail-empty").classList.add("hidden");
   $("#detail-topbar").style.display = "flex";
   const content = $("#detail-content");
+  resetDetailFade(content);
   content.classList.remove("hidden");
   // 快速加载时（<1.5s）不显示骨架，内容直接淡入（避免切屏感）；
   // 超过 1.5s 才淡入骨架，提示仍在加载。
@@ -1564,11 +1595,8 @@ async function openDetail(id, pane = "data") {
   let skeletonShown = false;
   const skTimer = setTimeout(() => {
     if (seq !== detailReqSeq) return;
-    content.innerHTML = detailSkeletonHtml();
+    renderDetailTransition(content, () => { content.innerHTML = detailSkeletonHtml(); });
     skeletonShown = true;
-    content.classList.remove("detail-fade-in");
-    content.classList.add("detail-fade-in");
-    setTimeout(() => content.classList.remove("detail-fade-in"), 300);
   }, 1500);
   try {
     // 分层分析：pending 条目（元数据快照）先触发懒分析（幂等，已分析毫秒级返回）
@@ -1619,6 +1647,15 @@ function detailIsOpen() {
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (document.querySelector(".popover")) return;   // 有弹层：交给弹层关闭
+  if (mapDetailIsOpen()) {
+    // the map detail's back button is the single exit path, exactly like the replay detail's
+    const mbtn = $("#btn-mapdetail-back");
+    if (mbtn) {
+      e.preventDefault();
+      mbtn.click();
+      return;
+    }
+  }
   if (!detailIsOpen()) return;
   const btn = $("#btn-detail-back");
   if (!btn) return;                     // 无返回按钮时不做任何事
@@ -1659,28 +1696,42 @@ function detailSkeletonHtml() {
   </div>`;
 }
 
+const detailFadeTimers = new WeakMap();
+
+function resetDetailFade(content) {
+  clearTimeout(detailFadeTimers.get(content));
+  detailFadeTimers.delete(content);
+  content.classList.remove("no-transition", "detail-fade-out", "detail-fade-in");
+}
+
+/* Both detail pages share the same fast-load fade and slow-load skeleton handoff. */
+function renderDetailTransition(content, renderBody, skeletonShown = false, isCurrent = () => true) {
+  resetDetailFade(content);
+  const show = () => {
+    if (!isCurrent()) { resetDetailFade(content); return; }
+    content.classList.add("no-transition", "detail-fade-out");
+    renderBody();
+    void content.offsetWidth;
+    content.classList.remove("no-transition", "detail-fade-out");
+    content.classList.add("detail-fade-in");
+    detailFadeTimers.set(content, setTimeout(() => {
+      content.classList.remove("detail-fade-in");
+      detailFadeTimers.delete(content);
+    }, 420));
+  };
+  if (skeletonShown) {
+    content.classList.add("detail-fade-out");
+    detailFadeTimers.set(content, setTimeout(show, 130));
+  } else {
+    show();
+  }
+}
+
 function renderDetail(skeletonShown = false) {
   const content = $("#detail-content");
   const mySeq = currentDetailSeq;
-  if (!skeletonShown) {
-    // 快速加载（<1.5s）：无骨架 → 内容从透明淡入
-    content.classList.add("no-transition", "detail-fade-out");  // 立即隐藏（无过渡）
-    renderDetailBody(content);
-    void content.offsetWidth;                                   // 强制 reflow
-    content.classList.remove("no-transition", "detail-fade-out");
-    content.classList.add("detail-fade-in");                    // 420ms 淡入
-    setTimeout(() => content.classList.remove("detail-fade-in"), 420);
-    return;
-  }
-  // 慢速加载（>1.5s）：骨架淡出 → 渲染主体 → 内容淡入，动画重叠无切屏感
-  content.classList.add("detail-fade-out");
-  setTimeout(() => {
-    if (mySeq !== detailReqSeq) return;   // 淡出期间被新请求取代则放弃本次渲染
-    renderDetailBody(content);
-    content.classList.remove("detail-fade-out");
-    content.classList.add("detail-fade-in");
-    setTimeout(() => content.classList.remove("detail-fade-in"), 420);
-  }, 130);
+  renderDetailTransition(content, () => renderDetailBody(content), skeletonShown,
+                         () => mySeq === detailReqSeq);
 }
 
 function renderDetailBody(content) {
@@ -1807,14 +1858,14 @@ function renderDetailBody(content) {
   bindReplayItems();
 
   // 数据一览 / AI 分析 滑块切换
-  $$(".dt-tab").forEach((btn) => {
+  $$("#detail-tabs .dt-tab").forEach((btn) => {
     btn.onclick = () => switchDetailPane(btn.dataset.pane);
   });
   switchDetailPane(detailTargetPane, true);
 }
 
 function switchDetailPane(name, instant = false) {
-  $$(".dt-tab").forEach((b) => b.classList.toggle("active", b.dataset.pane === name));
+  $$("#detail-tabs .dt-tab").forEach((b) => b.classList.toggle("active", b.dataset.pane === name));
   const track = $("#panes-track");
   if (!track) return;
   if (instant) {
@@ -2319,17 +2370,19 @@ function drawTimeline(animate = true) {
    viewBox 高度与渲染高度一致（消除图表线条/坐标数字的拉伸）。
    此后复选框切换只重绘图表内部，卡片与图表高度不再变化——
    等高逻辑只在进入 replay 时计算一次，不接受新变化。 */
-function fixDetailLayout() {
-  const charts = document.querySelectorAll(".detail-grid .chart");
-  if (!charts.length) return;
+function freezeDetailCharts(root) {
   let changed = false;
-  charts.forEach((c) => {
+  root?.querySelectorAll(".detail-grid .chart").forEach((c) => {
     if (!c.style.height && c.offsetHeight > 0) {
       c.style.height = c.offsetHeight + "px";
       changed = true;
     }
   });
-  if (!changed) return;
+  return changed;
+}
+
+function fixDetailLayout() {
+  if (!freezeDetailCharts($("#pane-data"))) return;
   drawTimeline(false);
   drawMotionSeries(false);
 }
@@ -2380,6 +2433,508 @@ let histReqSeq = 0;   // 请求竞态序号：快速连续输入时丢弃过期�
    有搜索词时全量取数，然后在客户端按重合度排序并分页——否则较旧的记录会被
    截在窗口外，表现为"总览能看到某条记录、历史里搜不到"（用户报告的现象：
    最早的 Noob 记录全部落在 300 条之外，看起来像按玩家过滤，其实不是）。 */
+/* ---------------- Map management (2026-10) ----------------
+   The read-only library comes from /api/maps/library, using the map scan's CustomLevels data.
+   Rows use the replay list's grid and open the map's per-difficulty detail view. */
+const MAPS_PAGE_SIZE = 50;
+let mapsPage = 1;
+let mapsReqSeq = 0;
+let mapsFilterTimer = null;
+
+/* ---------------- Map detail (2026-10) ----------------
+   Same shape as the replay detail: a back bar, a hero card and tabbed pages. The difference is
+   what a page is - a REPLAY is one play, so its pages are views of that play, while a MAP is one
+   song with several charts, so it gets ONE PAGE PER DIFFICULTY (user decision), each showing that
+   chart's own facts and the plays of that chart.
+
+   Loading mirrors the replay detail: the request is abortable and sequence-guarded (a newer click
+   wins), the skeleton only appears when the request is slow (>1.5s), and the note counts are
+   computed by the backend on demand (reading the level folder) instead of being stored. */
+let mapDetailAbort = null;
+let mapDetailReqSeq = 0;
+let mapChartAbort = null;
+let mapChartReqSeq = 0;
+let currentMapDetail = null;
+let currentMapDifficulty = "";
+let mapDetailReturnTab = "maps";
+const MAP_DETAIL_SKELETON_DELAY = 1500;   // same threshold as the replay detail
+const _mapChartCache = new Map();         // map_hash -> difficulty key -> chart facts
+
+async function openMapDetail(mapHash, difficulty = "") {
+  const cur = $$(".tabpane.active")[0];
+  mapDetailReturnTab = cur ? cur.id.replace("tab-", "") : "maps";
+  if (mapDetailReturnTab === "mapdetail") mapDetailReturnTab = "maps";
+  if (mapDetailAbort) mapDetailAbort.abort();
+  cancelMapChartRequest();
+  const abort = new AbortController();
+  mapDetailAbort = abort;
+  const seq = ++mapDetailReqSeq;
+
+  switchTab("mapdetail");
+  $("#mapdetail-empty").classList.add("hidden");
+  $("#mapdetail-topbar").style.display = "flex";
+  const content = $("#mapdetail-content");
+  resetDetailFade(content);
+  content.classList.remove("hidden");
+  content.innerHTML = "";
+  let skeletonShown = false;
+  const skTimer = setTimeout(() => {
+    if (seq !== mapDetailReqSeq) return;
+    renderDetailTransition(content, () => { content.innerHTML = detailSkeletonHtml(); });
+    skeletonShown = true;
+  }, MAP_DETAIL_SKELETON_DELAY);
+  try {
+    // The map facts are the page skeleton: the first difficulty's chart series is fetched on the
+    // same pass as its page opens, so the density card has data the moment it is drawn.
+    const row = await api(`/api/maps/${encodeURIComponent(mapHash)}/detail`, { signal: abort.signal });
+    clearTimeout(skTimer);
+    if (seq !== mapDetailReqSeq) return;
+    currentMapDetail = row;
+    currentMapDifficulty = pickDifficulty(row, difficulty);
+    renderMapDetail(skeletonShown);
+  } catch (e) {
+    clearTimeout(skTimer);
+    if (seq !== mapDetailReqSeq) return;
+    if (e.name === "AbortError") return;
+    content.innerHTML = `<div class="empty" style="color:var(--red)">${t("detail.load_failed", { err: escHtml(e.message) })}</div>`;
+  }
+}
+
+/* Default page: the player's own history decides when there is any, otherwise the hardest chart.
+   A map is opened far more often to look at "the one I play" than at its Easy chart. */
+function pickDifficulty(row, requested) {
+  const diffs = row.difficulties || [];
+  if (!diffs.length) return "";
+  if (requested && diffs.some((d) => d.key === requested)) return requested;
+  const played = diffs.filter((d) => (d.plays || 0) > 0)
+    .sort((a, b) => (b.plays || 0) - (a.plays || 0) || (b.notes || 0) - (a.notes || 0));
+  if (played.length) return played[0].key;
+  const order = ["ExpertPlus", "Expert", "Hard", "Normal", "Easy"];
+  for (const name of order) {
+    const hit = diffs.find((d) => d.difficulty === name && d.characteristic === "Standard");
+    if (hit) return hit.key;
+  }
+  return diffs[diffs.length - 1].key;
+}
+
+/* Chart facts of one difficulty, fetched once per map and cached for the session. */
+async function mapChartStats(mapHash, key, signal) {
+  const cached = _mapChartCache.get(mapHash);
+  if (cached && cached[key]) return cached[key];
+  const stats = await api(`/api/maps/${encodeURIComponent(mapHash)}/chart/${encodeURIComponent(key)}`, { signal });
+  if (!signal.aborted) {
+    const bucket = _mapChartCache.get(mapHash) || {};
+    bucket[key] = stats;
+    _mapChartCache.set(mapHash, bucket);
+  }
+  return stats;
+}
+
+function cancelMapChartRequest() {
+  mapChartReqSeq++;
+  if (mapChartAbort) mapChartAbort.abort();
+  mapChartAbort = null;
+  const page = $("#md-page");
+  if (page) resetDetailFade(page);
+}
+
+function mapDetailIsOpen() {
+  const bar = $("#mapdetail-topbar");
+  return !!bar && bar.style.display !== "none" && !!currentMapDetail;
+}
+
+function closeMapDetail() {
+  mapDetailReqSeq++;                    // invalidate an in-flight request
+  if (mapDetailAbort) mapDetailAbort.abort();
+  cancelMapChartRequest();
+  resetDetailFade($("#mapdetail-content"));
+  $("#mapdetail-topbar").style.display = "none";
+  currentMapDetail = null;
+  switchTab(mapDetailReturnTab || "maps");
+}
+
+function difficultyPillClass(difficulty) {
+  return `pill diff-${escHtml(difficulty || "")}`;
+}
+
+function renderMapDetail(skeletonShown = false) {
+  const content = $("#mapdetail-content");
+  const row = currentMapDetail;
+  const seq = mapDetailReqSeq;
+  renderDetailTransition(content, () => renderMapDetailBody(content), skeletonShown,
+                         () => seq === mapDetailReqSeq && row === currentMapDetail);
+}
+
+function renderMapDetailBody(content) {
+  const row = currentMapDetail;
+  const cover = `/api/maps/${row.map_hash}/cover`;
+  const diffs = row.difficulties || [];
+  const platName = row.platform === "beatleader" ? "BeatLeader" : "ScoreSaber";
+  const stars = row.rated && row.stars
+    ? starChipHtml(row.stars, row.ranked).replace("</span>", ` <span class="k">${escHtml(platName)}</span></span>`)
+    : `<span class="muted-dash">–</span>`;
+  const diffBadges = diffs.map((d) =>
+    `<span class="${difficultyPillClass(d.difficulty)}">${escHtml(d.difficulty)}</span>`).join("");
+  const pageTabs = diffs.map((d) => {
+    const label = `${d.characteristic === "Standard" ? "" : escHtml(d.characteristic) + " "}${escHtml(d.difficulty)}`;
+    return `<button class="dt-tab md-diff${d.key === currentMapDifficulty ? " active" : ""}" data-diff="${escHtml(d.key)}">${label}`
+         + `${d.plays ? ` <span class="md-diff-played">${d.plays}</span>` : ""}</button>`;
+  }).join("");
+
+  content.innerHTML = `
+  <div class="detail-hero map-hero">
+    <img id="md-cover" class="cover" src="${cover}" alt="" onerror="this.onerror=null;this.src='/static/default.png'">
+    <div class="hero-title">
+      <h2>${escHtml(row.song_name || row.folder_name || t("maps.unknown_song"))}${row.song_sub_name ? ` <span class="k">${escHtml(row.song_sub_name)}</span>` : ""}</h2>
+      <div class="sub">${escHtml(row.song_author || "")}${row.mapper ? ` · ${escHtml(row.mapper)}` : ""}${row.bpm ? ` · ${row.bpm} BPM` : ""}${row.version ? ` · v${escHtml(String(row.version))}` : ""}</div>
+      <div class="badges">${diffBadges}${row.beatmap_key ? `<span class="map-key">${escHtml(row.beatmap_key)}</span>` : ""}</div>
+    </div>
+    <div class="hero-kpis">
+      <div class="hero-kpi"><div class="v">${stars}</div><div class="k">${t("maps.kpi.stars")}</div></div>
+      <div class="hero-kpi"><div class="v">${row.song_length ? fmt.dur(row.song_length) : "–"}</div><div class="k">${t("maps.col.length")}</div></div>
+      <div class="hero-kpi"><div class="v">${row.bpm ?? "–"}</div><div class="k">${t("maps.col.bpm")}</div></div>
+      <div class="hero-kpi"><div class="v">${diffs.length}</div><div class="k">${t("maps.col.difficulties")}</div></div>
+      <div class="hero-kpi"><div class="v">${row.plays.count}</div><div class="k">${t("maps.kpi.plays")}</div></div>
+      <div class="hero-kpi"><div class="v">${row.plays.last_ts ? fmt.ts(row.plays.last_ts).split(" ")[0] : "–"}</div><div class="k">${t("maps.kpi.last_play")}</div></div>
+    </div>
+  </div>
+  <div class="detail-tabs md-diff-tabs" id="md-diff-tabs">${pageTabs}</div>
+  <div id="md-page"></div>`;
+
+  $("#md-diff-tabs").addEventListener("click", (e) => {
+    const btn = e.target.closest(".md-diff");
+    if (!btn || btn.dataset.diff === currentMapDifficulty) return;
+    currentMapDifficulty = btn.dataset.diff;
+    $$("#md-diff-tabs .md-diff").forEach((b) => b.classList.toggle("active", b.dataset.diff === currentMapDifficulty));
+    renderMapDifficultyPage();
+  });
+  renderMapDifficultyPage();
+}
+
+async function renderMapDifficultyPage() {
+  const row = currentMapDetail;
+  const page = $("#md-page");
+  if (!row || !page) return;
+  cancelMapChartRequest();
+  const abort = new AbortController();
+  mapChartAbort = abort;
+  const chartSeq = mapChartReqSeq;
+  const detailSeq = mapDetailReqSeq;
+  const diff = (row.difficulties || []).find((d) => d.key === currentMapDifficulty);
+  const isCurrent = () => !abort.signal.aborted && chartSeq === mapChartReqSeq
+    && detailSeq === mapDetailReqSeq && currentMapDetail === row
+    && currentMapDifficulty === diff?.key && $("#md-page") === page;
+  row.chartSeries = null;
+  if (!diff) {
+    page.innerHTML = `<div class="empty">${t("mapdetail.no_difficulties")}</div>`;
+    return;
+  }
+  page.innerHTML = "";
+  let skeletonShown = false;
+  const skTimer = setTimeout(() => {
+    if (!isCurrent()) return;
+    renderDetailTransition(page, () => { page.innerHTML = mapDifficultySkeletonHtml(); });
+    skeletonShown = true;
+  }, MAP_DETAIL_SKELETON_DELAY);
+  let stats;
+  try {
+    stats = await mapChartStats(row.map_hash, diff.key, abort.signal);
+  } catch (e) {
+    clearTimeout(skTimer);
+    if (!isCurrent() || e.name === "AbortError") return;
+    resetDetailFade(page);
+    page.innerHTML = `<div class="empty" style="color:var(--red)">${t("detail.load_failed", { err: escHtml(e.message) })}</div>`;
+    return;
+  }
+  clearTimeout(skTimer);
+  if (!isCurrent()) return;
+  const merged = { ...diff, ...stats };
+  renderDetailTransition(page, () => {
+    // Cache hits and fresh responses commit through the same guarded page state.
+    row.chartSeries = stats.series || null;
+    page.innerHTML = mapDifficultyPageHtml(row, merged);
+    drawMapTimeline();
+    fixMapDetailLayout();
+    const hist = merged.history || [];
+    const list = $("#md-history");
+    if (list) {
+      list.innerHTML = hist.length
+        ? `<div class="replay-list">${hist.map((x) => replayItem(x)).join("")}</div>`
+        : `<div class="empty">${t("mapdetail.no_plays")}</div>`;
+      bindReplayItems();
+    }
+  }, skeletonShown, isCurrent);
+}
+
+function fixMapDetailLayout() {
+  if (freezeDetailCharts($("#md-page"))) drawMapTimeline(false);
+}
+
+function mapDifficultySkeletonHtml() {
+  const card = (w) =>
+    `<div class="sk-card"><div class="sk-line sk-title" style="width:40%"></div>` +
+    `<div class="sk-content">${[w, w - 14, w - 26].map((x) =>
+      `<div class="sk-line" style="width:${Math.max(24, x)}%"></div>`).join("")}</div></div>`;
+  return `<div class="detail-skeleton map-detail-skeleton"><div class="sk-grid">${card(80)}${card(90)}${card(60)}</div></div>`;
+}
+
+function mapDifficultyPageHtml(row, d) {
+  const n = (v, unit = "", digits = null) =>
+    v == null ? "–" : `${digits == null ? v : Number(v).toFixed(digits)}${unit}`;
+  const starsCell = d.stars ? starChipHtml(d.stars, d.ranked) : `<span class="muted-dash">–</span>`;
+  const size = (bytes) => bytes == null ? "–"
+    : bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.round(bytes / 1024)} KB`;
+  const chartRow = (k, v) => `<tr><th>${k}</th><td>${v}</td></tr>`;
+  const series = d.series || {};
+  const hasSeries = !!(series.available && (series.density_t || []).length);
+  // density toggles: same control (and legend/chart component) as the replay timeline, default
+  // = overall + both hands, bombs off (they are not cut, so they are not note density)
+  const toggles = [
+    ["density", t("mdchart.density"), true],
+    ["left", t("mdchart.left"), true],
+    ["right", t("mdchart.right"), true],
+    ["bombs", t("mdchart.bombs"), false],
+  ].map(([value, label, checked]) =>
+    `<label><input type="checkbox" class="md-tl-toggle" value="${value}"${checked ? " checked" : ""}> ${label}</label>`
+  ).join("");
+  const seriesCard = hasSeries
+    ? `<div class="chart-controls">${toggles}</div><div id="md-chart" class="chart"></div>`
+    : `<div class="empty">${t("mdchart.unavailable")}</div>`;
+  return `
+  <div class="detail-grid md-grid">
+    <div class="surface">
+      <div class="surface-title">${t("mapdetail.card.chart")} <span class="${difficultyPillClass(d.difficulty)}">${escHtml(d.difficulty)}</span></div>
+      <table class="metrics-table"><tbody>
+        ${chartRow(t("maps.kpi.stars"), starsCell)}
+        ${chartRow(t("mapdetail.notes"), n(d.notes))}
+        ${chartRow("NPS", n(d.nps, "", 2))}
+        ${chartRow("NJS", n(d.njs, "", 2))}
+        ${chartRow(t("mapdetail.chart_span"), d.seconds ? fmt.dur(d.seconds) : "–")}
+        ${chartRow(t("mapdetail.chart_size"), size(d.filesize))}
+        ${chartRow(t("mapdetail.characteristic"), escHtml(d.characteristic || "–"))}
+        ${chartRow(t("mapdetail.file_name"), escHtml(d.filename || "–"))}
+        ${d.label ? chartRow(t("mapdetail.label"), escHtml(d.label)) : ""}
+        ${d.notes_available === false ? chartRow("", `<span class="muted-dash">${t("mapdetail.notes_unavailable")}</span>`) : ""}
+      </tbody></table>
+    </div>
+    <div class="surface">
+      <div class="surface-title">${t("mdchart.card")}</div>
+      ${seriesCard}
+    </div>
+    <div class="surface">
+      <div class="surface-title">${t("mapdetail.card.performance")}</div>
+      <table class="metrics-table"><tbody>
+        ${chartRow(t("maps.kpi.plays"), n(d.plays))}
+        ${chartRow(t("mapdetail.best_score"), d.best_score ? fmt.num(d.best_score) : "–")}
+        ${chartRow(t("mapdetail.best_acc"), d.best_acc ? fmt.acc(d.best_acc) : "–")}
+        ${chartRow(t("mapdetail.full_combo"), d.full_combo ? "FC" : "–")}
+        ${chartRow(t("mapdetail.map_plays"), String(row.plays.count))}
+        ${chartRow(t("mapdetail.first_play"), row.plays.first_ts ? fmt.ts(row.plays.first_ts) : "–")}
+        ${chartRow(t("mapdetail.last_play"), row.plays.last_ts ? fmt.ts(row.plays.last_ts) : "–")}
+      </tbody></table>
+    </div>
+  </div>
+  <div class="surface same-map-history">
+    <div class="surface-title">${t("mapdetail.card.history")}</div>
+    <div id="md-history"><div class="empty">${t("common.loading")}</div></div>
+  </div>`;
+}
+
+/* Density chart of the open difficulty. Same component and interaction as the replay timeline
+   (lineChart + .chart-controls), but the source is the CHART itself - no replay involved - so it
+   has its own series registry and its own toggle wiring. */
+const MDCHART_COLORS = {
+  density: "#8b96ab",     // overall: the same grey the replay density uses
+  left: "#3d9bff",        // left hand: blue
+  right: "#ff3d5a",       // right hand: red
+  bombs: "#f5c542",       // bombs: yellow (never cut, so a different quantity from the rest)
+};
+const MDCHART_LABELS = {
+  density: () => t("mdchart.density"), left: () => t("mdchart.left"),
+  right: () => t("mdchart.right"), bombs: () => t("mdchart.bombs"),
+};
+
+function drawMapTimeline(animate = true) {
+  const box = $("#md-chart");
+  if (!box) return;
+  $$("#md-page .md-tl-toggle").forEach((c) => c.onchange = () => drawMapTimeline(false));
+  const series = (currentMapDetail && currentMapDetail.chartSeries) || null;
+  if (!series) return;
+  const times = series.density_t || [];
+  const active = $$("#md-page .md-tl-toggle").filter((c) => c.checked).map((c) => c.value);
+  const out = [];
+  for (const key of active) {
+    const values = series[key] || [];
+    const points = times.map((x, i) => ({ x, y: values[i] == null ? 0 : values[i] }));
+    if (!points.length) continue;
+    const ys = points.map((p) => p.y);
+    const lo = Math.min(...ys), hi = Math.max(...ys);
+    const fmt = (v) => t("mdchart.unit", { v: v.toFixed(2) });
+    out.push({
+      key, name: (MDCHART_LABELS[key] || (() => key))(), color: MDCHART_COLORS[key] || "#8b96ab",
+      points, marked: [], step: false,
+      rangeText: hi - lo < 1e-12 ? t("tl.constant", { v: fmt(lo) })
+                                 : t("tl.range", { lo: fmt(lo), hi: fmt(hi) }),
+    });
+  }
+  if (!out.length) {
+    box.innerHTML = `<div class="empty">${t("mdchart.none_selected")}</div>`;
+    return;
+  }
+  const axis = times.length > 1 ? { xMin: times[0], xMax: times[times.length - 1] } : {};
+  lineChart(box, out, {
+    fmtX: (v) => fmt.dur2(v), yDec: 0,
+    normalize: true, hideYLabels: true,
+    valueFmt: (s, v) => t("mdchart.unit", { v: Number(v).toFixed(2) }),
+    animate, ...axis,
+  });
+}
+
+function mapItem(m) {
+  const cover = `/api/maps/${m.map_hash}/cover`;
+  const rated = m.rated && m.stars;  const starCell = rated
+    ? `<div class="num"><div class="v">${starChipHtml(m.stars, m.ranked)}</div><div class="k">${t("maps.col.stars")}</div></div>`
+    : "";
+  const keyBadge = m.beatmap_key
+    ? `<span class="map-key">${escHtml(m.beatmap_key)}</span>` : "";
+  // difficulty pills, hardest last (the API keeps the file order, which runs Easy -> E+)
+  const diffPills = (m.difficulties || [])
+    .map((d) => `<span class="pill diff-${escHtml(d.difficulty)}">${escHtml(d.difficulty)}</span>`)
+    .join(" ");
+  const sub = [
+    m.song_author ? escHtml(m.song_author) : "",
+    m.mapper ? escHtml(m.mapper) : "",
+    m.bpm ? `${Math.round(m.bpm)} BPM` : "",
+    m.version ? `v${escHtml(String(m.version))}` : "",
+  ].filter(Boolean).join(" · ");
+  const npsTxt = m.nps_max != null ? Number(m.nps_max).toFixed(2) : "–";
+  const bpmTxt = m.bpm ? String(Math.round(m.bpm)) : "–";
+  const lenTxt = m.song_length ? fmt.dur(m.song_length) : "–";
+  const diffCount = (m.difficulties || []).length;
+  return `<div class="replay-item map-item" data-map-hash="${escHtml(m.map_hash)}" data-song="${escHtml(m.song_name || m.folder_name || "")}">
+    <img src="${cover}" loading="lazy" onerror="this.onerror=null;this.src='/static/default.png'" alt="">
+    <div>
+      <div class="title">${escHtml(m.song_name || m.folder_name || t("maps.unknown_song"))} ${keyBadge}</div>
+      <div class="sub">${sub}</div>
+      <div class="pills">${diffPills}</div>
+    </div>
+    <div class="num"><div class="v">${diffCount}</div><div class="k">${t("maps.col.difficulties")}</div></div>
+    <div class="num"><div class="v">${npsTxt}</div><div class="k">${t("maps.col.nps")}</div></div>
+    <div class="num"><div class="v">${lenTxt}</div><div class="k">${t("maps.col.length")}</div></div>
+    <div class="num"><div class="v">${bpmTxt}</div><div class="k">${t("maps.col.bpm")}</div></div>
+    ${starCell}
+  </div>`;
+}
+
+async function loadMaps(page = 1) {
+  const seq = ++mapsReqSeq;
+  mapsPage = Math.max(1, Number(page) || 1);
+  const q = $("#maps-filter").value.trim();
+  const sort = $("#maps-sort").value;
+  const dir = mapsDirIsDesc() ? "desc" : "asc";
+  // t() needs the language table, which is only loaded after init - so this runs here (and
+  // not at module scope). data-i18n covers text / placeholder / title, not aria-label.
+  $("#maps-sort-trigger").setAttribute("aria-label", t("maps.sort"));
+  syncMapsDirButton();
+  const url = `/api/maps/library?page=${mapsPage}&per_page=${MAPS_PAGE_SIZE}`
+            + `&sort=${encodeURIComponent(sort)}&dir=${dir}`
+            + `${q ? `&q=${encodeURIComponent(q)}` : ""}`;
+  let data;
+  try {
+    data = await api(url);
+  } catch (e) {
+    if (seq === mapsReqSeq) toast(t("maps.load_failed", { err: e.message }));
+    return;
+  }
+  if (seq !== mapsReqSeq) return;          // a newer request won
+  const items = data.items || [];
+  $("#maps-count").textContent = t("maps.count", { n: fmt.num(data.total || 0) });
+  $("#maps-list").innerHTML = items.length
+    ? items.map(mapItem).join("")
+    : `<div class="empty">${q ? t("maps.empty_filter", { q: escHtml(q) }) : t("maps.empty")}</div>`;
+  bindMapItems();
+  const pages = Math.max(1, Math.ceil((data.total || 0) / MAPS_PAGE_SIZE));
+  renderPagination(data.total || 0, mapsPage, pages, "count",
+                   (p) => loadMaps(p), $("#maps-pagination"));
+}
+
+function bindMapItems() {
+  $$("#maps-list .map-item").forEach((el) => {
+    el.addEventListener("click", () => openMapDetail(el.dataset.mapHash));
+  });
+}
+
+/* Sort control: the settings page's glass list popover (see openListPopover above), not a
+   native <select> - the app's own material instead of the OS dropdown. The hidden input
+   stays the single source of truth, so loadMaps reads it like it read the <select>.
+   The direction button beside it flips asc <-> desc and reloads the list. */
+function mapSortOptions() {
+  return [
+    { value: "name", label: t("maps.sort_name") },
+    { value: "author", label: t("maps.sort_author") },
+    { value: "length", label: t("maps.sort_length") },
+    // one star key: the rating available locally belongs to the active data source, so a
+    // per-integration pair would only ever sort identically (settings → cloud data source)
+    { value: "stars", label: t("maps.sort_stars") },
+    { value: "added", label: t("maps.sort_added") },
+    { value: "plays", label: t("maps.sort_plays") },
+  ];
+}
+
+function openMapsSortPopover() {
+  const trigger = $("#maps-sort-trigger");
+  const input = $("#maps-sort");
+  openListPopover({
+    id: "maps-sort",
+    options: mapSortOptions(),
+    value: input.value,
+    trigger,
+    ariaLabel: t("maps.sort"),
+    onPick: (value, label) => {
+      input.value = value;
+      const shown = trigger.querySelector(".enum-value");
+      if (shown) shown.textContent = label;
+      loadMaps(1);
+    },
+  });
+}
+
+/* Direction: one button, two states. The label names what pressing it will do (正序 ->
+   "switch to asc"), the aria-pressed carries the current state, and the arrow flips. */
+function mapsDirIsDesc() {
+  return $("#maps-dir").dataset.dir === "desc";
+}
+
+function syncMapsDirButton() {
+  const btn = $("#maps-dir");
+  const desc = mapsDirIsDesc();
+  const label = desc ? t("maps.dir.asc") : t("maps.dir.desc");
+  const shown = btn.querySelector(".dir-label");
+  if (shown) shown.textContent = label;
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+  btn.setAttribute("aria-pressed", desc ? "true" : "false");
+  const icon = btn.querySelector(".dir-icon");
+  if (icon) icon.style.transform = desc ? "rotate(180deg)" : "";
+}
+
+$("#maps-filter").addEventListener("input", () => {
+  clearTimeout(mapsFilterTimer);
+  mapsFilterTimer = setTimeout(() => loadMaps(1), 250);   // typing pause, not every keystroke
+});
+$("#maps-dir").addEventListener("click", () => {
+  const btn = $("#maps-dir");
+  btn.dataset.dir = mapsDirIsDesc() ? "asc" : "desc";
+  loadMaps(1);
+});
+$("#btn-maps-scan").addEventListener("click", async () => {
+  if (!requirePaths("maps")) return;
+  try {
+    await api("/api/maps/rescan", { method: "POST" });
+    pollTask();
+  } catch (e) { toast(e.message); }
+});
+
 const HIST_PAGE_SIZE = 300;
 /* 取数上限（2026-09 实测决定）：默认与搜索都用同一个上限，因为**默认视图也要能翻页**
    （只显示 300 条却不能翻页是不对的）。服务器返回约 **1083 字节/行**（实测 424 行 =
@@ -2747,6 +3302,10 @@ $("#btn-ss-validate").addEventListener("click", async () => {
   buildTimelineI18n();          // chart labels (depends on dict)
   applyStaticI18n();            // index.html static text
   bindContextMenus();           // 右键菜单：文档级委托，只绑一次（依赖 i18n，故放在此处）
+  // The map detail's back button lives in static HTML, so it is wired once here - binding it in a
+  // render function meant that leaving the page (and the Escape key, which goes through the same
+  // button) did nothing until the replay detail happened to render.
+  $("#btn-mapdetail-back").onclick = closeMapDetail;
   I18N.renderLangSwitch();      // settings language card buttons (dynamic)
   // 云端数据源切换卡片（设置 → 玩家）：初始状态由 /api/settings 的值驱动，
   // loadSettings() 时刷新；点击即保存并刷新页面（即时生效）
@@ -2809,6 +3368,10 @@ if (!window._saberlabResizeBound) {
     clearTimeout(rt);
     rt = setTimeout(() => {
       if (currentReplay) { drawTimeline(false); drawMotionSeries(false); }
+      if (currentMapDetail && $("#tab-mapdetail").classList.contains("active")) {
+        fixMapDetailLayout();
+        drawMapTimeline(false);
+      }
     }, 150);
   });
   window._saberlabResizeBound = true;
@@ -2899,6 +3462,76 @@ function setGroup(g) {
 /* 控件生成：type -> 输入控件（带 name 属性，满足表单可访问性）
    注意：局部变量名避开全局 t()（i18n），防止遮蔽——曾用 const t = item.type
    导致 boolean/secret 分支调用 t("...") 报 "t is not a function"。 */
+/* ---------------- glass list popover (reusable UI unit, 2026-10) ----------------
+   The frosted trigger button + anchored option list used across the app. Reuse this instead
+   of a native <select> anywhere the UI wants the app's own material: the native dropdown
+   list is drawn by the OS, so it cannot be styled at all.
+
+   Visual source of truth: the settings page's enum control (settings -> star palette was the
+   first user of it) - .enum-trigger / .enum-value / .enum-caret for the button and
+   .popover-list / .popover-opt / .popover-opt-check / .popover-opt-reason inside the generic
+   openPopover (so material, entrance/exit animation, anchor flipping, outside click, Escape
+   and scroll-to-close all come for free).
+
+   Contract:
+     openListPopover({ id, options, value, trigger, ariaLabel, onPick })
+       id        string  - stable id, also the "same button clicked again = collapse" key
+       options   array   - [{ value, label, disabled?, reason? }]
+       value     string  - currently selected value (marked with a check)
+       trigger   element - the button the list anchors to (gets .open + aria-expanded)
+       ariaLabel string  - optional accessible name for the trigger
+       onPick    fn(value, label) - called on a usable option, after the list is closed
+   The caller owns the state: this only renders, marks the current value and reports picks. */
+let listPopoverOpenId = null;    // which list is open (so re-clicking its trigger collapses it)
+
+function listPopoverHtml(id, options, value) {
+  return `<div class="popover-list" id="${id}-list" role="listbox">` +
+    options.map((o) => {
+      const disabled = !!o.disabled;
+      const selected = String(o.value) === String(value);
+      return `<button type="button" class="popover-opt` +
+        (selected ? " active" : "") + (disabled ? " disabled" : "") +
+        `" role="option" aria-selected="${selected}"` +
+        (disabled ? ` aria-disabled="true" tabindex="-1"` : "") +
+        ` data-value="${escHtml(o.value)}">` +
+        `<span class="popover-opt-label">${escHtml(o.label)}</span>` +
+        (disabled && o.reason
+          ? `<span class="popover-opt-reason">${escHtml(o.reason)}</span>`
+          : `<span class="popover-opt-check" aria-hidden="true">✓</span>`) +
+        `</button>`;
+    }).join("") + `</div>`;
+}
+
+function openListPopover({ id, options, value, trigger, ariaLabel = "", onPick }) {
+  if (!trigger || !options || !options.length) return null;
+  // same trigger clicked again = collapse (not a re-played entrance animation); onClose
+  // resets the id for every other way out (outside click / Escape / scroll)
+  if (listPopoverOpenId === id) { closePopover(); return null; }
+  const el = openPopover({
+    anchor: trigger,
+    body: listPopoverHtml(id, options, value),
+    onClose: () => {
+      trigger.classList.remove("open");
+      trigger.setAttribute("aria-expanded", "false");
+      if (listPopoverOpenId === id) listPopoverOpenId = null;
+    },
+  });
+  listPopoverOpenId = id;
+  trigger.classList.add("open");
+  trigger.setAttribute("aria-expanded", "true");
+  if (ariaLabel) trigger.setAttribute("aria-label", ariaLabel);
+  el.querySelectorAll(".popover-opt").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.classList.contains("disabled")) return;   // unusable option: no reaction
+      const picked = btn.dataset.value;
+      const opt = options.find((o) => String(o.value) === String(picked));
+      closePopover();
+      if (onPick) onPick(picked, opt ? opt.label : "");
+    });
+  });
+  return el;
+}
+
 /* enum 下拉：值为隐藏 input（data-key），外观与交互复用通用 openPopover——
    锚定在触发按钮下方（空间不足自动翻转）、玻璃材质、popIn/popOut 出入场、
    点击外部 / Escape / 滚动关闭。选中即写回隐藏 input 并更新按钮文案。 */
@@ -2915,22 +3548,7 @@ function openEnumPopover(cid) {
   // 唯一事实来源 = 同键的隐藏 input（collectSettings 也读它）
   const hidden = document.querySelector(`#set-form input[data-enum="${cid}"]`);
   const cur = (hidden && hidden.value) || "";
-  const body = `<div class="popover-list" id="${cid}-list" role="listbox">` +
-    opts.map((o) => {
-      // 不可用项（如"数据不足"的个人基准）：置灰、不可点、右侧写原因
-      const disabled = !!o.disabled;
-      const selected = String(o.value) === String(cur);
-      return `<button type="button" class="popover-opt` +
-        (selected ? " active" : "") + (disabled ? " disabled" : "") +
-        `" role="option" aria-selected="${selected}"` +
-        (disabled ? ` aria-disabled="true" tabindex="-1"` : "") +
-        ` data-value="${escHtml(o.value)}">` +
-        `<span class="popover-opt-label">${escHtml(o.label)}</span>` +
-        (disabled && o.reason
-          ? `<span class="popover-opt-reason">${escHtml(o.reason)}</span>`
-          : `<span class="popover-opt-check" aria-hidden="true">✓</span>`) +
-        `</button>`;
-    }).join("") + `</div>`;
+  const body = listPopoverHtml(cid, opts, cur);
   const el = openPopover({
     anchor: trigger,
     body,
