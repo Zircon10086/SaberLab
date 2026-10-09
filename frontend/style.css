@@ -889,9 +889,6 @@ mark {
 #replay-frame-wrap { padding: 2px; }
 
 #replay-frame {
-  height: 100%; border: 0; border-radius: 0;
-}
-#replay-frame {
   width: 100%;
   border: 1px solid var(--border); border-radius: var(--radius-md);
   background: #0e1117; display: block;
