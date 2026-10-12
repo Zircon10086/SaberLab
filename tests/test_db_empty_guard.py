@@ -1,11 +1,13 @@
-"""空库兜底拦截回归测试（v1.4.1）。
+"""Empty-database guard regression test (v1.4.1).
 
-需求：数据库为空（首次全新启动 / 清空分析缓存后），除总览「⚡ 一键刷新」
-外，所有后台任务必须拒绝执行并返回明确引导（几乎所有功能都建立在已扫描
-入库的数据之上）。
+Requirement: while the database is empty (a brand-new first launch / after clearing
+the analysis cache), every background task except the overview's "⚡ one-click refresh"
+must refuse to run and return clear guidance (nearly every feature is built on data
+that has already been scanned into the DB).
 
-实现：后端实时判定 count_replays()==0（毫秒级 COUNT，无全局标志位
-状态同步问题）；refresh/all 放行（它是空库唯一正确入口）。
+Implementation: the backend checks count_replays()==0 live (a millisecond-level COUNT,
+so there is no global flag that could fall out of sync); refresh/all is let through
+(it is the only correct entry point for an empty database).
 """
 import pathlib
 import sys
@@ -17,7 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from fastapi import HTTPException  # noqa: E402
 
-# 模块级副作用：load_config + Repository（真实库只读连接），与现有测试一致
+# module-level side effect: load_config + Repository (read-only connection to the real DB), as in the existing tests
 import backend.main as m  # noqa: E402
 
 
@@ -29,12 +31,12 @@ class TestDbEmptyGuard(unittest.TestCase):
         m.repo.count_replays = self._orig_count
 
     def test_not_empty_passes(self):
-        """库非空：拦截函数放行。"""
+        """DB not empty: the guard lets it through."""
         m.repo.count_replays = lambda: 332
-        m._require_db_populated()   # 不抛即通过
+        m._require_db_populated()   # passing == not raising
 
     def test_empty_raises_400(self):
-        """库为空：抛 400 且消息引导一键刷新。"""
+        """DB empty: raises 400 and the message points at the one-click refresh."""
         m.repo.count_replays = lambda: 0
         with self.assertRaises(HTTPException) as ctx:
             m._require_db_populated()
@@ -42,7 +44,7 @@ class TestDbEmptyGuard(unittest.TestCase):
         self.assertIn("一键刷新", str(ctx.exception.detail))
 
     def test_task_apis_rejected_when_empty(self):
-        """空库时：除 refresh/all 外全部任务 API 拒绝执行（400 早于任务启动）。"""
+        """Empty DB: every task API except refresh/all is refused (the 400 comes before the task starts)."""
         m.repo.count_replays = lambda: 0
         apis = [
             ("api_analyze_latest", lambda: m.api_analyze_latest(None)),
@@ -60,7 +62,7 @@ class TestDbEmptyGuard(unittest.TestCase):
                              f"{name} 应返回 400")
 
     def test_refresh_all_has_no_guard(self):
-        """refresh/all 是空库唯一入口：源码中不得调用 _require_db_populated。"""
+        """refresh/all is the only entry point on an empty DB: it must not call _require_db_populated."""
         import inspect
         src = inspect.getsource(m.api_refresh_all)
         self.assertNotIn("_require_db_populated", src)

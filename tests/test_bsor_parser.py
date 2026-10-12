@@ -1,7 +1,7 @@
-"""BSOR Parser 黄金回归测试（设计文档 §19.1 Fixture #001）。
+"""BSOR Parser golden regression test (design doc §19.1 Fixture #001).
 
-使用真实 SECRET BOSS Expert Replay。文件不存在时跳过（CI 无游戏环境）。
-运行:  .venv\\Scripts\\python.exe -m unittest tests.test_bsor_parser -v
+Uses the real SECRET BOSS Expert replay. Skipped when the file is absent (CI has no game install).
+Run:  .venv\\Scripts\\python.exe -m unittest tests.test_bsor_parser -v
 """
 import pathlib
 import sys
@@ -12,11 +12,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.bsor.parser import parse_file, parse_bytes, UnsupportedFormatError, BsorError  # noqa: E402
 from backend.bsor.models import NoteParams  # noqa: E402
-from backend.analysis.scoring import compute_score, cut_scores  # noqa: E402
+from backend.analysis.scoring import compute_score  # noqa: E402
 from backend.analysis.accuracy import analyze_accuracy  # noqa: E402
 
-# 黄金夹具已本地化：复制自 LocalLeaderboard/Replays 的 1786976654 版本
-# （原 BeatLeader/Replays 路径下的同名文件已被新记录覆盖）
+# The golden fixture is local now: copied from the 1786976654 copy in LocalLeaderboard/Replays
+# (the file of the same name under BeatLeader/Replays has since been overwritten by a newer record)
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "secret-boss-expert.bsor"
 
 
@@ -36,7 +36,7 @@ class TestBsorParserFixture(unittest.TestCase):
                          "807E71EB310B8AEBA98A643C3E8C390E24E89A80")
         self.assertEqual(info.score, 1384913)
         self.assertTrue(info.won)
-        # 非 ASCII 玩家名必须正确解码（官方编码器长度 bug 场景）
+        # a non-ASCII player name must decode correctly (the official encoder's length-bug case)
         self.assertTrue(len(info.player_name) > 0)
 
     def test_counts(self):
@@ -52,7 +52,7 @@ class TestBsorParserFixture(unittest.TestCase):
         self.assertIsNotNone(self.replay.controller_offsets)
 
     def test_golden_metrics(self):
-        """设计文档 §19.1 断言（Pre/Center/Post 左右手）。"""
+        """Design doc §19.1 assertions (Pre/Center/Post for both hands)."""
         acc = analyze_accuracy(self.replay)
         left, right = acc["hands"]["left"], acc["hands"]["right"]
         self.assertAlmostEqual(left["center_score_avg"], 2.57, delta=0.02)
@@ -63,7 +63,7 @@ class TestBsorParserFixture(unittest.TestCase):
         self.assertAlmostEqual(right["post_score_avg"], 29.62, delta=0.02)
 
     def test_recomputed_score_matches_recorded(self):
-        """官方计分移植：重算总分必须等于 Replay 记录的总分。"""
+        """Official scoring port: the recomputed total score must equal the score recorded in the replay."""
         result = compute_score(self.replay)
         self.assertEqual(result.total_score, self.replay.info.score)
 
@@ -96,7 +96,7 @@ class TestParserErrors(unittest.TestCase):
 
     def test_truncated(self):
         import struct
-        data = struct.pack("<i", 0x442D3D69) + b"\x01" + b"\x00"  # info section, 截断
+        data = struct.pack("<i", 0x442D3D69) + b"\x01" + b"\x00"  # info section, truncated
         with self.assertRaises(BsorError):
             parse_bytes(data)
 

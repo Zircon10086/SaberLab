@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import pathlib
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -424,6 +425,32 @@ def compute_level_nps(folder: pathlib.Path, info: Optional[dict] = None) -> dict
     return out
 
 
+#: A custom level's identity is its SongCore SHA1 (40 hex chars). Anything else that a replay
+#: carries in `map_hash` (e.g. `CRABRAVE`, `100BILLS`) is a Beat Saber *official* level id:
+#: those levels are packed game assets with no info.dat, so they can never be hashed locally.
+_CUSTOM_HASH_RE = re.compile(r"^[0-9A-F]{40}$")
+
+#: Beat Saber and the replay tools prefix their level ids with this (`custom_level_<HASH>` for a
+#: custom map, `custom_level_<LEVELID>` for an official one). SaberLab stores and looks up the
+#: bare identity, so the prefix is stripped wherever an identity enters: the 3D viewer build
+#: passes prefixed ids through after its official-level patch
+#: (_tools/patch_chro_official_replays.py), and a prefixed request must not turn into a 404.
+_LEVEL_ID_PREFIX = "custom_level_"
+
+
+def normalize_level_id(value: str) -> str:
+    """The canonical level identity: upper case, without the `custom_level_` prefix."""
+    key = (value or "").strip()
+    if key[:len(_LEVEL_ID_PREFIX)].lower() == _LEVEL_ID_PREFIX:
+        key = key[len(_LEVEL_ID_PREFIX):]
+    return key.upper()
+
+
+def is_custom_hash(value: str) -> bool:
+    """True when the value looks like a SongCore level hash rather than an official level id."""
+    return bool(_CUSTOM_HASH_RE.match(normalize_level_id(value)))
+
+
 def compute_level_hash(folder: pathlib.Path, info: Optional[dict] = None) -> Optional[str]:
     """Compute the level hash using the SongCore algorithm."""
     info_path = _find_ci(folder, "info.dat")
@@ -453,8 +480,12 @@ def compute_level_hash(folder: pathlib.Path, info: Optional[dict] = None) -> Opt
 
 class MapResolver:
     def __init__(self, custom_levels_dir: str, repo: Repository,
-                 songcore_cache_path: str = ""):
+                 songcore_cache_path: str = "", downloaded_levels_dir: str = ""):
         self.levels_dir = pathlib.Path(custom_levels_dir)
+        # Second map root: the folders "补全丢失谱面" downloaded into SaberLab's own data dir.
+        # Kept out of the user's game folder on purpose (product decision, 2026-10).
+        self.extra_levels_dir = (pathlib.Path(downloaded_levels_dir)
+                                 if downloaded_levels_dir else None)
         self.repo = repo
         self.songcore_cache_path = pathlib.Path(songcore_cache_path) if songcore_cache_path else None
         self._negative_cache: set[str] = set()   # hashes still missing after a scan, to avoid repeated rescans
@@ -496,9 +527,29 @@ class MapResolver:
         return out
 
     # ---------- scan ----------
+    def _scan_roots(self) -> list[tuple[pathlib.Path, bool]]:
+        """The map roots to walk: (directory, its folder names are map identities).
+
+        The second element is the "downloaded" root's contract: a folder there is named after
+        the level it holds (SongCore hash for a custom level, the official level id otherwise),
+        so the folder name IS the identity and nothing has to be recomputed.
+        """
+        roots: list[tuple[pathlib.Path, bool]] = [(self.levels_dir, False)]
+        extra = self.extra_levels_dir
+        if extra is not None:
+            same = False
+            try:
+                same = extra.resolve() == self.levels_dir.resolve()
+            except OSError:
+                same = str(extra) == str(self.levels_dir)
+            if not same:
+                roots.append((extra, True))
+        return roots
+
     def scan(self, progress_cb: Optional[Callable[[int, int, str], None]] = None,
              force_recompute: bool = False) -> dict:
-        """Scan CustomLevels and build the hash -> level cache."""
+        """Scan the map roots (game CustomLevels + SaberLab's downloaded levels) and build the
+        hash -> level cache."""
         stats = {"scanned": 0, "from_songcore_cache": 0, "computed": 0,
                  "reused_db": 0, "errors": 0, "duration_sec": 0.0}
         t0 = time.time()
@@ -516,16 +567,30 @@ class MapResolver:
         except Exception as e:  # noqa: BLE001 - a missing sort key must not fail the scan
             print(f"[maps] added_at backfill failed: {e}", flush=True)
 
-        folders = [p for p in self.levels_dir.iterdir() if p.is_dir()]
-        sc_cache = self.load_songcore_cache()
-        total = len(folders)
+        jobs: list[tuple[pathlib.Path, bool]] = []
+        for root, downloaded in self._scan_roots():
+            if not root.exists():
+                if downloaded:
+                    # Fresh install: nothing has been downloaded yet - not a problem, and it
+                    # must not look like one (the stat below is what the UI reports).
+                    stats["downloaded_dir_missing"] = str(root)
+                    continue
+                stats["error"] = f"目录不存在: {root}"
+                stats["duration_sec"] = round(time.time() - t0, 2)
+                return stats
+            for p in root.iterdir():
+                if p.is_dir():
+                    jobs.append((p, downloaded))
 
-        for i, folder in enumerate(folders):
+        sc_cache = self.load_songcore_cache()
+        total = len(jobs)
+
+        for i, (folder, downloaded) in enumerate(jobs):
             if progress_cb and (i % 50 == 0 or i == total - 1):
                 progress_cb(i + 1, total, folder.name)
             stats["scanned"] += 1
             try:
-                self._process_folder(folder, sc_cache, stats, force_recompute)
+                self._process_folder(folder, sc_cache, stats, force_recompute, downloaded)
             except Exception as e:  # noqa: BLE001 - one failing level must not abort the whole pass
                 # Counted in stats, but the reason would otherwise be lost: a
                 # "3 maps failed to scan" report needs the cause to be actionable.
@@ -533,6 +598,44 @@ class MapResolver:
                 stats["errors"] += 1
         stats["duration_sec"] = round(time.time() - t0, 2)
         return stats
+
+    def store_map_folder(self, folder: pathlib.Path, map_hash: str,
+                         hash_source: str = "downloaded") -> Optional[dict]:
+        """Read one level folder and put it in the library, using `map_hash` as its identity.
+
+        Returns the stored row, or None when the folder holds no readable level. Used by the
+        "补全丢失谱面" task right after it unpacks a download, so the new map is usable without
+        waiting for a full scan (a scan would find it too - this only makes it immediate).
+        """
+        key = (map_hash or "").strip().upper()
+        if not key:
+            return None
+        info = read_level_info(folder)
+        if info is None:
+            return None
+        self.repo.upsert_map({
+            "map_hash": key,
+            "folder_name": folder.name,
+            "path": str(folder),
+            "song_name": info["song_name"],
+            "song_author": info["song_author"],
+            "mapper": info["mapper"],
+            "bpm": info["bpm"] or 0,
+            "song_length": info["song_length"] or 0,
+            "version": info["version"],
+            "difficulties": json.dumps(info["difficulties"], ensure_ascii=False),
+            "info_json": json.dumps({
+                "environment": info["environment"],
+                "song_filename": info["song_filename"],
+                "cover_filename": info["cover_filename"],
+                "song_sub_name": info["song_sub_name"],
+            }, ensure_ascii=False),
+            "hash_source": hash_source,
+        })
+        # A stored identity is no longer "missing": drop it from the negative cache so the next
+        # cover/detail request resolves it instead of answering "not in library" for 30 seconds.
+        self._negative_cache.discard(key)
+        return self.repo.get_map(key)
 
     def _backfill_added_at(self) -> int:
         """Give every map row an added_at value, once. Returns how many rows were filled.
@@ -563,16 +666,25 @@ class MapResolver:
         return filled
 
     def _process_folder(self, folder: pathlib.Path, sc_cache: dict[str, str],
-                        stats: dict, force_recompute: bool) -> None:
+                        stats: dict, force_recompute: bool,
+                        downloaded: bool = False) -> None:
         info = read_level_info(folder)
         if info is None:
             stats["errors"] += 1
             return
 
-        song_hash = sc_cache.get(folder.name)
+        song_hash = ""
+        if downloaded:
+            # A downloaded folder is named after the level it holds, so there is nothing to
+            # hash: a custom level arrives with its SongCore hash, an official level with its
+            # official id (the packed game assets can never be hashed, which is exactly why
+            # they used to be invisible to the library).
+            song_hash = folder.name.strip().upper()
+        if not song_hash:
+            song_hash = sc_cache.get(folder.name)
         if song_hash:
             stats["from_songcore_cache"] += 1
-            source = "songcore_cache"
+            source = "downloaded" if downloaded else "songcore_cache"
         else:
             # Try to reuse the DB cache: skip recomputation when the folder is unchanged.
             # A row that stored no song name is never trusted, whatever its timestamps say: it
@@ -638,6 +750,47 @@ class MapResolver:
         # (P1-3.3), making full rescans O(N²).
         return self.repo.get_map_by_path(path)
 
+    def clear_missing(self, level_key: str) -> None:
+        """Forget that this level was missing, because a new attempt to fetch it is starting.
+
+        The negative cache is what stops cover requests on the history page from re-scanning a
+        library that really does not hold a level. Downloading one is the one situation where
+        the answer can legitimately change within that window.
+        """
+        key = (level_key or "").strip().upper()
+        if key:
+            self._negative_cache.discard(key)
+
+    def downloaded_folder(self, level_key: str) -> Optional[pathlib.Path]:
+        """The folder this level would live in under the download root, if it is there.
+
+        The layout is one folder per level named after the level (see fill.py): the SongCore
+        hash for a custom level, the official level id for a game level.
+        """
+        if self.extra_levels_dir is None:
+            return None
+        key = (level_key or "").strip().upper()
+        if not key:
+            return None
+        folder = self.extra_levels_dir / key
+        try:
+            if folder.is_dir() and _find_ci(folder, "info.dat") is not None:
+                return folder
+        except OSError:
+            return None
+        return None
+
+    def adopt_downloaded_folder(self, level_key: str,
+                                hash_source: str = "downloaded") -> Optional[dict]:
+        """Put a level that already sits in the download root into the library.
+
+        Returns the row, or None when that folder is not there (or holds no readable level).
+        """
+        folder = self.downloaded_folder(level_key)
+        if folder is None:
+            return None
+        return self.store_map_folder(folder, level_key, hash_source)
+
     # ---------- resolve ----------
     def resolve(self, map_hash: str, trigger_scan: bool = True) -> Optional[dict]:
         """Look up a local level by the replay's map_hash.
@@ -657,6 +810,11 @@ class MapResolver:
             return row
         if key in self._negative_cache or not trigger_scan:
             return None
+        # Nothing in the library: the folder may already sit in the download root (another
+        # SaberLab instance downloaded it, or the row was deleted) - adopt it directly, which
+        # is far cheaper than the full scan below.
+        if self.adopt_downloaded_folder(key):
+            return self.repo.get_map(key)
         # DB miss: trigger one targeted scan (for newly downloaded levels).
         # Debounce + mutex (v1.4.1): a scan in progress or one run within the last 30s
         # -> fail fast, never run concurrent/duplicate full scans (86 orphan cover

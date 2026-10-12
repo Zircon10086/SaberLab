@@ -1,4 +1,4 @@
-"""计分与指标单元测试（合成数据，不依赖游戏文件）。"""
+"""Scoring and metric unit tests (synthetic data, no game files required)."""
 import pathlib
 import sys
 import unittest
@@ -9,8 +9,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import numpy as np  # noqa: E402
 
 from backend.bsor.models import (  # noqa: E402
-    Replay, ReplayInfo, NoteEvent, NoteCutInfo, GOOD, BAD, MISS, BOMB,
-    SCORING_NORMAL,
+    Replay, ReplayInfo, NoteEvent, NoteCutInfo, GOOD, MISS, BOMB,
 )
 from backend.bsor.parser import FRAME_DTYPE  # noqa: E402
 from backend.analysis.scoring import compute_score, cut_scores  # noqa: E402
@@ -46,7 +45,7 @@ def make_replay(notes, duration=60.0):
     frames = np.zeros(n, dtype=FRAME_DTYPE)
     frames["time"] = np.arange(n) / 120.0
     frames["fps"] = 120
-    # 手在 x 轴匀速移动，制造非零速度
+    # hands move at a constant speed along x, producing non-zero velocity
     frames["pose"][:, 7] = np.arange(n) * 0.01    # left x
     frames["pose"][:, 14] = np.arange(n) * 0.012  # right x
     frames["pose"][:, 3:7] = [0, 0, 0, 1]
@@ -62,7 +61,7 @@ class TestCutScores(unittest.TestCase):
         self.assertEqual(cut_scores(n), (70, 15, 30))
 
     def test_center_distance_scoring(self):
-        # dist=0.3 -> center=0；dist=0.15 -> center=round(15*0.5)=8（银行家舍入）
+        # dist=0.3 -> center=0; dist=0.15 -> center=round(15*0.5)=8 (banker's rounding)
         n1 = good(1.0, dist=0.3)
         n2 = good(1.0, dist=0.15)
         self.assertEqual(cut_scores(n1)[1], 0)
@@ -116,13 +115,13 @@ class TestMultiplierAndAccuracy(unittest.TestCase):
         self.assertTrue(res["summary"]["full_combo"])
 
     def test_block_accuracy_official_style(self):
-        """block_accuracy = 官方口径 per-block 曲线（2026-08 修正）。
+        """block_accuracy = the official per-block curve (2026-08 correction).
 
-        good(1.0) → miss(2.0) → good(3.0)：
+        good(1.0) → miss(2.0) → good(3.0):
         - t=1.0: score=115, max=115 → 1.0
-        - t=2.0(miss): score 不变 115, max=345 → 115/345 ≈ 0.3333（惩罚点下降）
+        - t=2.0(miss): score unchanged at 115, max=345 → 115/345 ≈ 0.3333 (the penalty point pulls it down)
         - t=3.0: score=230, max=575 → 0.4
-        终点 0.4 == replay 记录 accuracy（score/maxScore 官方口径）。
+        the final 0.4 == the accuracy recorded in the replay (the official score/maxScore convention).
         """
         miss = NoteEvent(note_id(color=1), 2.0, 1.0, MISS, MISS, None)
         r = make_replay([good(1.0), miss, good(3.0)])
@@ -131,11 +130,11 @@ class TestMultiplierAndAccuracy(unittest.TestCase):
         self.assertAlmostEqual(res.block_accuracy[0][1], 1.0, places=4)
         self.assertAlmostEqual(res.block_accuracy[1][1], 115 / 345, places=4)
         self.assertAlmostEqual(res.block_accuracy[2][1], 230 / 575, places=4)
-        # 曲线终点 == accuracy 字段（与 replay 记录对齐的关键）
+        # the curve's last point == the accuracy field (the key to staying aligned with the replay record)
         self.assertAlmostEqual(res.block_accuracy[-1][1], res.accuracy, places=6)
 
     def test_recomputed_matches_fixture(self):
-        """真实 fixture（若存在）：重算分 == 记录分。"""
+        """Real fixture (when present): the recomputed score == the recorded score."""
         from tests.test_bsor_parser import FIXTURE
         if not FIXTURE.exists():
             self.skipTest("fixture 不存在")
@@ -147,7 +146,7 @@ class TestMultiplierAndAccuracy(unittest.TestCase):
 class TestEngineEndToEnd(unittest.TestCase):
     def test_analyze_replay_synthetic(self):
         notes = []
-        # 前 30 秒右手为主、后 30 秒加入左手并制造失误
+        # first 30s led by the right hand, last 30s add the left hand and a miss
         for i in range(30):
             notes.append(good(1.0 + i, color=1, saber=1, speed=25.0))
         for i in range(30):
@@ -163,7 +162,7 @@ class TestEngineEndToEnd(unittest.TestCase):
         self.assertEqual(s["good_count"], 60)
         self.assertEqual(s["miss_count"], 1)
         self.assertFalse(s["full_combo"])
-        # 固定窗口退役（2026）：引擎不再产出 windows，改产出 note_groups
+        # fixed windows retired (2026): the engine no longer emits windows, it emits note_groups
         self.assertNotIn("windows", result)
         self.assertTrue(result["note_groups"])
         self.assertIn("reversal", result["motion"])

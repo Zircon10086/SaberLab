@@ -114,12 +114,21 @@ def dotenv_key_names(path: pathlib.Path | None = None) -> set[str]:
     return names
 
 
+#: Where "补全丢失谱面" stores the levels it downloads. It sits in SaberLab's own data
+#: directory on purpose: the player's game folder is never written to. Two readers use this:
+#: the loader (putting it into Config) and the downloader (as its default target).
+LEVELS_DIR = PROJECT_ROOT / "data" / "levels"
+
+
 @dataclass
 class Config:
     instance_root: str = ""
     replay_dir: str = ""
     custom_levels_dir: str = ""
     songcore_cache: str = ""
+    # Second map root, searched after the game's CustomLevels: the levels downloaded into
+    # SaberLab's own data directory (see backend/maps/fill.py).
+    downloaded_levels_dir: str = str(LEVELS_DIR)
     # Optional second replay source (LocalLeaderboard mod, 2026-09):
     # derived from instance_root, auto-enabled when the directory exists;
     # it stores one copy per session (no exit replays) and doubles as a
@@ -157,6 +166,10 @@ class Config:
     ai_report_enabled: bool = True   # checked: call the LLM for reports; unchecked: deterministic rule report (2026-08)
     proxy: str = ""
     timeout_seconds: float = 30.0
+    # "补全丢失谱面" (network group in the settings schema): how many downloads may run at the
+    # same time. Each host is serialised regardless, so this mostly covers the two sources.
+    download_concurrency: int = 3
+    download_timeout_seconds: float = 60.0
 
     data_dir: pathlib.Path = field(default_factory=lambda: PROJECT_ROOT / "data")
     reports_dir: pathlib.Path = field(default_factory=lambda: PROJECT_ROOT / "reports")
@@ -261,6 +274,9 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         replay_dir=game.get("replay_dir", ""),
         custom_levels_dir=game.get("custom_levels_dir", ""),
         songcore_cache=game.get("songcore_cache", ""),
+        # Second map root: not configurable from the settings page (it belongs to SaberLab,
+        # not to the game install), but read from the file so a portable setup can move it.
+        downloaded_levels_dir=str(game.get("downloaded_levels_dir") or LEVELS_DIR),
         local_leaderboard_dir=ll_dir,
         scoresaber_id=str(player.get("scoresaber_id", "")),
         player_name_fallback=player.get("player_name_fallback", ""),
@@ -295,6 +311,11 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         ai_report_enabled=bool(ai.get("ai_report_enabled", True)),
         proxy=network.get("proxy", "") or "",
         timeout_seconds=float(network.get("timeout_seconds", 30)),
+        # Download settings are clamped: a typo in config.yaml (0 or 500 workers) must not
+        # turn "补全丢失谱面" into a frozen app or a flood of requests at the mirrors.
+        download_concurrency=max(1, min(8, int(network.get("download_concurrency", 3)))),
+        download_timeout_seconds=max(10.0, min(300.0, float(
+            network.get("download_timeout_seconds", 60)))),
     )
     cfg.ensure_dirs()
     return cfg

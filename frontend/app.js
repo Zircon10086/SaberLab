@@ -326,31 +326,104 @@ function bindContextMenus() {
   });
 }
 
-/* The clipboard helper (copyText) was removed together with "copy Replay ID" (2026-09):
-   the Replay ID is a per-device unique sha256 with no reuse value for the user, so the
-   context menu no longer needs a copy action, which left that function and the [data-copy]
-   fallback registration as dead code nobody called (repo convention: no dead code kept).
-   If a future menu item needs copying, reintroduce it against that requirement then. */
+/* ---------------- clipboard (context menu copy actions) ----------------
+   Removed in 2026-09 with "copy Replay ID" (the ID is a per-device sha256 with no reuse
+   value, so the helper became dead code), reinstated in 2026-10 for the two copy items.
+   The three-level fallback is the one measured in 2026-09 and is kept verbatim:
+   navigator.clipboard.writeText **requires a focused document** and fails with
+   "Document is not focused" when the window sits in the background — exactly what happens
+   when the menu is opened on an unfocused window — hence the focus retry, and the hidden
+   textarea + execCommand path for the environments where the API is unavailable.
+   An empty value reports ctx.copy_empty instead of silently "succeeding". */
+async function copyText(text, okKey = "ctx.copied") {
+  const value = String(text == null ? "" : text);
+  if (!value) {
+    toast(t("ctx.copy_empty"));
+    return false;
+  }
+  const legacyCopy = () => {
+    const area = document.createElement("textarea");
+    area.value = value;
+    area.setAttribute("readonly", "");
+    // Off-screen but still selectable: display:none / visibility:hidden cannot hold a selection.
+    area.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0";
+    document.body.appendChild(area);
+    area.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch (_) {
+      ok = false;
+    }
+    area.remove();
+    return ok;
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+      toast(t(okKey), "success");
+      return true;
+    }
+  } catch (_) { /* not focused / no permission: fall through */ }
+  try {
+    window.focus();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+      toast(t(okKey), "success");
+      return true;
+    }
+  } catch (_) { /* still refused: the legacy path is the last resort */ }
+  if (legacyCopy()) {
+    toast(t(okKey), "success");
+    return true;
+  }
+  toast(t("ctx.copy_failed"));
+  return false;
+}
 
-/* Registration: replay entry (shared .replay-item across overview / history / the detail
-   page's same-map history / the comparison list)
-   Menu items (settled with the user, 2026-09):
-     open detail · view same-map records (filter the history search box by **song name**,
-     see the note below) · separator
-     · open file location · delete replay file (second confirmation → move to recycle bin)
-   Note: an early version filled the search box with map_hash — but the history search only
-   matches song names and the 5-digit beatmap_key, so a hash could never find anything;
-   "copy Replay ID" was dropped as well on the user's request (the ID is a per-device unique
-   sha256 with no reuse value for the user).*/
+/* ---- context-menu data carried by a card ----
+   The registered menus read everything they need from the element, so the data the menu acts
+   on has to be complete on the card itself (the click path keeps using the same attributes).
+   Null is NOT flattened into "": a replay may carry no BeatSaver key and still has a name,
+   and "unknown" must stay distinguishable from "empty" for the item that greys out. */
+function ctxData(el, keys) {
+  const out = {};
+  for (const [attr, key] of Object.entries(keys)) {
+    out[key] = el.dataset[attr] == null ? null : el.dataset[attr];
+  }
+  return out;
+}
+
+const REPLAY_CTX_DATA = {
+  id: "id",
+  song: "song",
+  songAuthor: "songAuthor",
+  key: "key",
+  inLibrary: "inLibrary",
+  folderAvailable: "folderAvailable",
+  fileAvailable: "fileAvailable",
+};
+
+/* Registration: map entry (the map-management list's `.map-item`, which also carries the
+   `.replay-item` class for the card layout — this entry is therefore registered FIRST: closest
+   matches from the inside out and the first registered entry wins, so a map card must never
+   fall through to the replay menu).
+   Menu items (settled with the user, 2026-10 — the same order as the replay card, without
+   "view map" because a map card already IS the map):
+     view detail · view play records · separator · copy song name · copy download link
+     · separator · open map folder · delete map (second confirmation → the level folder goes to
+     the recycle bin, then SaberLab removes the record) */
 CTX_MENUS.push({
-  match: ".replay-item",
+  match: ".map-item",
   items(el) {
-    const id = el.dataset.id;
-    if (!id) return [];
-    const song = el.dataset.song || "";
-    const fileAvailable = el.dataset.fileAvailable !== "0";
+    const d = ctxData(el, REPLAY_CTX_DATA);
+    const song = d.song || "";
+    const mapHash = el.dataset.mapHash;
     const out = [
-      ctxMenuItem({ label: t("ctx.open_detail"), action: () => openDetail(id) }),
+      ctxMenuItem({
+        label: t("ctx.open_detail"),
+        action: () => openMapDetail(mapHash),
+      }),
     ];
     if (song) {
       out.push(ctxMenuItem({
@@ -359,21 +432,165 @@ CTX_MENUS.push({
       }));
     }
     out.push(ctxSeparator());
+    out.push(ctxMenuItem({
+      label: t("ctx.copy_song"),
+      action: () => copyText(songAuthorText(song, d.songAuthor), "ctx.copied"),
+    }));
+    const beatSaverUrl = beatSaverMapUrl(d.key);
+    out.push(ctxMenuItem({
+      label: t("ctx.copy_beatsaver"),
+      disabled: !beatSaverUrl,
+      action: () => copyText(beatSaverUrl, "ctx.copied_link"),
+    }));
+    out.push(ctxSeparator());
+    // disabled when the folder is not where the library says it is (avoids opening an error)
+    out.push(ctxMenuItem({
+      label: t("ctx.reveal_map_folder"),
+      disabled: d.folderAvailable !== "1",
+      action: () => revealMapFolder(mapHash),
+    }));
+    out.push(ctxMenuItem({
+      label: t("ctx.recycle_map"),
+      danger: true,
+      disabled: d.folderAvailable !== "1",
+      action: () => confirmRecycleMap(mapHash, song),
+    }));
+    return out;
+  },
+});
+
+/* Open the map's own level folder (the CustomLevels subfolder holding that map, never the
+   CustomLevels root — the folder is the map as far as the OS is concerned). */
+async function revealMapFolder(mapHash) {
+  try {
+    await api(`/api/maps/${encodeURIComponent(mapHash)}/reveal`, { method: "POST" });
+  } catch (e) {
+    toast(tErr(`打开谱面位置失败：${e.message}`));
+  }
+}
+
+/* Delete a map: second confirmation → the level folder moves to the recycle bin, then SaberLab
+   removes the record (the same two-step order as the replay delete: nothing is removed from the
+   database unless the file reached the bin first).
+   Replays of this map are kept — the user deletes the map, not their play history.
+   The dialog reuses openModal and only closes on success, so it can never look like "the dialog
+   closed but nothing was deleted". */
+function confirmRecycleMap(mapHash, songName) {
+  const body =
+    `<p>${escHtml(t("ctx.recycle_map_confirm", { song: songName || t("replay.unknown_song") }))}</p>` +
+    `<p class="hint">${escHtml(t("ctx.recycle_map_hint"))}</p>`;
+  openModal({
+    title: t("ctx.recycle_map_title"),
+    body,
+    actions: [
+      { id: "cancel", label: t("common.cancel"), onClick: () => closeModal() },
+      {
+        id: "confirm",
+        label: t("ctx.recycle_confirm_btn"),
+        kind: "danger",
+        onClick: async (btn) => {
+          btn.disabled = true;
+          try {
+            const res = await api(`/api/maps/${encodeURIComponent(mapHash)}/recycle`,
+                                  { method: "POST" });
+            closeModal();
+            toast(t("ctx.recycled_map_toast", { name: res.song_name || "" }), "success");
+            // The map's own page is gone: close it if it is the one on screen, and refresh the
+            // library so the deleted card disappears.
+            if (currentMapDetail && currentMapDetail.map_hash === mapHash) closeMapDetail();
+            // The lists carry per-map facts (cover, BeatSaver key, "view map"), so they are
+            // redrawn as well — otherwise this session keeps offering "view map" for a map that
+            // no longer exists (same refresh the replay delete does).
+            await Promise.allSettled([loadMaps(mapsPage), loadRecent(currentPage), loadHistory()]);
+          } catch (e) {
+            btn.disabled = false;
+            toast(tErr(`删除失败：${e.message}`), "error");
+          }
+        },
+      },
+    ],
+  });
+}
+
+/* Registration: replay entry (shared .replay-item across overview / history / the detail
+   page's same-map history / the comparison list)
+   Menu items (settled with the user, 2026-10):
+     view detail · view play records · view map (only when the level folder is in the local
+     library — the map detail page has nothing to show otherwise) · separator
+     · copy song name · copy BeatSaver download link · separator
+     · open file location · delete replay file (second confirmation → recycle bin)
+   Notes: the history search (histScore) only matches song names and the 5-digit beatmap_key,
+   so "view play records" must keep filling the **song name**; an early version filled map_hash
+   and never found anything. The two copy items need data the replay row itself does not carry
+   (song author / BeatSaver key): the backend enrichment attaches both from the maps table
+   (`song_author`, and the key it already had for the list badge). */
+CTX_MENUS.push({
+  match: ".replay-item",
+  items(el) {
+    const d = ctxData(el, REPLAY_CTX_DATA);
+    if (!d.id) return [];
+    const song = d.song || "";
+    const fileAvailable = d.fileAvailable !== "0";
+    const out = [
+      ctxMenuItem({ label: t("ctx.open_detail"), action: () => openDetail(d.id) }),
+    ];
+    if (song) {
+      out.push(ctxMenuItem({
+        label: t("ctx.same_map_history"),
+        action: () => showSameMapHistory(song),
+      }));
+    }
+    const mapHash = el.dataset.mapHash;
+    if (mapHash && d.inLibrary === "1") {
+      out.push(ctxMenuItem({
+        label: t("ctx.view_map"),
+        action: () => openMapDetail(mapHash),
+      }));
+    }
+    out.push(ctxSeparator());
+    out.push(ctxMenuItem({
+      label: t("ctx.copy_song"),
+      action: () => copyText(songAuthorText(song, d.songAuthor), "ctx.copied"),
+    }));
+    const beatSaverUrl = beatSaverMapUrl(d.key);
+    out.push(ctxMenuItem({
+      label: t("ctx.copy_beatsaver"),
+      disabled: !beatSaverUrl,
+      action: () => copyText(beatSaverUrl, "ctx.copied_link"),
+    }));
+    out.push(ctxSeparator());
     // disabled when the file is not where it should be (avoids opening an empty folder / an error)
     out.push(ctxMenuItem({
       label: t("ctx.reveal_file"),
       disabled: !fileAvailable,
-      action: () => revealReplayFile(id),
+      action: () => revealReplayFile(d.id),
     }));
     out.push(ctxMenuItem({
       label: t("ctx.recycle_file"),
       danger: true,
       disabled: !fileAvailable,
-      action: () => confirmRecycleReplay(id, song || el.dataset.fileName || ""),
+      action: () => confirmRecycleReplay(d.id, song || el.dataset.fileName || ""),
     }));
     return out;
   },
 });
+
+/* Song name for the clipboard: title plus artist, the line a player pastes into a chat.
+   The author comes from the maps table, so a replay whose level folder is gone copies the
+   title only — never an empty " · " tail. */
+function songAuthorText(song, author) {
+  const name = (song || "").trim();
+  const by = (author || "").trim();
+  if (!by) return name;
+  return name ? `${name} - ${by}` : by;
+}
+
+/* BeatSaver download link for a catalogue key. Empty when the map never had one (a local WIP
+   folder, or a hash the scanner could not match to BeatSaver): the caller greys the item out. */
+function beatSaverMapUrl(key) {
+  const k = (key || "").trim();
+  return k ? `https://beatsaver.com/maps/${k}` : "";
+}
 
 /* Jump to the history page filtered by **song name** (context menu → all attempts on the same map).
    The history search (histScore) only matches song names and the 5-digit beatmap_key, so the
@@ -589,8 +806,11 @@ const CHRO_READOUT_RE = /^\d{1,2}:\d{2}$/;
 const CHRO_PROBE_MS = 1500;       // margin over the readout refresh interval (about 0.9s)
 let chroPauseProbe = null;        // pending timer for the probe (no pile-up when switching pages repeatedly)
 
+// The viewer frame of whichever 3D card is on screen (the replay detail's replay pane or the
+// map detail's preview). Both carry the same bridge, so everything that talks to the viewer
+// goes through this one accessor.
 function chroFrameDoc() {
-  const frame = $("#replay-frame");
+  const frame = chroViewerFrame();
   if (!frame) return null;
   try {
     return frame.contentDocument || null;   // same-origin plugin; null when missing/cross-origin
@@ -643,7 +863,17 @@ function chroProgressing(done) {
 function chroReplayPaneSelected() {
   const paneTab = $("#detail-tabs .dt-tab.active");
   const onDetailTab = $("#tab-detail")?.classList.contains("active") === true;
-  return paneTab?.dataset.pane === "replay" && onDetailTab;
+  if (paneTab?.dataset.pane === "replay" && onDetailTab) return true;
+  // the map detail's preview card shows a viewer too: it must not be paused or left enlarged
+  // just because the replay's 3D pane is not the one on screen
+  return mapPreviewOpen();
+}
+
+// Whether the map detail page is showing its 3D preview card.
+function mapPreviewOpen() {
+  const tab = $("#md-diff-tabs .dt-tab.active");
+  return !!tab && tab.dataset.diffTab === "preview"
+    && $("#tab-mapdetail")?.classList.contains("active") === true && !!currentMapDetail;
 }
 
 // Whether the plugin ships host playback control (the marker is set by the plugin on its own document root)
@@ -653,7 +883,7 @@ function chroSupportsHostPlayback() {
 }
 
 function chroSendPause() {
-  const frame = $("#replay-frame");
+  const frame = chroViewerFrame();      // the card that is on screen: replay pane or map preview
   if (!frame || !frame.contentWindow) return;
   try {
     frame.contentWindow.postMessage(
@@ -681,6 +911,350 @@ function syncChroPlayback() {
   });
 }
 
+/* ---------------- fullscreen for the 3D replay (chro plugin) ----------------
+   Two controls sit in the replay card's title row, next to the "查看回放" label
+   (the card itself, not the viewer - 2026-10 user decision):
+     · 页面全屏  -> "make the replay fill the window I have": the replay card grows to the
+                    app window (html.saberlab-page-fullscreen, style.css) with navigation
+                    and page furniture hidden. The window itself is not touched.
+     · 全屏      -> "cover the whole display with the replay": one press covers the display
+                    with the window AND fills that window with the replay card, so the screen
+                    shows the replay only. One press (or Escape) leaves both, in reverse
+                    order, back to the plain windowed layout.
+   So 全屏 is a single action built from the other control's state (chro set->fill->exit):
+   the reverse order on the way out is not cosmetic - shrinking the window first would leave
+   the replay as a full-window layer on a small window for a moment.
+   Escape one press = one full exit, and it never doubles as the detail page's back action:
+   the handler sits on this document (capture + stopPropagation) and on the viewer frame,
+   because a focused iframe's keys do not reach this document. */
+
+function chroFullscreenToggler() {
+  return Array.from(document.querySelectorAll("[data-chro-fullscreen]"));
+}
+
+// Wires the two controls of every 3D card's title row (the replay detail's, and the map
+// detail's preview card). Those cards are rebuilt on every open, so this runs each time one is
+// rendered and only touches the controls of the card it was called for.
+function bindChroFullscreenControls(root = null) {
+  const scope = root || document;
+  scope.querySelectorAll("[data-chro-fullscreen]").forEach((group) => {
+    const page = group.querySelector('[data-fullscreen-mode="page"]');
+    const native = group.querySelector('[data-fullscreen-mode="native"]');
+    if (page) page.onclick = toggleChroPageFullscreen;
+    if (native) native.onclick = toggleChroNativeFullscreen;
+  });
+  bindChroViewerEscape();
+  syncChroFullscreenButtons();
+}
+
+// Live sizing closure of the current viewer frame (set when the replay card's iframe is
+// created). It is re-created together with the element; a stale closure only ever touched the
+// detached element it belonged to.
+let chroResizeFrame = null;
+// Re-measure whichever 3D card is on screen: both carry a viewer, and only the replay one has
+// a live closure (the preview measures itself from its wrap).
+function resizeChroFrame() {
+  if (mapPreviewOpen()) sizeMapPreviewFrame();
+  if (chroResizeFrame) chroResizeFrame();
+}
+
+// The viewer frame of the 3D card currently on screen — the map detail's preview or the
+// replay detail's replay pane; null when that card has not been created yet (the iframes are
+// built lazily) or when the plugin is missing.
+function chroViewerFrame() {
+  const candidates = ["md-preview-frame", "replay-frame"];
+  for (const id of candidates) {
+    const f = document.getElementById(id);
+    if (f && f.tagName === "IFRAME") return f;
+  }
+  return null;
+}
+
+function chroPageFullscreenOn() {
+  return document.documentElement.classList.contains("saberlab-page-fullscreen");
+}
+
+// The host window covering its whole display (the 全屏 control). The page never guesses:
+// the host measures the real window rectangle and publishes `window.covers` on /api/status,
+// and the same answer comes back from every fullscreen request.
+function chroWindowFullscreenOn() {
+  return !!window.windowFullscreen;
+}
+
+// Whether this build runs inside the host's WebView2 window (the host loads the page with
+// ?shell=webview). Only that window can be told to cover the display.
+function chroShellWindowMode() {
+  return new URLSearchParams(window.location.search).get("shell") === "webview";
+}
+
+function chroFullscreenOn() {
+  return chroPageFullscreenOn() || chroWindowFullscreenOn();
+}
+
+function applyChroPageFullscreen(on, opts) {
+  const shown = chroPageFullscreenOn();
+  document.documentElement.classList.toggle("saberlab-page-fullscreen", !!on);
+  if (!on) closePopover();            // its anchor may sit in the hidden navigation
+  // the embedded viewer measures itself: re-measure right after the class flips
+  setTimeout(resizeChroFrame, 0);
+  setTimeout(resizeChroFrame, 260);   // and again over the layout transition
+  if (!!on !== shown && !(opts && opts.quiet)) {
+    toast(t(on ? "replay.page_fullscreen_on" : "replay.page_fullscreen_off"), "info");
+  }
+  // the host has to know: it is the only thing that can see Escape while the replay has the
+  // keyboard (see the Escape watch in backend/host.py)
+  if (chroShellWindowMode()) {
+    api("/api/window/page-fill", { method: "POST", body: JSON.stringify({ on: !!on }) })
+      .catch(() => {});
+  }
+  syncChroFullscreenButtons();
+}
+
+function toggleChroPageFullscreen() {
+  applyChroPageFullscreen(!chroPageFullscreenOn());
+}
+
+// True while the display is meant to be covered: used to re-ask the host (cheaply, once a
+// second) so a window that something else shrank puts the page back to normal by itself.
+let chroCoverWatch = 0;
+// Shell mode only: polls the host's window state so a change made outside the app (or an
+// Escape the page never saw) is picked up. One request per second and a half.
+let chroWindowWatch = 0;
+
+// Called by the host (backend/host.py) the moment its keyboard hook sees Escape while the
+// window covers the display: leave the whole fullscreen state, the same as the key would
+// have done from the page.
+window.__saberlabCoverEscape = () => {
+  if (!chroCoverExitPending) leaveChroWindowFullscreen();
+};
+
+function watchChroWindowCover(on) {
+  if (!!on === !!chroCoverWatch) return;
+  if (chroCoverWatch) {
+    clearInterval(chroCoverWatch);
+    chroCoverWatch = 0;
+  }
+  if (!on) return;
+  chroCoverWatch = setInterval(() => {
+    if (document.hidden) return;
+    api("/api/status")
+      .then((s) => {
+        const covers = !!(s.window && s.window.covers);
+        if (covers !== chroWindowFullscreenOn()) {
+          window.windowFullscreen = covers;
+          syncChroFullscreenButtons();
+        }
+      })
+      .catch(() => {});
+  }, 1000);
+}
+
+// The host's Escape signal arrives with the same status payload; it is consumed there, so
+// this poll is the reliable path for it (the host also calls __saberlabCoverEscape directly,
+// which only makes it snappier).
+function startChroWindowWatch() {
+  if (chroWindowWatch || !chroShellWindowMode()) return;
+  chroWindowWatch = setInterval(() => {
+    if (document.hidden) return;
+    api("/api/status")
+      .then((s) => {
+        const w = s.window || {};
+        if (w.cover_escape) {
+          if (!chroCoverExitPending && (chroWindowFullscreenOn() || w.fullscreen)) {
+            leaveChroWindowFullscreen();
+          }
+          return;
+        }
+        if (!chroCoverExitPending && !chroWindowFullscreenOn() && !!w.fullscreen) {
+          window.windowFullscreen = true;      // the window was covered outside the app
+          syncChroFullscreenButtons();
+        }
+      })
+      .catch(() => {});
+  }, 1500);
+}
+
+// True between "cover was asked to leave" and "the filled layout is gone": the exit has to
+// take the page enlargement down BEFORE the window shrinks back, so the replay is never left
+// as a full-window layer on a window that no longer covers anything (2026-10). It is a flag
+// rather than a guess because the two steps run over separate async boundaries.
+let chroCoverExitPending = false;
+
+// 全屏: one press makes the replay cover the whole display - the HOST WINDOW is asked to
+// cover its display (whatever its current size), and the page then enlarges the replay card
+// to fill that window, so nothing of the app's own chrome is in the way. Leaving it is the
+// reverse order: the filled layout first, then the window back to its old size.
+// The host decides by measuring the window, so asking again is harmless (and self-healing).
+async function toggleChroNativeFullscreen() {
+  if (!chroShellWindowMode()) {
+    toggleChroPageFullscreen();               // browser mode: no window to cover
+    return;
+  }
+  const leaving = chroWindowFullscreenOn();
+  // Every 3D card carries the same two controls, so the pressed one is disabled while the host
+  // answers. It has to be read from the EVENT's own button, not from the group lookup: that
+  // lookup returns the groups (a list), and asking it for a child threw a TypeError which
+  // aborted the whole 全屏 action (2026-10 regression, user-reported).
+  const pressed = document.activeElement && document.activeElement
+    .closest && document.activeElement.closest('[data-fullscreen-mode="native"]');
+  const native = pressed || Array.from(document.querySelectorAll(
+    '[data-chro-fullscreen] [data-fullscreen-mode="native"]'))
+    .find((b) => b.getBoundingClientRect().height > 0) || null;
+  if (native) native.disabled = true;
+  try {
+    const res = await api("/api/window/fullscreen", { method: "POST" });
+    if (!res.available) {                     // host window is gone -> enlarge in the page
+      toggleChroPageFullscreen();
+      return;
+    }
+    window.windowFullscreen = !!res.fullscreen;
+    if (window.windowFullscreen) {
+      chroCoverExitPending = false;
+      // quiet: the "fullscreen" notice below covers both steps
+      applyChroPageFullscreen(true, { quiet: true });
+      toast(t("replay.fullscreen_on"), "info");
+    } else if (leaving) {
+      leaveChroFilledLayout();                // exiting this way keeps the same order
+    }
+    watchChroWindowCover(window.windowFullscreen);
+  } catch (e) {
+    toast(tErr(String(e && e.message ? e.message : e)));
+  } finally {
+    if (native) native.disabled = false;
+    syncChroFullscreenButtons();
+  }
+}
+
+// Leaving fullscreen: the filled layout comes down first, then the window, in that order and
+// as one user action.
+function chroEscapeToLeave(event) {
+  if (!chroFullscreenOn()) return false;      // nothing to leave: let it through
+  if (event.key !== "Escape" && event.key !== "Esc") return false;
+  // The user asked to leave while covered: that means the whole thing, however far the
+  // window and the filled layout drifted apart.
+  if (chroWindowFullscreenOn()) {
+    if (!chroCoverExitPending) leaveChroWindowFullscreen();
+  } else {
+    applyChroPageFullscreen(false);           // filled layout alone: one press is the way out
+  }
+  return true;
+}
+
+// Take the filled layout down, then ask the host to stop covering the display.
+function leaveChroWindowFullscreen() {
+  chroCoverExitPending = true;
+  leaveChroFilledLayout();
+}
+
+function leaveChroFilledLayout() {
+  applyChroPageFullscreen(false, { quiet: true });
+  if (!chroCoverExitPending) return;
+  const finish = () => {
+    if (!chroCoverExitPending) return;
+    chroCoverExitPending = false;
+    // explicit target: never a blind toggle, so a drift between page and window cannot turn
+    // an exit into an entry
+    api("/api/window/fullscreen", {
+      method: "POST",
+      body: JSON.stringify({ fullscreen: false }),
+    })
+      .then((res) => {
+        if (res.available) window.windowFullscreen = !!res.fullscreen;
+        watchChroWindowCover(window.windowFullscreen);
+        syncChroFullscreenButtons();
+      })
+      .catch(() => syncChroFullscreenButtons());
+  };
+  // next frame: the viewer must see the plain layout when it re-measures
+  setTimeout(finish, 0);
+  // and once more over the layout transition, in case the first one raced the repaint
+  setTimeout(() => { if (chroCoverExitPending) finish(); }, 260);
+}
+
+document.addEventListener("keydown", (event) => {
+  // Capture + stopPropagation: the page is left through the button in the card, never by
+  // an Escape that was meant for the replay (popovers and the detail page keep their own
+  // Escape handling for every other case).
+  if (chroEscapeToLeave(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}, true);
+
+function bindChroViewerEscape() {
+  const frame = chroViewerFrame();
+  if (!frame) return;
+  try {
+    const doc = frame.contentDocument;
+    if (!doc || doc.__chroEscapeBound) return;
+    doc.__chroEscapeBound = true;
+    doc.addEventListener("keydown", (event) => {
+      if (chroEscapeToLeave(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    }, true);
+    // and if the viewer takes focus anyway (its own mouse handling), watch for it from the
+    // inside and hand the keyboard back to the app
+    doc.addEventListener("focusin", () => {
+      setTimeout(() => { try { window.focus(); } catch (e) { /* nothing to do */ } }, 0);
+    });
+  } catch (e) {
+    // cross-origin viewer: the frame reports no keys, nothing to bind
+  }
+}
+
+// Clicking the replay hands keyboard focus to the chro frame, and a focused frame keeps the
+// keys to itself: measured 2026-10 - with focus inside the viewer, Escape never reached this
+// document at all, so fullscreen could not be left any more (user report). Taking focus back
+// keeps the app's keys working (Escape above all). The click itself is untouched: it is
+// handled by the viewer either way, only the KEYBOARD goes back to the app.
+document.addEventListener("mousedown", (event) => {
+  const frame = chroViewerFrame();
+  if (!frame || event.target !== frame) return;
+  setTimeout(() => {
+    try {
+      if (frame.contentDocument && frame.contentDocument.hasFocus()) window.focus();
+    } catch (e) {
+      // cross-origin viewer: nothing to take back
+    }
+  }, 0);                                   // after the click has been delivered to the viewer
+}, true);
+
+function syncChroFullscreenButtons() {
+  const active = chroPageFullscreenOn();
+  const native = chroWindowFullscreenOn();
+  chroFullscreenToggler().forEach((group) => {
+    const a = group.querySelector('[data-fullscreen-mode="page"]');
+    const b = group.querySelector('[data-fullscreen-mode="native"]');
+    if (a) {
+      const label = active ? t("replay.exit_page_fullscreen") : t("replay.page_fullscreen");
+      a.classList.toggle("active", active);
+      a.setAttribute("aria-pressed", active ? "true" : "false");
+      const span = a.querySelector(".fs-label");
+      if (span) span.textContent = label;
+      a.title = label;
+      a.setAttribute("aria-label", label);
+    }
+    if (b) {
+      const label = native ? t("window.exit_fullscreen") : t("window.fullscreen");
+      b.classList.toggle("active", native);
+      b.setAttribute("aria-pressed", native ? "true" : "false");
+      const span = b.querySelector(".fs-label");
+      if (span) span.textContent = label;
+      b.title = label;
+      b.setAttribute("aria-label", label);
+    }
+  });
+}
+
+// Leaving the replay page must not leave the app enlarged: the page marker is owned by the
+// page that set it. The viewer's own fullscreen is owned by the browser and is left alone
+// here (Escape and the button both leave it, and the card is rebuilt on the next open).
+function clearChroFullscreen() {
+  applyChroPageFullscreen(false);
+}
+
 /* ---------------- tabs / sidebar navigation ---------------- */
 $$("#tabs .nav-item").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 function switchTab(name) {
@@ -690,6 +1264,7 @@ function switchTab(name) {
   if (name !== "detail") {
     const tb = $("#detail-topbar");
     if (tb) tb.style.display = "none";
+    clearChroFullscreen();      // an enlarged replay card must not outlive its page
   }
   // the map detail is reached by opening a map: leaving the tab hides its back bar, coming back
   // to it restores the map that was open (or the prompt when none was)
@@ -699,7 +1274,13 @@ function switchTab(name) {
   } else {
     const mc = $("#mapdetail-content");
     const me = $("#mapdetail-empty");
-    if (currentMapDetail && mc) {
+    // "Something is on screen" is NOT the same as "a map finished loading": openMapDetail
+    // empties and shows the container while its request is still in flight, and a tab switch
+    // during that window used to hit `currentMapDetail === null`, show the "pick a map" prompt
+    // on top of the map already being rendered (and then leave it there, because only
+    // openMapDetail hides it again). The in-flight request counts as content.
+    const loading = mapDetailReqSeq > 0 && mc && !mc.classList.contains("hidden");
+    if ((currentMapDetail || loading) && mc) {
       mc.classList.remove("hidden");
       if (me) me.classList.add("hidden");
       $("#mapdetail-topbar").style.display = "flex";
@@ -1076,6 +1657,19 @@ function taskDoneMessage(tk) {
     }
     return base;
   }
+  if (kind === "map_fill") {
+    // 补全丢失谱面：报出补上多少、还有多少是服务器上没有的（DLC 等付费谱面）
+    const r = ((tk.results || [])[0]) || {};
+    const done = Number(r.ok || 0);
+    const unavailable = (r.unavailable || []).length;
+    if (!unavailable) return base + (done ? t("task.fill_added", { n: done }) : "");
+    return base + t("task.fill_partial", {
+      done, unavailable,
+      names: (r.unavailable || []).slice(0, 3).map((x) => x.song_name || x.map_hash)
+        .join(t("common.list_sep")),
+      more: unavailable > 3 ? t("task.failed_songs_more") : "",
+    });
+  }
   if (kind !== "ranked_update") return base;
   const failed = (((tk.results || [])[0]) || {}).failed_songs || [];
   if (!failed.length) return base;
@@ -1095,6 +1689,9 @@ async function loadStatus() {
     pathState.maps = !!(s.maps_dir && s.maps_dir.exists);
     // 3D 回放组件（Local-ChroViewer，外部 GPL-2.0 项目）可用性（v1.6.0）
     window.chroAvailable = !!(s.chro && s.chro.available);
+    // Whether the host window covers its whole display (window mode only; see the fullscreen
+    // section). The host measures the real window, so this cannot drift.
+    window.windowFullscreen = !!(s.window && s.window.covers);
     // 当前云端数据源（scoresaber | beatleader）：云端页接口与个人色谱随平台
     window.__platform = s.platform === "beatleader" ? "beatleader" : "scoresaber";
     // 星级色谱（player.star_palette）：按 id 取当前 palette 定义供 starColor 分档
@@ -1301,7 +1898,7 @@ function replayItem(r, highlight = "") {
   const missBadTxt = isPending
     ? `<span style="color:var(--muted)">${t("replay.pending")}</span>`
     : `${r.miss_count}<span style="color:var(--muted)">/${r.bad_count}</span>`;
-  return `<div class="replay-item status-${statusClass}" data-id="${r.replay_id}"${r.map_hash ? ` data-map-hash="${r.map_hash}"` : ""}${r.song_name ? ` data-song="${escHtml(r.song_name)}"` : ""}${r.file_name ? ` data-file-name="${escHtml(r.file_name)}"` : ""} data-file-available="${r.file_available === false ? "0" : "1"}">
+  return `<div class="replay-item status-${statusClass}" data-id="${r.replay_id}"${r.map_hash ? ` data-map-hash="${r.map_hash}"` : ""}${r.song_name ? ` data-song="${escHtml(r.song_name)}"` : ""}${r.song_author ? ` data-song-author="${escHtml(r.song_author)}"` : ""}${r.beatmap_key ? ` data-key="${escHtml(r.beatmap_key)}"` : ""} data-in-library="${r.in_library ? "1" : "0"}"${r.file_name ? ` data-file-name="${escHtml(r.file_name)}"` : ""} data-file-available="${r.file_available === false ? "0" : "1"}">
     <img src="${cover}" loading="lazy" onerror="this.onerror=null;this.src='/static/default.png'" alt="">
     <div>
       <div class="title">${highlightMatch(r.song_name || t("replay.unknown_song"), highlight)} ${keyBadge} <span class="completion-icon">${statusIcon}</span></div>
@@ -1326,7 +1923,10 @@ function replayItem(r, highlight = "") {
 }
 
 function bindReplayItems() {
-  $$(".replay-item").forEach((el) => {
+  // `.map-item` is excluded on purpose: the map library cards reuse the replay card's class for
+  // its layout, and binding them here would make a map card open a REPLAY detail on click (its
+  // own click binding lives in bindMapItems). One element, one meaning.
+  $$(".replay-item:not(.map-item)").forEach((el) => {
     el.addEventListener("click", () => openDetail(el.dataset.id));
     // 播放按钮：跳转详情「查看回放」板块（阻止条目自身点击）
     const playBtn = el.querySelector(".play-btn");
@@ -1495,20 +2095,37 @@ $("#btn-refresh-online").addEventListener("click", async () => {
   }
 });
 
+$("#btn-fill-maps").addEventListener("click", async () => {
+  if (!requirePaths("maps")) return;
+  try {
+    // 补全丢失谱面要联网取回谱面文件：先做连通性预检，未联网直接拦下，
+    // 免得整批任务空跑几分钟后才全部失败。
+    const net = await api("/api/network/check");
+    if (!net.online) { toast(t("err.offline")); return; }
+    await api("/api/maps/fill", { method: "POST" });
+    pollTask();
+  } catch (e) {
+    toast(e.message);
+    loadStatus();
+  }
+});
+
 let taskTimer = null;
 let dbEmpty = false;   // 数据库为空：仅「⚡ 一键刷新」可用（v1.4.1 空库兜底）
 /* 任务运行期间禁用全部任务按钮（灰显），完成后恢复。
    进度展示完全由任务状态 KPI 卡片承担（单任务=详情进度，多任务=完成数）。 */
-const ACTION_BUTTONS = ["btn-refresh-all", "btn-refresh-online"];
+const ACTION_BUTTONS = ["btn-refresh-all", "btn-fill-maps", "btn-refresh-online"];
 function syncActionButtons(running) {
   ACTION_BUTTONS.forEach((id) => {
     const b = document.getElementById(id);
     if (!b) return;
-    const isOnline = id === "btn-refresh-online";
-    // 空库时仅放行一键刷新：联网更新依赖已入库的谱面 hash，灰显引导
-    b.disabled = !!running || (isOnline && dbEmpty);
-    if (isOnline) {
-      b.title = dbEmpty ? t("err.db_empty") : "";
+    // 空库时仅放行一键刷新：联网更新与补全谱面都依赖已入库的回放，灰显引导
+    const needsLibrary = id === "btn-refresh-online" || id === "btn-fill-maps";
+    b.disabled = !!running || (needsLibrary && dbEmpty);
+    if (needsLibrary) {
+      // 空库时用原因替换说明性 title；恢复时写回语言表里的原文，
+      // 否则这里会把静态 i18n 设好的 title 永久清空（两个按钮一起踩过）
+      b.title = dbEmpty ? t("err.db_empty") : t(b.dataset.i18nTitle || "");
     }
   });
 }
@@ -1574,6 +2191,9 @@ async function openDetail(id, pane = "data") {
   // 上一轮的 iframe 会被下面的 content.innerHTML="" 一并移除（插件随之重置播放），
   // 这里把还在飞的播放判定取消掉，避免它落到新的 iframe 上
   if (chroPauseProbe) { clearTimeout(chroPauseProbe); chroPauseProbe = null; }
+  // Opening another replay rebuilds the card, so the previous one's fullscreen state
+  // must not carry over into it (the class would enlarge a card nobody asked for).
+  clearChroFullscreen();
   // 取消上一轮还在飞的详情请求（释放连接，防止请求堆积拖慢）
   if (detailAbort) detailAbort.abort();
   const abort = new AbortController();
@@ -1738,6 +2358,7 @@ function renderDetailBody(content) {
   const r = currentReplay;
   const m = r.metrics || {};
   content.innerHTML = buildDetailSkeleton();
+  bindChroFullscreenControls();
   // HERO 完成度渐变背景（completed=绿 / failed=黄 / incomplete=红）
   const heroEl = content.querySelector(".detail-hero");
   if (heroEl) {
@@ -1890,17 +2511,33 @@ function switchDetailPane(name, instant = false) {
         const rawUrl = `${window.location.origin}/api/replays/${encodeURIComponent(currentReplay.replay_id)}/raw`;
         iframe.src = `/chro/?replayUrl=${encodeURIComponent(rawUrl)}`;
         wrap.appendChild(iframe);
-        // 16:9 动态高度：随容器宽度自适应（信息栏内嵌，不覆盖导航栏）
+        // Height: 16:9 by default; while page fullscreen is on, the card fills the window and
+        // the viewer takes the wrap's own height (no slack: the replay has to reach the edges
+        // - the controls float above it, see style.css)
         const resizeFrame = () => {
           const w = wrap.clientWidth;
-          if (w > 0) iframe.style.height = `${Math.round((w * 9) / 16)}px`;
+          if (w <= 0) return;
+          iframe.style.height = document.documentElement.classList.contains("saberlab-page-fullscreen")
+            ? `${Math.max(240, wrap.clientHeight)}px`
+            : `${Math.round((w * 9) / 16)}px`;
         };
+        chroResizeFrame = resizeFrame;
         resizeFrame();
         if (window.ResizeObserver) {
           new ResizeObserver(resizeFrame).observe(wrap);
         } else {
           window.addEventListener("resize", resizeFrame);
         }
+        // The frame's own Escape listener has to be bound HERE: the controls are wired when
+        // the pane is switched, which happens before this iframe exists, so binding only
+        // there left the frame unbindable (2026-10 user report: clicking the replay moved
+        // focus into chro and Escape stopped working). The load event covers the document
+        // becoming available a moment later.
+        bindChroViewerEscape();
+        iframe.addEventListener("load", () => {
+          bindChroViewerEscape();
+          resizeFrame();
+        });
       } else if (currentReplay.file_available === false) {
         // 原始文件缺失：/api/replays/{id}/raw 必 410，直接给不可用原因
         // （2026-09，区别于 chro 组件缺失的安装提示）
@@ -1988,7 +2625,18 @@ function buildDetailSkeleton() {
       </div>
       <div class="dpane" id="pane-replay">
         <div class="surface">
-          <div class="surface-title">${t("detail.tab.replay")}</div>
+          <div class="surface-title">${t("detail.tab.replay")}
+            <span class="fs-controls" id="chro-fullscreen-controls" data-chro-fullscreen>
+              <button type="button" class="mini fs-btn" data-fullscreen-mode="page">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2.5" opacity="0.5"/><path d="M14.5 4.5h5v5"/><path d="M19.5 4.5 12.6 11.4"/><path d="M9.5 19.5h-5v-5"/><path d="M4.5 19.5l6.9-6.9"/></svg>
+                <span class="fs-label">${t("replay.page_fullscreen")}</span>
+              </button>
+              <button type="button" class="mini fs-btn" data-fullscreen-mode="native">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 3.5h-5v5"/><path d="M15.5 3.5h5v5"/><path d="M20.5 15.5v5h-5"/><path d="M3.5 15.5v5h5"/></svg>
+                <span class="fs-label">${t("window.fullscreen")}</span>
+              </button>
+            </span>
+          </div>
           <div id="replay-frame-wrap"></div>
         </div>
       </div>
@@ -2456,16 +3104,29 @@ let mapChartAbort = null;
 let mapChartReqSeq = 0;
 let currentMapDetail = null;
 let currentMapDifficulty = "";
+// Which card of the map detail is on screen: the difficulty page or the 3D preview (the
+// sliding track below, the same shape as the replay detail's tab strip + track). Kept outside
+// the DOM so reopening the page restores the same card.
+let currentMapDetailTab = "page";
+// What the viewer was last told to show — the loaded map and the difficulty label. A repeat
+// request is only sent when that changes, so switching cards never rebuilds the scene.
+let previewLoadedHash = "";
+let previewLoadedLabel = "";
 let mapDetailReturnTab = "maps";
 const MAP_DETAIL_SKELETON_DELAY = 1500;   // same threshold as the replay detail
 const _mapChartCache = new Map();         // map_hash -> difficulty key -> chart facts
 
-async function openMapDetail(mapHash, difficulty = "") {
-  const cur = $$(".tabpane.active")[0];
+async function openMapDetail(mapHash, difficulty = "", openTab = "") {  const cur = $$(".tabpane.active")[0];
   mapDetailReturnTab = cur ? cur.id.replace("tab-", "") : "maps";
   if (mapDetailReturnTab === "mapdetail") mapDetailReturnTab = "maps";
   if (mapDetailAbort) mapDetailAbort.abort();
   cancelMapChartRequest();
+  // A new map means a new viewer session: the preview iframe (and the scene inside it) is
+  // thrown away with the page. `openTab` is how a caller that was already on the 3D card (the
+  // preview's own "fetch the missing map first" path) comes back to it instead of being
+  // dropped on the difficulty page.
+  resetMapPreview();
+  if (openTab === "preview") currentMapDetailTab = "preview";
   const abort = new AbortController();
   mapDetailAbort = abort;
   const seq = ++mapDetailReqSeq;
@@ -2496,7 +3157,51 @@ async function openMapDetail(mapHash, difficulty = "") {
     clearTimeout(skTimer);
     if (seq !== mapDetailReqSeq) return;
     if (e.name === "AbortError") return;
+    // No library row: the level files are gone (or were never here). The page still has
+    // something to show - the replay's own metadata - which is also what makes the 3D card
+    // able to fetch the level and come back with the real one.
+    const fallback = await replayFallbackRow(mapHash);
+    if (seq !== mapDetailReqSeq) return;
+    if (fallback) {
+      currentMapDetail = fallback;
+      currentMapDifficulty = pickDifficulty(fallback, difficulty);
+      renderMapDetail(skeletonShown);
+      return;
+    }
     content.innerHTML = `<div class="empty" style="color:var(--red)">${t("detail.load_failed", { err: escHtml(e.message) })}</div>`;
+  }
+}
+
+/* What a map page can show when the level itself is not in the library.
+   The difficulty list stays empty on purpose: there is no chart to describe, and the 3D card
+   offers to fetch the level instead (see loadMapPreview). Returns null when no replay in the
+   library refers to this level either - then there is genuinely nothing to show. */
+async function replayFallbackRow(mapHash) {
+  try {
+    const row = await api(`/api/replays/by-map/${encodeURIComponent(mapHash)}`);
+    if (!row || !row.map_hash) return null;
+    return {
+      map_hash: row.map_hash,
+      song_name: row.song_name || "",
+      song_author: row.song_author || "",
+      mapper: row.mapper || "",
+      bpm: null,
+      song_length: null,
+      beatmap_key: "",
+      version: "",
+      folder_name: "",
+      folder_path: "",
+      in_library: false,
+      played_difficulty: row.difficulty || "",
+      hash_source: "",
+      added_at: "",
+      platform: window.__platform || "",
+      rated: false, stars: null, ranked: false,
+      difficulties: [],
+      plays: row.plays || { count: 0 },
+    };
+  } catch (e) {
+    return null;
   }
 }
 
@@ -2547,6 +3252,7 @@ function closeMapDetail() {
   mapDetailReqSeq++;                    // invalidate an in-flight request
   if (mapDetailAbort) mapDetailAbort.abort();
   cancelMapChartRequest();
+  resetMapPreview();                    // the viewer must not keep rendering behind the app
   resetDetailFade($("#mapdetail-content"));
   $("#mapdetail-topbar").style.display = "none";
   currentMapDetail = null;
@@ -2598,17 +3304,294 @@ function renderMapDetailBody(content) {
       <div class="hero-kpi"><div class="v">${row.plays.last_ts ? fmt.ts(row.plays.last_ts).split(" ")[0] : "–"}</div><div class="k">${t("maps.kpi.last_play")}</div></div>
     </div>
   </div>
-  <div class="detail-tabs md-diff-tabs" id="md-diff-tabs">${pageTabs}</div>
-  <div id="md-page"></div>`;
+  <!-- The strip lives in the SAME three-column row the replay detail uses for its list —
+       left = the tabs, middle = nothing, right = empty placeholder — so it hugs its tabs and
+       stays left-justified instead of stretching (2026-10 user report). -->
+  <div class="surface-title md-strip-row">
+    <div class="title-left">
+      <div class="detail-tabs md-diff-tabs" id="md-diff-tabs">
+        <div class="md-scroll">${pageTabs}<button class="dt-tab md-diff-preview" data-diff-tab="preview">${t("mapdetail.preview")}</button></div>
+      </div>
+    </div>
+    <div class="title-right"></div>
+  </div>
+  <div class="detail-panes">
+    <div class="md-track" id="md-track">
+      <div class="md-card" id="md-page-card"><div id="md-page"></div></div>
+      <div class="md-card" id="md-preview-card">
+        <div class="surface md-preview-surface">
+          <div class="surface-title">${t("mapdetail.preview")}
+            <span class="fs-controls" data-chro-fullscreen>
+              <button type="button" class="mini fs-btn" data-fullscreen-mode="page">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="2.5" opacity="0.5"/><path d="M14.5 4.5h5v5"/><path d="M19.5 4.5 12.6 11.4"/><path d="M9.5 19.5h-5v-5"/><path d="M4.5 19.5l6.9-6.9"/></svg>
+                <span class="fs-label">${t("replay.page_fullscreen")}</span>
+              </button>
+              <button type="button" class="mini fs-btn" data-fullscreen-mode="native">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 3.5h-5v5"/><path d="M15.5 3.5h5v5"/><path d="M20.5 15.5v5h-5"/><path d="M3.5 15.5v5h5"/></svg>
+                <span class="fs-label">${t("window.fullscreen")}</span>
+              </button>
+            </span>
+          </div>
+          <div class="replay-frame-wrap" id="md-preview-frame-wrap"></div>
+        </div>
+      </div>
+    </div>
+  </div>`;
 
   $("#md-diff-tabs").addEventListener("click", (e) => {
-    const btn = e.target.closest(".md-diff");
-    if (!btn || btn.dataset.diff === currentMapDifficulty) return;
-    currentMapDifficulty = btn.dataset.diff;
-    $$("#md-diff-tabs .md-diff").forEach((b) => b.classList.toggle("active", b.dataset.diff === currentMapDifficulty));
-    renderMapDifficultyPage();
+    const btn = e.target.closest(".dt-tab");
+    if (!btn) return;
+    if (btn.dataset.diffTab === "preview") {
+      mapDetailTab("preview");
+      return;
+    }
+    // Coming back from the 3D card is a card switch even when the tab was already selected
+    // (that is where the pause lands), so the switch runs first and only the page re-render is
+    // conditional — clicking the difficulty that is already on screen must not reload its
+    // charts.
+    const same = btn.dataset.diff === currentMapDifficulty;
+    if (btn.dataset.diff) currentMapDifficulty = btn.dataset.diff;
+    mapDetailTab("page");        // reading a difficulty happens on the difficulty card
+    if (!same) renderMapDifficultyPage();
   });
+  bindChroFullscreenControls();
+  mapDetailTab(currentMapDetailTab || "page", true);
   renderMapDifficultyPage();
+}
+
+/* Tab strip + sliding track, the replay detail's pattern (.detail-tabs / .panes-track): the
+   strip stays on screen, both cards live in one row and the row is translated, so the move IS
+   the animation. The difficulty strip keeps its own selected tab while the preview is open. */
+function mapDetailTab(name, instant = false) {
+  currentMapDetailTab = name === "preview" ? "preview" : "page";
+  $$("#md-diff-tabs .dt-tab").forEach((b) => {
+    const on = currentMapDetailTab === "preview"
+      ? b.dataset.diffTab === "preview"
+      : !!b.dataset.diff && b.dataset.diff === currentMapDifficulty;
+    b.classList.toggle("active", on);
+  });
+  const track = $("#md-track");
+  if (!track) return;
+  if (instant) track.classList.add("no-anim");
+  else track.classList.remove("no-anim");
+  track.style.transform = currentMapDetailTab === "preview" ? "translateX(-50%)" : "translateX(0)";
+  if (currentMapDetailTab === "preview") loadMapPreview();
+  // Leaving the 3D card pauses the viewer, exactly like leaving the replay detail's replay
+  // pane (the map is left where it was; the player continues manually on the way back).
+  syncChroPlayback();
+}
+
+/* Commit a difficulty page by sliding it in, the replay detail's pane movement: the page that
+   was on screen is kept as a frozen copy beside the new one, so the reader watches one
+   difficulty leave and the other arrive instead of an opacity swap in place. The copy is
+   dropped once the slide ends (it would hold a second live chart), and the no-anim re-stack
+   happens while that copy is already invisible so nothing jumps.
+   The render itself is immediate — the transition is the movement, not a fade. */
+function slideDifficultyPage(render) {
+  const track = $("#md-track");
+  const pageCard = $("#md-page-card");
+  const page = $("#md-page");
+  if (!track || !pageCard || !page) { render(); return; }
+  const maySlide = page.childElementCount > 0;      // nothing on screen: no "left" to slide
+  if (!maySlide) { render(); return; }
+  const old = document.createElement("div");
+  old.className = "md-card md-card-leaving";
+  old.innerHTML = pageCard.innerHTML;
+  pageCard.innerHTML = "";                          // the live page is rebuilt by render()
+  track.insertBefore(old, pageCard);
+  track.classList.remove("no-anim");
+  track.style.transform = "translateX(-50%)";       // old | new
+  let settled = false;
+  const reset = () => {
+    if (settled) return;
+    settled = true;
+    track.classList.add("no-anim");
+    old.remove();
+    track.style.transform = "translateX(0)";
+    void track.offsetWidth;                          // commit the jump while it cannot be seen
+    track.classList.remove("no-anim");
+  };
+  track.addEventListener("transitionend", reset, { once: true });
+  setTimeout(reset, 320);                            // fallback: reduced motion never transitions
+  render();
+}
+
+/* Fetch the map this replay needs, so its 3D preview can open at all.
+   Runs once per opened map: the map card's own click path is what triggers the download, and a
+   second attempt without new information would only repeat a request the server already
+   answered. On success the detail row is reloaded (the level is now in the library, with its
+   difficulties) and the preview continues; on failure the player is told what happened — in
+   particular that paid DLC tracks cannot be downloaded — and the difficulty list stays usable. */
+async function attemptMapPreviewFill(wrap, row) {
+  row.preview_fill_started = true;
+  wrap.innerHTML = `<div class="replay-frame-fill chro-missing">`
+    + `<div>${escHtml(t("mapdetail.preview_fetching"))}</div></div>`;
+  let res = null;
+  try {
+    res = await api(`/api/maps/${encodeURIComponent(row.map_hash)}/ensure-preview`, { method: "POST" });
+  } catch (e) {
+    res = { status: "failed", reason: "network", detail: e.message };
+  }
+  if (currentMapDetail !== row) return;         // another map was opened meanwhile
+  if (res && res.status === "ok") {
+    // The library knows this level now: re-open its detail so the difficulty list and the
+    // preview come from the real level files instead of the replay's own metadata, and land
+    // on the same difficulty that was selected.
+    const want = currentMapDifficulty;
+    wrap.innerHTML = "";
+    await openMapDetail(row.map_hash, want || "", "preview");
+    return;
+  }
+  const reason = (res && res.reason) || "failed";
+  toast(reason === "not_found"
+    ? t("mapdetail.preview_dlc_unavailable")
+    : t("mapdetail.preview_failed"));
+  wrap.innerHTML = `<div class="replay-frame-fill chro-missing">`
+    + `<div class="chro-missing-icon">🎮</div>`
+    + `<div>${escHtml(reason === "not_found" ? t("mapdetail.preview_dlc_unavailable")
+                                             : t("mapdetail.preview_failed"))}</div></div>`;
+}
+
+/* The 3D preview: one iframe of the 3D replay component (Local-ChroViewer, first-party
+   plugin at /chro/), told to open this map through the host bridge.
+   The map is handed over as the whole level folder (`/api/maps/{hash}/package`, every
+   difficulty), never as a single info.dat: the viewer does not look for the difficulty
+   files on its own, so a partial handover simply would not play. */
+function loadMapPreview() {
+  const wrap = $("#md-preview-frame-wrap");
+  const row = currentMapDetail;
+  if (!wrap || !row) return;
+  // The 3D viewer can only show a map we have the files for. When this replay's map is not in
+  // the library, fetch it first: a custom level comes back from BeatSaver, an official level
+  // from the community archive that keeps the game's own levels. Paid DLC tracks are not
+  // distributed anywhere, and those are the ones the player is told about instead of being
+  // left with a viewer that never starts.
+  if (!row.in_library && !row.preview_fill_started) {
+    attemptMapPreviewFill(wrap, row);
+    return;
+  }
+  const diff = (row.difficulties || []).find((d) => d.key === currentMapDifficulty);
+  // A replay's own difficulty stands in while the level has no chart list yet (a map that is
+  // not here is described by its replay): the viewer's picker matches on the label either way.
+  const label = diff
+    ? (diff.label || (diff.difficulty === "ExpertPlus" ? "Expert+" : diff.difficulty))
+    : (row.played_difficulty === "ExpertPlus" ? "Expert+" : (row.played_difficulty || ""));
+  if (!wrap.querySelector(".replay-frame-fill")) {
+    if (!window.chroAvailable) {
+      const hint = document.createElement("div");
+      hint.className = "replay-frame-fill chro-missing";
+      hint.innerHTML = `<div class="chro-missing-icon">🎮</div><div>${escHtml(t("replay.chro_missing"))}</div>`;
+      wrap.appendChild(hint);
+      return;
+    }
+    const wrapInner = document.createElement("div");
+    wrapInner.className = "replay-frame-fill";
+    // The request goes INTO the frame's URL, the same way the replay detail hands over its
+    // replay (`?replayUrl=`): the bridge reads it as its document boots and starts fetching
+    // the map at once. Asking the parent to post a message instead cost a few hundred idle
+    // milliseconds after the frame appeared (measured 2026-10), because the parent had to wait
+    // for a document that could already have been told.
+    const src = `/chro/?saberlabMap=${encodeURIComponent(row.map_hash)}`
+              + `&saberlabLabel=${encodeURIComponent(label)}`;
+    iframeEl(wrapInner, src, "md-preview-frame");
+    wrap.appendChild(wrapInner);
+    sizeMapPreviewFrame();
+    watchMapPreviewSize();
+    // The URL carries the very request this call is about; nothing else has to be sent, and
+    // repeating it would restart the download for no gain.
+    previewLoadedHash = row.map_hash;
+    previewLoadedLabel = label;
+    return;
+  }
+  // The frame is up: only a changed difficulty (or another map) needs a message. The bridge
+  // reports back through window messages (mapload / ready / error), so a repeat is pressed
+  // only while nothing has been answered yet — the viewer ignores a request that arrives
+  // during a load, and a slow 10MB package must not be restarted.
+  if (previewLoadedHash === row.map_hash && previewLoadedLabel === label) return;
+  previewLoadedHash = row.map_hash;
+  previewLoadedLabel = label;
+  const send = () => {
+    const f = document.getElementById("md-preview-frame");
+    if (f && f.contentWindow) {
+      f.contentWindow.postMessage({ type: "saberlab:loadmap", hash: row.map_hash,
+                                    difficultyLabel: label || "" }, window.location.origin);
+    }
+  };
+  send();
+  let answered = false;
+  const onAnswer = (e) => {
+    if (e.origin !== window.location.origin || !e.data) return;
+    if (e.data.type !== "saberlab:mapload") return;
+    if (e.data.hash && e.data.hash.toLowerCase() !== String(row.map_hash).toLowerCase()) return;
+    answered = true;
+  };
+  window.addEventListener("message", onAnswer);
+  const retry = setInterval(() => {
+    if (answered) { clearInterval(retry); window.removeEventListener("message", onAnswer); return; }
+    if (!$("#md-preview-frame")) {
+      clearInterval(retry);
+      window.removeEventListener("message", onAnswer);
+      return;
+    }
+    send();
+  }, 2500);
+}
+
+function iframeEl(wrap, src, id) {
+  const iframe = document.createElement("iframe");
+  iframe.id = id;
+  iframe.className = "replay-frame-fill";
+  iframe.src = src;
+  wrap.appendChild(iframe);
+  return iframe;
+}
+
+/* The preview frame keeps the same 16:9 ratio the replay detail's frame has, and follows the
+   card as it is resized (window resize, difficulty card → preview card, leaving page
+   fullscreen) — the one-shot measurement it started with left the viewer at a fixed pixel
+   height, which is what the user saw (2026-10). While page fullscreen is on the card fills the
+   window, so the viewer takes the card's own height instead (no slack: the map reaches the
+   edges, exactly like the replay pane). */
+function sizeMapPreviewFrame() {
+  const wrap = $("#md-preview-frame-wrap");
+  const frame = document.getElementById("md-preview-frame");
+  if (!wrap || !frame) return;
+  const w = wrap.clientWidth;
+  if (w <= 0) return;
+  frame.style.height = document.documentElement.classList.contains("saberlab-page-fullscreen")
+    ? `${Math.max(240, wrap.clientHeight)}px`
+    : `${Math.round((w * 9) / 16)}px`;
+}
+
+// One observer for the life of the page: `loadMapPreview()` recreates the wrap's contents when
+// another map is opened, so the observed element is refreshed instead of stacking observers.
+let mapPreviewResizeObserver = null;
+
+function watchMapPreviewSize() {
+  const wrap = $("#md-preview-frame-wrap");
+  if (!wrap) return;
+  if (mapPreviewResizeObserver) {
+    mapPreviewResizeObserver.disconnect();
+    mapPreviewResizeObserver.observe(wrap);
+    return;
+  }
+  if (window.ResizeObserver) {
+    mapPreviewResizeObserver = new ResizeObserver(() => sizeMapPreviewFrame());
+    mapPreviewResizeObserver.observe(wrap);
+  } else {
+    window.addEventListener("resize", sizeMapPreviewFrame);
+  }
+}
+
+function resetMapPreview() {
+  const wrap = $("#md-preview-frame-wrap");
+  // Tear the viewer down the same way leaving the replay pane does: the playing map is paused
+  // first (its position is kept), then the frame goes away with the card.
+  if (wrap && wrap.querySelector(".replay-frame-fill")) syncChroPlayback();
+  if (wrap) wrap.innerHTML = "";
+  previewLoadedHash = "";
+  previewLoadedLabel = "";
+  currentMapDetailTab = "page";
 }
 
 async function renderMapDifficultyPage() {
@@ -2624,6 +3607,14 @@ async function renderMapDifficultyPage() {
   const isCurrent = () => !abort.signal.aborted && chartSeq === mapChartReqSeq
     && detailSeq === mapDetailReqSeq && currentMapDetail === row
     && currentMapDifficulty === diff?.key && $("#md-page") === page;
+  // Committing a page slides it in: the same movement the replay detail uses between its
+  // panes. `slideDifficultyPage()` keeps the page that was on screen beside the new one.
+  const commit = (render) => {
+    slideDifficultyPage(() => {
+      resetDetailFade(page);
+      render();
+    });
+  };
   row.chartSeries = null;
   if (!diff) {
     page.innerHTML = `<div class="empty">${t("mapdetail.no_difficulties")}</div>`;
@@ -2642,15 +3633,17 @@ async function renderMapDifficultyPage() {
   } catch (e) {
     clearTimeout(skTimer);
     if (!isCurrent() || e.name === "AbortError") return;
-    resetDetailFade(page);
     page.innerHTML = `<div class="empty" style="color:var(--red)">${t("detail.load_failed", { err: escHtml(e.message) })}</div>`;
     return;
   }
   clearTimeout(skTimer);
   if (!isCurrent()) return;
   const merged = { ...diff, ...stats };
-  renderDetailTransition(page, () => {
-    // Cache hits and fresh responses commit through the same guarded page state.
+  // Cache hits and fresh responses commit through the same guarded page state, and the commit
+  // is a slide (not the opacity fade the first load uses): one difficulty leaves, the other
+  // arrives, exactly like the replay detail's pane switch. The skeleton timer above still
+  // commits with the fade — it is a placeholder, not a difficulty.
+  commit(() => {
     row.chartSeries = stats.series || null;
     page.innerHTML = mapDifficultyPageHtml(row, merged);
     drawMapTimeline();
@@ -2663,7 +3656,7 @@ async function renderMapDifficultyPage() {
         : `<div class="empty">${t("mapdetail.no_plays")}</div>`;
       bindReplayItems();
     }
-  }, skeletonShown, isCurrent);
+  });
 }
 
 function fixMapDetailLayout() {
@@ -2811,7 +3804,10 @@ function mapItem(m) {
   const bpmTxt = m.bpm ? String(Math.round(m.bpm)) : "–";
   const lenTxt = m.song_length ? fmt.dur(m.song_length) : "–";
   const diffCount = (m.difficulties || []).length;
-  return `<div class="replay-item map-item" data-map-hash="${escHtml(m.map_hash)}" data-song="${escHtml(m.song_name || m.folder_name || "")}">
+  // data-* carried for the context menu (see the registrations below): the map is always in
+  // the library here (it IS a library row), hence the fixed in-library marker. The folder flag
+  // is optimistic — the backend is what actually decides, a stale path there answers 410.
+  return `<div class="replay-item map-item" data-map-hash="${escHtml(m.map_hash)}" data-song="${escHtml(m.song_name || m.folder_name || "")}"${m.song_author ? ` data-song-author="${escHtml(m.song_author)}"` : ""}${m.beatmap_key ? ` data-key="${escHtml(m.beatmap_key)}"` : ""} data-in-library="1" data-folder-available="1">
     <img src="${cover}" loading="lazy" onerror="this.onerror=null;this.src='/static/default.png'" alt="">
     <div>
       <div class="title">${escHtml(m.song_name || m.folder_name || t("maps.unknown_song"))} ${keyBadge}</div>
@@ -2824,6 +3820,36 @@ function mapItem(m) {
     <div class="num"><div class="v">${bpmTxt}</div><div class="k">${t("maps.col.bpm")}</div></div>
     ${starCell}
   </div>`;
+}
+
+/* Fill in the two menu facts /api/maps/library leaves out.
+   The list endpoint carries only the columns the list itself sorts and shows, while the context
+   menu also needs the song author and the BeatSaver key (the key IS shown on the card, but as a
+   badge rather than as an attribute). Reading both from the maps table is one indexed lookup per
+   row, so it happens once per map when the page is rendered — the menu itself must never wait
+   on a request, and a failure leaves the two copy items in their "unknown" state instead of
+   breaking the list. The answer is remembered per map_hash for the session. */
+const _mapFacts = new Map();          // map_hash -> {song_author, beatmap_key}
+
+async function fillMapMenuData(items) {
+  const missing = items.filter((m) => m && m.map_hash && !_mapFacts.has(m.map_hash));
+  for (const m of missing) {
+    try {
+      const row = await api(`/api/maps/${encodeURIComponent(m.map_hash)}`);
+      _mapFacts.set(m.map_hash, {
+        song_author: (row && row.song_author) || "",
+        beatmap_key: (row && row.beatmap_key) || "",
+      });
+    } catch (_) {
+      _mapFacts.set(m.map_hash, { song_author: "", beatmap_key: "" });
+    }
+  }
+  for (const m of items) {
+    const facts = _mapFacts.get(m.map_hash);
+    if (!facts) continue;
+    m.song_author = m.song_author || facts.song_author;
+    m.beatmap_key = m.beatmap_key || facts.beatmap_key;
+  }
 }
 
 async function loadMaps(page = 1) {
@@ -2848,7 +3874,9 @@ async function loadMaps(page = 1) {
   }
   if (seq !== mapsReqSeq) return;          // a newer request won
   const items = data.items || [];
-  $("#maps-count").textContent = t("maps.count", { n: fmt.num(data.total || 0) });
+  await fillMapMenuData(items);
+  if (seq !== mapsReqSeq) return;          // the fill is awaited: re-check before touching the DOM
+  // no separate "N maps" counter: the pagination row already states the total (2026-10, user)
   $("#maps-list").innerHTML = items.length
     ? items.map(mapItem).join("")
     : `<div class="empty">${q ? t("maps.empty_filter", { q: escHtml(q) }) : t("maps.empty")}</div>`;
@@ -3335,6 +4363,9 @@ $("#btn-ss-validate").addEventListener("click", async () => {
   }
   // loadStatus 内部已拉取 /api/status 并返回（原先这里再拉一次是冗余请求）
   const s = await loadStatus();
+  // window mode: keep an eye on the host's covered/fullscreen state (it can change outside
+  // the app, and the host's Escape hook reports through the same request)
+  startChroWindowWatch();
   // 玩家卡片（侧栏左下角）：与最近 replay 并行请求，不阻塞首屏
   const pcImage = $("#pc-avatar-img");
   if (pcImage) {

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500" width="100%" height="100%">
+  <!-- 1. 外层圆角正方形轮廓 -->
+  <rect 
+    x="25" 
+    y="25" 
+    width="450" 
+    height="450" 
+    rx="95" 
+    ry="95" 
+    fill="none" 
+    stroke="#000000" 
+    stroke-width="12" 
+    stroke-linejoin="round" 
+  />
+
+  <!-- 2. 核心图形轮廓（透明填充，黑色描边） -->
+  <!-- 顶点：左上(118, 125) -> 右上(382, 125) -> 右侧(382, 150) -> 底部中心(250, 215) -> 左侧(118, 150) -->
+  <polygon 
+    points="118,125 382,125 382,150 250,215 118,150" 
+    fill="none" 
+    stroke="#000000" 
+    stroke-width="12" 
+    stroke-linejoin="round" 
+    stroke-linecap="round" 
+  />
+</svg>

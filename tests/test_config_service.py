@@ -1,4 +1,4 @@
-"""Config Service 单元测试（developrules.md §22）。"""
+"""Config Service unit tests (developrules.md §22)."""
 import pathlib
 import sys
 import unittest
@@ -6,7 +6,7 @@ import unittest
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.config import load_config
+from backend.config import LOOPBACK_HOSTS, _loopback_host, load_config
 from backend.config.service import (ConfigService, check_paths, derive_paths,
                                     normalize_path)
 from backend.config.schema import (STAR_PALETTES, get_schema,
@@ -44,18 +44,20 @@ class TestCheckPaths(unittest.TestCase):
         if not pathlib.Path(root).exists():
             self.skipTest("开发机路径不存在")
         results = check_paths(root)
-        self.assertTrue(results[0].ok)          # 根目录
-        # 根 + 4 派生（含可选 LL 目录，2026-09）+ 回放留存检测行（2026-09，非路径项）
+        self.assertTrue(results[0].ok)          # the root directory
+        # root + 4 derived (including the optional LL directory, 2026-09) + the replay
+        # retention check row (2026-09, not a path item)
         self.assertEqual(len(results), 6)
         self.assertEqual(results[-1].key, "replay_retention")
         self.assertTrue(all(r.ok for r in results[:-1]))
-        # 该行是"顾问级"警告：由本机 mod 设置决定，可能为 note/bad，不参与 valid
+        # that row is an "advisory-level" warning: it depends on the local mod's own
+        # settings, can be note/bad, and does not feed into valid
         self.assertIn(results[-1].status, ("ok", "bad", "note"))
 
     def test_invalid_root(self):
         results = check_paths("D:/__nonexistent_root__")
         self.assertFalse(results[0].ok)
-        self.assertEqual(len(results), 1)       # 根失败则不再检查派生
+        self.assertEqual(len(results), 1)       # if the root fails, the derived paths are not checked
 
 
 class TestConfigService(unittest.TestCase):
@@ -64,7 +66,7 @@ class TestConfigService(unittest.TestCase):
         view = svc.view()
         self.assertTrue(isinstance(view.instance_root, str))
         self.assertTrue(isinstance(view.replay_dir, str))
-        # secret 不返回
+        # secrets are not returned
         self.assertFalse(hasattr(view, "ai_api_key"))
         d = view.to_dict()
         self.assertNotIn("ai_api_key", d)
@@ -87,7 +89,7 @@ class TestConfigService(unittest.TestCase):
         self.assertFalse(res["saved"])
 
     def test_save_valid(self):
-        """临时副本上验证原子写入与 round-trip（不动真实 config.yaml）。"""
+        """Verify atomic write and round-trip on a temporary copy (the real config.yaml is never touched)."""
         import tempfile
         import yaml
         src = PROJECT_ROOT / "config" / "config.yaml"
@@ -102,12 +104,12 @@ class TestConfigService(unittest.TestCase):
             res = svc.save_instance_root(r"D:\BSManager\BSInstances\1.40.8")
             self.assertTrue(res["saved"])
             self.assertTrue(res["restart_required"])
-            # 回读验证
+            # verified by reading it back
             raw = yaml.safe_load(cfg_copy.read_text(encoding="utf-8"))
             self.assertEqual(
                 raw["game"]["instance_root"],
                 "D:/BSManager/BSInstances/1.40.8")
-            # 原子写入不留 tmp 残渣
+            # the atomic write leaves no .tmp leftovers
             self.assertFalse((tmpdir / "config.yaml.tmp").exists())
         finally:
             import shutil
@@ -119,17 +121,17 @@ class TestSchema(unittest.TestCase):
         schema = get_schema()
         self.assertGreater(len(schema), 10)
         keys = [s["key"] for s in schema]
-        # 每个 item 必须有完整元数据
+        # every item must carry complete metadata
         for s in schema:
             for field in ("key", "label", "type", "description",
                           "restart_required", "required", "sensitive", "group"):
                 self.assertIn(field, s, f"{s.get('key')} 缺 {field}")
-        # 关键路径项存在
+        # the key path items exist
         self.assertIn("game.instance_root", keys)
         self.assertIn("game.replay_dir", keys)
         self.assertIn("game.custom_levels_dir", keys)
         self.assertIn("ai.api_key", keys)
-        # secret 项标记敏感
+        # the secret item is flagged sensitive
         api_key = next(s for s in schema if s["key"] == "ai.api_key")
         self.assertTrue(api_key["sensitive"])
         self.assertEqual(api_key["type"], "secret")
@@ -146,7 +148,7 @@ class TestSchemaReadWrite(unittest.TestCase):
         svc = ConfigService()
         values = svc.get_all_values()
         self.assertIn("ai.api_key", values)
-        # secret 返回的是 {configured, masked}，不是明文
+        # a secret returns {configured, masked}, never the plaintext
         self.assertIsInstance(values["ai.api_key"], dict)
         self.assertIn("configured", values["ai.api_key"])
         self.assertNotIn("ai_api_key", values)
@@ -158,7 +160,7 @@ class TestSchemaReadWrite(unittest.TestCase):
         self.assertIn("未知配置项", res["error"])
 
     def test_save_analysis_values(self):
-        """临时副本上保存分析参数（不需要重启），验证 round-trip。"""
+        """Save analysis parameters on a temporary copy (no restart needed) and verify the round-trip."""
         import tempfile
         import yaml
         src = PROJECT_ROOT / "config" / "config.yaml"
@@ -172,7 +174,7 @@ class TestSchemaReadWrite(unittest.TestCase):
             svc = ConfigService(config_path=cfg_copy)
             res = svc.save_values({"analysis.window_step_seconds": "2.5"})
             self.assertTrue(res["saved"])
-            # 分析参数不需要重启
+            # analysis parameters need no restart
             self.assertFalse(res["restart_required"])
             raw = yaml.safe_load(cfg_copy.read_text(encoding="utf-8"))
             self.assertEqual(raw["analysis"]["window_step_seconds"], 2.5)
@@ -250,7 +252,8 @@ class TestChangedKeys(unittest.TestCase):
         self.assertIn("analysis.fatigue_edge_seconds", res["changed"])
 
     def test_corrupt_yaml_backed_up_not_silently_wiped(self):
-        """损坏的 config.yaml：原内容必须备份，而非被后续保存静默清空（P0-2.2）。"""
+        """A corrupt config.yaml: the original content must be backed up rather than silently
+        wiped by a later save (P0-2.2)."""
         import contextlib
         import io
         import tempfile
@@ -262,17 +265,18 @@ class TestChangedKeys(unittest.TestCase):
             cfg_copy.write_text(corrupt_text, encoding="utf-8")
 
             svc = ConfigService(config_path=cfg_copy)
-            # 触发读取（解析失败 → 备份）+ 保存新值；the expected
+            # trigger a read (parse failure → backup) and save a new value; the expected
             # "[config] Failed to parse..." warning is silenced here (it is
             # test noise, not a real corruption — the temp file is deliberate)
             with contextlib.redirect_stdout(io.StringIO()):
                 res = svc.save_values({"analysis.window_step_seconds": "2.0"})
             self.assertTrue(res["saved"])
-            # 原损坏内容被备份（可人工恢复），且存在带时间戳的备份文件
+            # the original corrupt content is backed up (recoverable by hand) and a
+            # timestamped backup file exists
             backups = list(tmpdir.glob("config.yaml.corrupt-*"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), corrupt_text)
-            # 保存后的新文件是合法 yaml
+            # the file written by the save is valid yaml
             raw = yaml.safe_load(cfg_copy.read_text(encoding="utf-8"))
             self.assertEqual(raw["analysis"]["window_step_seconds"], 2.0)
         finally:
@@ -282,7 +286,7 @@ class TestChangedKeys(unittest.TestCase):
 
 class TestStarPalette(unittest.TestCase):
     def test_schema_item(self):
-        """player.star_palette：enum 下拉、默认 community、无需重启。"""
+        """player.star_palette: enum dropdown, default community, no restart required."""
         schema = get_schema()
         item = next(s for s in schema if s["key"] == "player.star_palette")
         self.assertEqual(item["type"], "enum")
@@ -292,7 +296,7 @@ class TestStarPalette(unittest.TestCase):
         self.assertEqual(item["group"], "玩家")
 
     def test_palette_definitions_valid(self):
-        """STAR_PALETTES：id 唯一、tiers 升序、None=∞ 仅限末档、cls 合法。"""
+        """STAR_PALETTES: unique ids, tiers ascending, None=∞ only in the last tier, cls valid."""
         ids = [p["id"] for p in STAR_PALETTES]
         self.assertEqual(len(ids), len(set(ids)))
         valid_cls = {"star-gray", "star-green", "star-yellow",
@@ -312,7 +316,7 @@ class TestStarPalette(unittest.TestCase):
                 self.assertIn(t["cls"], valid_cls, f"{p['id']} cls 非法")
 
     def test_community_tiers_order(self):
-        """社区惯例 5 档：灰/绿/黄/红/紫（<3 / <5 / <7 / <9 / 9+）。"""
+        """The community convention of 5 tiers: gray/green/yellow/red/purple (<3 / <5 / <7 / <9 / 9+)."""
         pal = get_star_palette("community")
         self.assertIsNotNone(pal)
         self.assertEqual(
@@ -322,7 +326,7 @@ class TestStarPalette(unittest.TestCase):
         self.assertIsNone(get_star_palette("no_such_palette"))
 
     def test_save_palette_roundtrip(self):
-        """临时副本保存 player.star_palette：round-trip + 无需重启 + Config 回读。"""
+        """Save player.star_palette on a temporary copy: round-trip + no restart + read back through Config."""
         import tempfile
         import yaml
         src = PROJECT_ROOT / "config" / "config.yaml"
@@ -342,6 +346,38 @@ class TestStarPalette(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestServerHost(unittest.TestCase):
+    """server.host may only be a loopback name (2026-09 hardening).
+
+    The origin guard refuses every non-loopback Host, so a listen address pointing at
+    another network card would leave the UI completely unable to connect, with no hint
+    at all — the setting was therefore tightened, and an out-of-range value in an old
+    config falls back at load time."""
+
+    def test_schema_offers_loopback_only(self):
+        item = next(s for s in get_schema() if s["key"] == "server.host")
+        self.assertEqual(item["type"], "enum")
+        self.assertEqual(list(item["enum"]), list(LOOPBACK_HOSTS))
+        self.assertEqual(item["default"], LOOPBACK_HOSTS[0])
+        self.assertTrue(item["restart_required"])
+
+    def test_guard_uses_the_same_set(self):
+        """The values the setting can offer must be exactly the values the guard accepts."""
+        import backend.main as m
+        self.assertEqual(m._LOOPBACK_HOSTS, frozenset(LOOPBACK_HOSTS))
+
+    def test_non_loopback_value_falls_back(self):
+        for bad in ("0.0.0.0", "192.168.1.5", "::", "evil.example", "", None, "  "):
+            with self.subTest(value=bad):
+                self.assertEqual(_loopback_host(bad), LOOPBACK_HOSTS[0])
+
+    def test_loopback_values_are_kept(self):
+        for good in LOOPBACK_HOSTS:
+            with self.subTest(value=good):
+                self.assertEqual(_loopback_host(good), good)
+        self.assertEqual(_loopback_host(" 127.0.0.1 "), "127.0.0.1")
 
 
 if __name__ == "__main__":

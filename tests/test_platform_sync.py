@@ -96,7 +96,7 @@ def _close_repos(case) -> None:
 
 
 class TestPlatformMigration(unittest.TestCase):
-    """旧库（无 platform 列）打开即迁移：数据保留、新结构可用、幂等。"""
+    """A legacy DB (no platform column) migrates on open: data preserved, new schema usable, idempotent."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -164,7 +164,7 @@ class TestPlatformMigration(unittest.TestCase):
 
 
 class TestPlatformIsolation(unittest.TestCase):
-    """双平台数据共存互不干扰（来回切换的核心保证）。"""
+    """Both platforms' data coexist without interfering (the core guarantee for switching back and forth)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -212,7 +212,7 @@ class TestPlatformIsolation(unittest.TestCase):
 
 
 class TestEnrichmentPlatform(unittest.TestCase):
-    """enrichment 按当前平台读 stars/pp。"""
+    """enrichment reads stars/pp from the active platform."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -299,7 +299,7 @@ BL_SCORE_FIXTURE = {
     "maxCombo": 728,
     "modifiers": "SF,NF",
     "timepost": 1738671636,
-    "playerId": "76561199673091080",
+    "playerId": "76561190000000000",
     "leaderboard": {
         "id": "1232e71",
         "song": {
@@ -319,8 +319,8 @@ BL_SCORE_FIXTURE = {
 }
 
 BL_PROFILE_FIXTURE = {
-    "id": "76561199673091080",
-    "name": "ZiRCON",
+    "id": "76561190000000000",
+    "name": "TestPlayer",
     "country": "CN",
     "pp": 3217.388,
     "rank": 24505,
@@ -334,39 +334,39 @@ BL_PROFILE_FIXTURE = {
 
 
 class TestBeatLeaderParsing(unittest.TestCase):
-    """fetch_scores / fetch_profile 字段映射（mock _get，真实 API 样本）。"""
+    """fetch_scores / fetch_profile field mapping (mock _get, real API fixtures)."""
 
     def _cfg(self):
         return mock.Mock(timeout_seconds=30)
 
     def test_classify_record_rules(self):
-        """用户规则（2026-08）：status==3 才 ranked；unranked 有星也不算；
-        isUsableRankedScore = status==3 且 stars>0 且 pp>0。"""
+        """User rules (2026-08): only status==3 is ranked; an unranked record with stars
+        still does not count; isUsableRankedScore = status==3 and stars>0 and pp>0."""
         def rec(status, stars, pp):
             return {"difficulty": {"status": status, "stars": stars}, "pp": pp}
 
-        # 正式 ranked + 完整数据 -> usable
+        # properly ranked + complete data -> usable
         r = beatleader.classify_record(rec(3, 8.357, 296.6))
         self.assertEqual(r["category"], "ranked")
         self.assertTrue(r["usable"])
-        # ranked 但数据不完整 -> 不可用
+        # ranked but incomplete data -> not usable
         r = beatleader.classify_record(rec(3, 8.357, 0))
         self.assertEqual(r["category"], "ranked")
         self.assertFalse(r["usable"])
         r = beatleader.classify_record(rec(3, None, 296.6))
         self.assertFalse(r["usable"])
-        # unranked（0/1/2/5/7）即使有星也不算 ranked
+        # unranked (0/1/2/5/7): not ranked even when stars are present
         for status in (0, 1, 2, 5, 7):
             r = beatleader.classify_record(rec(status, 8.17, 0))
             self.assertEqual(r["category"], "unranked", status)
             self.assertFalse(r["usable"])
             self.assertIn("ranked", r["reason"])
-        # 0 星/null 星
+        # zero stars / null stars
         r = beatleader.classify_record(rec(3, 0, 100))
         self.assertFalse(r["usable"])
         r = beatleader.classify_record(rec(7, None, 0))
         self.assertEqual(r["category"], "unranked")
-        # 非数值
+        # non-numeric
         r = beatleader.classify_record(rec(3, "x", "y"))
         self.assertFalse(r["usable"])
         r = beatleader.classify_record(rec(3, float("nan"), 1))
@@ -376,7 +376,7 @@ class TestBeatLeaderParsing(unittest.TestCase):
         with mock.patch.object(beatleader, "_get",
                                return_value={"data": [BL_SCORE_FIXTURE],
                                              "metadata": {"total": 1}}):
-            scores = beatleader.fetch_scores(self._cfg(), "76561199673091080")
+            scores = beatleader.fetch_scores(self._cfg(), "76561190000000000")
         self.assertEqual(len(scores), 1)
         s = scores[0]
         self.assertEqual(s["stars"], 8.357123)
@@ -403,14 +403,14 @@ class TestBeatLeaderParsing(unittest.TestCase):
                                return_value={"data": [BL_SCORE_FIXTURE, non_ranked]}):
             idx = beatleader.build_ranked_index(self._cfg(), "p")
         key = ("AA31DCD3F9DA483793922D24F210944178B6CBC2", "Expert")
-        # 两条同 key：后写覆盖（non-ranked 无 pp）；stars 保留
+        # two records under the same key: the later write wins (non-ranked has no pp); stars are kept
         self.assertEqual(idx[key]["stars"], 8.357123)
         self.assertIsNone(idx[key]["pp"])
 
     def test_fetch_profile_mapping(self):
         with mock.patch.object(beatleader, "_get", return_value=BL_PROFILE_FIXTURE):
             p = beatleader.fetch_profile(self._cfg(), "p")
-        self.assertEqual(p["name"], "ZiRCON")
+        self.assertEqual(p["name"], "TestPlayer")
         self.assertEqual(p["rank"], 24505)
         self.assertEqual(p["pp"], 3217.388)
         # averageRankedAccuracy 0-1 -> percent (frontend divides by 100)

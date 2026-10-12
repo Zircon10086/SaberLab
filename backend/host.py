@@ -366,6 +366,8 @@ class WebviewShell:
         self._last_move_ts = 0.0
         self._last_push_ts = 0.0
         self._move_watchdog = None
+        self._hwnd = 0                # native window handle (fullscreen decisions measure it)
+        self._esc_hook = None         # WH_KEYBOARD_LL handle, kept alive for the session
 
     def _on_window_moving(self):
         """Window move/resize event (moved/resized): mark as "moving" and push True;
@@ -411,6 +413,8 @@ class WebviewShell:
             pass
 
     def _native_handle(self) -> int | None:
+        if self._hwnd:
+            return self._hwnd
         try:
             hwnd = int(self._window.native.Handle)
             if hwnd:
@@ -437,6 +441,12 @@ class WebviewShell:
         if getattr(self, "_t_start", None) is not None:
             print(f"[host] webview window shown in "
                   f"{time.perf_counter() - self._t_start:.2f}s", flush=True)
+        # Remember the handle for the whole session: window-fullscreen decisions are made by
+        # MEASURING this window (backend/dialog.py), so they stay right even after the window
+        # is moved or restored by something outside the app (2026-10).
+        hwnd_once = self._wait_hwnd()
+        if hwnd_once:
+            self._hwnd = hwnd_once
         # Acrylic scheme decision (2026-08 measured conclusions):
         # - auto goes straight to scheme C (wallpaper push): measured pywebview 6.2.1 transparent mode
         #   does not produce real window transparency (the client area is always covered by the WinForms
@@ -615,8 +625,93 @@ class WebviewShell:
         self._window.events.shown += self._on_shown
         self._window.events.moved += self._on_window_moving
         self._window.events.resized += self._on_window_moving
+        # Escape while the window covers the display never reaches the page: measured 2026-10
+        # with the replay focused, the key is consumed before any JavaScript in either document
+        # sees it, so "one Escape leaves fullscreen" has to be noticed here, on the host.
+        self._install_escape_hook()
+        # and make the covered state explicit at the Win32 level (borderless, exact bounds)
+        dialog.set_cover_cleanup(self._force_cover)
         # a missing file is not fatal: pywebview then falls back to the executable's icon
         webview.start(icon=str(APP_ICON))
+
+    # ---- covering the display: cleanup + Escape watch -------------------------------
+    def _force_cover(self):
+        """Make "no frame to draw" explicit at the DWM level once the display is covered.
+
+        pywebview's own fullscreen already goes borderless and covers the display, but on some
+        builds a frame is still composed, which reads as a thin line along the screen edges
+        (2026-10 user report). ONLY the two DWM attributes that control that are touched here:
+        the window's style and position are left exactly as pywebview set them, because
+        pywebview restores the window from what it recorded when its EnterFullscreen ran - if
+        that recorded state were altered, leaving fullscreen would "restore" the altered one.
+        """
+        try:
+            import ctypes
+            from ctypes import wintypes
+            hwnd = self._native_handle()
+            if not hwnd:
+                return
+            dwm = ctypes.windll.dwmapi
+            for attr, value in ((33, 1), (34, 0xFFFFFFFE)):
+                val = ctypes.c_int(value)
+                dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), ctypes.c_uint(attr),
+                                          ctypes.byref(val), ctypes.sizeof(val))
+            print("[host] cover: DWM rounding/border suppressed", flush=True)
+        except Exception as e:  # noqa: BLE001 - cosmetic only, never break the request
+            print(f"[host] cover attribute pass skipped: {e}", flush=True)
+
+    # ---- Escape while the window covers the display --------------------------------
+    def _install_escape_hook(self):
+        """Watch Escape while the window covers the display; never swallow the key.
+
+        A WH_KEYBOARD_LL hook was tried first and never fired here (low-level hooks need the
+        installing thread to pump messages, which this main thread does only after
+        webview.start() takes over), so this polls the key state instead - 50 ms, and it does
+        nothing at all unless the window really covers its display.
+        """
+        import ctypes
+        self._esc_thread = threading.Thread(target=self._escape_watch, daemon=True,
+                                            name="escape-watch")
+        self._esc_user32 = ctypes.windll.user32
+        self._esc_thread.start()
+
+    def _escape_watch(self):
+        """Watch Escape while a fullscreen is on; leave it, and never swallow the key.
+
+        Two cases, both of which the page cannot handle itself when the replay has the
+        keyboard (measured 2026-10: the key reaches no JavaScript at all in that state):
+        the window covering the display, and the page-level enlargement (页面全屏).
+        """
+        user32 = self._esc_user32
+        while True:
+            time.sleep(0.05)
+            try:
+                # 0x8000 = currently down
+                if not (user32.GetAsyncKeyState(0x1B) & 0x8000):
+                    time.sleep(0.02)
+                    continue
+                if self._window is None or not self._native_handle():
+                    continue
+                if not dialog.fullscreen_on():
+                    continue
+                # leaving is one action: the page enlargement comes down and the window stops
+                # covering the display; the page applies that from the signal below
+                if dialog.covering_display():
+                    self._window.toggle_fullscreen()
+                dialog.signal_cover_escape()
+                print("[host] Escape while fullscreen -> handed to the page", flush=True)
+                # the page polls status, but tell it at once when it can be told
+                try:
+                    self._window.evaluate_js(
+                        "window.__saberlabCoverEscape && window.__saberlabCoverEscape()")
+                except Exception:  # noqa: BLE001 - the poll is the fallback
+                    pass
+                # hold this press: do not fire again until the key is released
+                while user32.GetAsyncKeyState(0x1B) & 0x8000:
+                    time.sleep(0.03)
+            except Exception as e:  # noqa: BLE001 - never break input handling
+                print(f"[host] Escape watch error: {e}", flush=True)
+                time.sleep(0.2)
 
 
 def main():

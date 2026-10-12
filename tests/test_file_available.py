@@ -1,9 +1,11 @@
-"""file_available 降级标记回归测试（2026-09，HANDOFF §4.25 待办 1）。
+"""file_available degradation flag regression test (2026-09, HANDOFF §4.25 todo 1).
 
-ingest 只增不删：DB 行可能比原始 .bsor 文件长寿（外部删除/移动）。
-后端统一在响应行上计算 file_available，前端据此降级标注
-（详情横幅 / 切割细节 / 3D 回放 / 手部运动不可用原因 / 列表徽章），
-而不是笼统显示"无数据"。此处直接测 main._attach_file_available 的判定逻辑。
+ingest only ever adds rows, never deletes: a DB row can outlive the original .bsor
+file (deleted or moved from outside the app). The backend computes file_available
+uniformly on the response rows so the frontend can label the degradation precisely
+(detail banner / cut details / 3D replay / why hand motion is unavailable / list
+badge) instead of showing a blanket "no data". This test exercises the decision logic
+of main._attach_file_available directly.
 """
 import pathlib
 import sys
@@ -17,28 +19,28 @@ import backend.main as m  # noqa: E402
 
 class TestAttachFileAvailable(unittest.TestCase):
     def test_existing_file(self):
-        """存在的文件路径 → file_available=True。"""
+        """An existing file path -> file_available=True."""
         p = pathlib.Path(PROJECT_ROOT) / "README.md"
         rows = [{"replay_id": "a", "file_path": str(p)}]
         m._attach_file_available(rows)
         self.assertTrue(rows[0]["file_available"])
 
     def test_missing_file(self):
-        """路径无效/文件不存在 → file_available=False。"""
+        """Invalid path / file does not exist -> file_available=False."""
         rows = [{"replay_id": "b",
                  "file_path": str(PROJECT_ROOT / "_tmp" / "definitely-not-here.bsor")}]
         m._attach_file_available(rows)
         self.assertFalse(rows[0]["file_available"])
 
     def test_empty_path(self):
-        """NULL/空 file_path 行（异常数据）→ file_available=False。"""
+        """Row with a NULL/empty file_path (abnormal data) -> file_available=False."""
         for fp in (None, "", "   "):
             rows = [{"replay_id": "c", "file_path": fp}]
             m._attach_file_available(rows)
             self.assertFalse(rows[0]["file_available"])
 
     def test_batch_rows(self):
-        """批量行逐条标注（列表/历史/同谱历史共用同一 helper）。"""
+        """Mark a batch row by row (list / history / same-map history all share this helper)."""
         ok = pathlib.Path(PROJECT_ROOT) / "README.md"
         rows = [
             {"replay_id": "1", "file_path": str(ok)},

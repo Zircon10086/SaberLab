@@ -1,4 +1,4 @@
-"""Map Resolver 测试：SongCore hash 算法 + info.dat 读取。"""
+"""Map Resolver tests: SongCore hash algorithm + info.dat reading."""
 import pathlib
 import sys
 import unittest
@@ -15,7 +15,7 @@ SECRET_BOSS_HASH = "807E71EB310B8AEBA98A643C3E8C390E24E89A80"
 
 class TestLevelHash(unittest.TestCase):
     def test_secret_boss_hash(self):
-        """真实谱面：算法结果必须等于 Replay 中的 map_hash。"""
+        """Real map: the computed result must equal the map_hash stored in the replay."""
         if not LEVELS_DIR.exists():
             self.skipTest("CustomLevels 目录不存在")
         folder = next((p for p in LEVELS_DIR.iterdir()
@@ -26,7 +26,7 @@ class TestLevelHash(unittest.TestCase):
         self.assertEqual(h, SECRET_BOSS_HASH)
 
     def test_synthetic_level(self):
-        """合成谱面目录：验证 hash = SHA1(info.dat + beatmaps 顺序拼接)。"""
+        """Synthetic map directory: verifies hash = SHA1(info.dat + beatmaps concatenated in order)."""
         import hashlib
         import json
         tmp = PROJECT_ROOT / "_tmp" / "test_level"
@@ -44,7 +44,7 @@ class TestLevelHash(unittest.TestCase):
         }
         (tmp / "Info.dat").write_text(json.dumps(info), encoding="utf-8")
         (tmp / "ExpertStandard.dat").write_text('{"notes":[]}', encoding="utf-8")
-        # 干扰文件：不应参与 hash
+        # decoy file: must not take part in the hash
         (tmp / "cover.jpg").write_bytes(b"\xff\xd8\xff")
 
         h = compute_level_hash(tmp)

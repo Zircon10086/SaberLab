@@ -1,13 +1,12 @@
-"""总览分页模式回归测试（v1.4.1）。
+"""Overview paging mode regression test (v1.4.1).
 
-/api/replays 新增 mode=count（按数量分页，20 条/页）：
-- 分页边界正确（首/中/末页条数）
-- 越界页码钳制
-- mode=day 默认行为不变（按天分组）
+/api/replays gained mode=count (paging by number of rows, 20 per page):
+- page boundaries are correct (first/middle/last page sizes)
+- out-of-range page numbers are clamped
+- the default mode=day behaviour is unchanged (grouping by day)
 """
 import pathlib
 import shutil
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -17,12 +16,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.db.repository import Repository  # noqa: E402
 
-# 模块级副作用与现有测试一致（真实库只读连接）
+# module-level side effects match the existing tests (read-only connection to the real DB)
 import backend.main as m  # noqa: E402
 
 
 def _seed_replays(db_path: pathlib.Path, n: int) -> Repository:
-    """在临时库插入 n 条最小 replay 行（timestamp 递减），返回 Repository。"""
+    """Insert n minimal replay rows into a temp DB (descending timestamp) and return the Repository."""
     repo = Repository(db_path)
     with repo._conn() as c:
         base = 1_700_000_000
@@ -42,7 +41,7 @@ class TestCountPaging(unittest.TestCase):
         self._orig_repo = m.repo
         self._orig_enrich = m.enrichment
         m.repo = self.repo
-        # enrichment 需要 repo 上的表；用真实 EnrichmentService 指向临时库
+        # enrichment needs tables on the repo; point a real EnrichmentService at the temp DB
         from backend.services.enrichment import EnrichmentService
         m.enrichment = EnrichmentService(self.repo)
 
@@ -52,7 +51,7 @@ class TestCountPaging(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _page(self, page, mode):
-        """直接调用路由函数（FastAPI Query 默认值需显式传参）。"""
+        """Call the route function directly (FastAPI Query defaults must be passed explicitly)."""
         return m.api_replays(page=page, mode=mode, map_hash=None, days=None,
                              flat=0, limit=200)
 
@@ -68,7 +67,7 @@ class TestCountPaging(unittest.TestCase):
 
     def test_page_clamped(self):
         r = self._page(99, "count")
-        self.assertEqual(r["page"], 3)          # 越界钳制到末页
+        self.assertEqual(r["page"], 3)          # out of range -> clamped to the last page
 
     def test_empty_db(self):
         empty_db = self.tmpdir / "empty.sqlite"
@@ -85,7 +84,7 @@ class TestCountPaging(unittest.TestCase):
         r = self._page(1, "day")
         self.assertIn("days", r)
         self.assertIn("total_days", r)
-        self.assertEqual(r["pages"], 1)   # 45 条都在同一天（timestamp 相近）
+        self.assertEqual(r["pages"], 1)   # all 45 rows fall on the same day (nearby timestamps)
 
 
 if __name__ == "__main__":

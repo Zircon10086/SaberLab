@@ -116,7 +116,7 @@ SaberLab shows you exactly where your score is lost — all processed locally.
 - **Detail page**: three tabs — Data (cut details, timeline with energy summary, fatigue curve, accuracy, hand motion, single-hand reversal, same-map history), AI Analysis and 3D Replay; Esc returns to the list
 - **History**: full-library search by song name or map key, paged 300 per page
 - **Right-click menu** on any replay: open detail, same-map records, open file location, delete (the file goes to the system recycle bin)
-- **3D replay**: embedded iframe in the detail page (ChroViewer port), fully local WebGL rendering, local map source preferred (remote sources disabled by default)
+- **3D replay**: embedded iframe in the detail page (ChroViewer port), fully local WebGL rendering, local map source preferred (remote sources disabled by default); fill the app window or go full screen
 - **Acrylic window**: automatically captures your local wallpaper for a frosted-glass background — beautiful and still readable
 
 ### Integration & Sync

@@ -187,6 +187,10 @@ class Repository:
         # pay 4 connect/commit round-trips per replay (~48 ms, 74% of the whole
         # per-replay cost); one transaction makes it one.
         self._local = threading.local()
+        # Every connection this repository opened, from any thread, so close() can release the
+        # ones whose threads are already gone (analysis workers, the map download pool).
+        self._all_conns: set[sqlite3.Connection] = set()
+        self._conn_registry_lock = threading.Lock()
         # Release the cached connection when this Repository is collected, without
         # defining __del__ (which would create a reference cycle and delay cleanup).
         self._finalizer = weakref.finalize(self, _close_thread_local, self._local)
@@ -370,6 +374,12 @@ class Repository:
         if conn is None:
             conn = self._new_conn()
             self._local.conn = conn
+            # Remember every connection this repository ever opened, whatever thread opened it.
+            # A thread-local alone cannot be cleaned up from another thread, so closing the
+            # repository left the worker threads' connections to the garbage collector (measured:
+            # "unclosed database" warnings, and a file handle held until the GC ran).
+            with self._conn_registry_lock:
+                self._all_conns.add(conn)
         return conn
 
     def close(self) -> None:
@@ -385,6 +395,16 @@ class Repository:
             self._local.conn = None
             try:
                 conn.close()
+            except sqlite3.Error:
+                pass
+        # The connections other threads opened (analysis workers, the download pool) are closed
+        # here too: they belong to this repository, and their threads may be long gone.
+        with self._conn_registry_lock:
+            others = [c for c in self._all_conns if c is not conn]
+            self._all_conns.clear()
+        for other in others:
+            try:
+                other.close()
             except sqlite3.Error:
                 pass
 
@@ -473,7 +493,6 @@ class Repository:
             row = c.execute("SELECT * FROM maps WHERE map_hash=?",
                             (map_hash.upper(),)).fetchone()
             return _row_to_dict(row) if row else None
-
     def set_maps_added_at(self, values: dict[str, str]) -> int:
         """Backfill maps.added_at for rows that have none (map_hash -> ISO Z timestamp).
 
@@ -513,6 +532,22 @@ class Repository:
                 " mapper, bpm, song_length, difficulties, nps_json, info_json,"
                 " hash_source, last_scanned"
                 " FROM maps ORDER BY song_name LIMIT ?", (limit,)).fetchall()
+            return [_row_to_dict(r) for r in rows]
+
+    def list_replays_for_missing_levels(self) -> list[dict]:
+        """Every level identity a replay refers to, with how many plays point at it.
+
+        The "补全丢失谱面" task needs to know the candidate levels WITHOUT the library
+        filtered in: the caller compares against the maps table, because a level can already be
+        on disk while this table has no row for it yet. Only the fields the downloader needs
+        are read (the identity, and a song name to resolve official level archives).
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT UPPER(map_hash) AS map_hash, MIN(song_name) AS song_name,"
+                " MIN(mapper) AS mapper, COUNT(*) AS plays"
+                " FROM replays WHERE map_hash IS NOT NULL AND map_hash != ''"
+                " GROUP BY UPPER(map_hash)").fetchall()
             return [_row_to_dict(r) for r in rows]
 
     def _map_order_table(self) -> dict:
@@ -729,6 +764,35 @@ class Repository:
                     pass                                # column absent in old databases
             cur = c.execute("DELETE FROM replays WHERE replay_id=?", (replay_id,))
             counts["replays"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        return counts
+
+    def delete_map(self, map_hash: str) -> dict:
+        """Remove a map record and the caches keyed by it, in one transaction.
+
+        Used by the user-facing "delete map" action (2026-10): the caller has already moved the
+        level folder to the OS recycle bin, so this only takes the row away plus the rating /
+        leaderboard caches that have no meaning without a map:
+        maps / map_ranked_cache / scoresaber_leaderboards.
+
+        Replays on this map are deliberately NOT touched: the .bsor files live in the replays
+        folder and are the user's own data, and the user asked to delete the map. Those replays
+        keep working (the list drops the cover and the "view map" entry, exactly like a replay
+        whose level folder is missing). Deleting them is a separate action with its own
+        confirmation.
+
+        Returns a per-table count so the caller can log/report what was removed.
+        """
+        mh = map_hash.upper()
+        counts: dict[str, int] = {}
+        with self.session() as c:                       # one connection, one transaction
+            for table in ("map_ranked_cache", "scoresaber_leaderboards"):
+                try:
+                    cur = c.execute(f"DELETE FROM {table} WHERE map_hash=?", (mh,))
+                    counts[table] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                except sqlite3.OperationalError:
+                    counts[table] = 0                   # table absent in old databases
+            cur = c.execute("DELETE FROM maps WHERE map_hash=?", (mh,))
+            counts["maps"] = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
         return counts
 
     def get_replay_by_session(self, player_id: str, map_hash: str,

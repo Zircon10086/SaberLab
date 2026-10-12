@@ -1,12 +1,15 @@
-"""增量刷新 + 分析缓存重置回归测试（v1.4.1 任务 2/3）。
+"""Incremental refresh + analysis cache reset regression tests (v1.4.1 tasks 2/3).
 
-任务 2：一键刷新本质是寻找新数据——
-- sync_maps_batch(only_missing=True)：跳过已有 leaderboard 缓存的谱面
-- nps_update 跳过"已计算且文件夹未变"的谱面
+Task 2: one-click refresh is essentially a hunt for new data —
+- sync_maps_batch(only_missing=True): skips beatmaps that already have a leaderboard
+  cache
+- nps_update skips beatmaps that are "already computed and whose folder is
+  unchanged"
 
-任务 3：分析参数变更 → reset_analysis_cache：
-- 清 metrics/windows/motion_series，保留 replays 行/notes/maps
-- replay 重置为 pending，详情页懒分析按新参数重算
+Task 3: analysis parameter change → reset_analysis_cache:
+- clears metrics/windows/motion_series, keeps the replays rows/notes/maps
+- replays go back to pending, and the detail page recomputes lazily with the new
+  parameters
 """
 import pathlib
 import shutil
@@ -30,7 +33,7 @@ class FakeConfig:
 
 
 class _FakeRepo:
-    """sync_maps_batch 的 repo 桩：记录查询，返回可控缓存状态。"""
+    """repo stub for sync_maps_batch: records queries and returns a controllable cache state."""
 
     def __init__(self, cached_hashes=()):
         self.cached_hashes = set(cached_hashes)
@@ -46,7 +49,8 @@ class _FakeRepo:
 
 class TestOnlyMissingSync(unittest.TestCase):
     def test_skip_cached_hashes(self):
-        """增量模式：已有缓存的谱面不联网（不进入同步队列）。"""
+        """Incremental mode: a beatmap that is already cached is not fetched over the network
+        (it never enters the sync queue)."""
         repo = _FakeRepo(cached_hashes=("HASHAAA", "HASHBBB"))
         hashes = ["HASHAAA", "HASHBBB", "HASHCCC"]
         with mock.patch.object(ss, "sync_map_leaderboards",
@@ -54,14 +58,14 @@ class TestOnlyMissingSync(unittest.TestCase):
                                              "failed": 0}) as sync:
             stats = ss.sync_maps_batch(FakeConfig(), repo, hashes,
                                        only_missing=True)
-            self.assertEqual(sync.call_count, 1)          # 只同步 HASHCCC
+            self.assertEqual(sync.call_count, 1)          # only HASHCCC is synced
             self.assertEqual(sync.call_args[0][2], "HASHCCC")
-            self.assertEqual(stats["cached"], 2)          # 2 个跳过计入 cached
+            self.assertEqual(stats["cached"], 2)          # the 2 skipped ones count as cached
             self.assertEqual(stats["fetched"], 1)
             self.assertEqual(stats["maps"], 3)
 
     def test_force_syncs_all(self):
-        """强制模式（联网重新更新数据）：全部谱面重新同步。"""
+        """Force mode (go online and update the data again): every beatmap is re-synced."""
         repo = _FakeRepo(cached_hashes=("HASHAAA",))
         hashes = ["HASHAAA", "HASHBBB"]
         with mock.patch.object(ss, "sync_map_leaderboards",
@@ -106,7 +110,7 @@ class TestResetAnalysisCache(unittest.TestCase):
                 self.assertEqual(
                     c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0], 0,
                     f"{t} 应清空")
-            # replays 行保留，重置为 pending
+            # the replays row is kept and reset to pending
             row = c.execute("SELECT status, analysis_status, analysis_version,"
                             " analyzed_at FROM replays WHERE replay_id='r1'"
                             ).fetchone()
@@ -114,16 +118,17 @@ class TestResetAnalysisCache(unittest.TestCase):
             self.assertEqual(row["analysis_status"], "pending")
             self.assertIsNone(row["analysis_version"])
             self.assertIsNone(row["analyzed_at"])
-            # notes（判定统计）与 maps（谱面库）保留
+            # notes (judgement statistics) and maps (the beatmap library) are kept
             self.assertEqual(c.execute("SELECT COUNT(*) FROM notes").fetchone()[0], 1)
             self.assertEqual(c.execute("SELECT COUNT(*) FROM maps").fetchone()[0], 1)
 
     def test_settings_save_analysis_clears_cache(self):
-        """实际变更的 analysis.* 配置保存 → 触发 reset_analysis_cache。
+        """Saving an analysis.* config value that actually changed → triggers
+        reset_analysis_cache.
 
-        2026-08 修复后，端点按 save_values 返回的 changed（真实变更键）判定，
-        不再按"提交了 analysis.* 键"判定——表单每次保存都全量提交字段。
-        """
+        After the 2026-08 fix the endpoint decides from the changed list returned by
+        save_values (the keys that really changed) instead of "an analysis.* key was
+        submitted" — the form submits every field in full on every save."""
         m.repo = self.repo
         orig_svc = m.config_svc
         orig_reload = m.reload_runtime_config
@@ -145,11 +150,12 @@ class TestResetAnalysisCache(unittest.TestCase):
             m.reload_runtime_config = orig_reload
 
     def test_settings_save_unchanged_analysis_keeps_cache(self):
-        """提交未变更的 analysis.* 值不得清空分析缓存（2026-08 bug 修复）。
+        """Submitting unchanged analysis.* values must not wipe the analysis cache (2026-08
+        bug fix).
 
-        设置表单每次保存都会提交全部分析参数；旧逻辑按键名判定导致
-        "保存任意设置 → 分析数据被清空"。
-        """
+        The settings form submits every analysis parameter on every save; the old logic
+        decided by key name, which produced "save any setting → the analysis data gets
+        wiped"."""
         self.repo.reset_analysis_cache()
         with self.repo._conn() as c:
             c.execute("INSERT INTO metrics(replay_id, scope, name, value)"
@@ -158,7 +164,7 @@ class TestResetAnalysisCache(unittest.TestCase):
         orig_svc = m.config_svc
         orig_reload = m.reload_runtime_config
         m.config_svc = mock.Mock()
-        # save_values 判定无真实变更（changed 为空）
+        # save_values reports no real change (changed is empty)
         m.config_svc.save_values.return_value = {"saved": True, "changed": []}
         m.reload_runtime_config = mock.Mock()
         try:
@@ -176,7 +182,7 @@ class TestResetAnalysisCache(unittest.TestCase):
             m.reload_runtime_config = orig_reload
 
     def test_settings_save_non_analysis_no_clear(self):
-        """保存非分析参数 → 不清缓存。"""
+        """Saving non-analysis parameters → the cache is not cleared."""
         m.repo = self.repo
         orig_svc = m.config_svc
         orig_reload = m.reload_runtime_config
@@ -185,7 +191,7 @@ class TestResetAnalysisCache(unittest.TestCase):
         m.reload_runtime_config = mock.Mock()
         try:
             res = m.api_settings_save(m.SettingsSaveBody(
-                values={"player.player_name_fallback": "ZiRCON"}))
+                values={"player.player_name_fallback": "TestPlayer"}))
             self.assertTrue(res["saved"])
             self.assertNotIn("message", res)
             with self.repo._conn() as c:

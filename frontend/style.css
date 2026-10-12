@@ -413,6 +413,33 @@ body::before {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   min-width: 0;
 }
+/* Map management (2026-10, user request): the SAME symmetric three-column grid as
+   总览/历史, not the plain flex row the tab inherited. In a flex row the pagination
+   only had the space left over by the filter controls, so it sat left of centre;
+   with equal 1fr side columns (left = filters, middle = pagination, right = empty
+   placeholder) it is strictly centred like the other two lists. */
+#tab-maps .surface-title {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center; gap: 8px;
+}
+#tab-maps .title-left {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  min-width: 0;
+}
+/* Map tab filters (2026-10, user request: 正序/倒序 and 重新扫描 must be normal-sized
+   controls, not .mini). Measured cause of the squeezed row: the grid's 1fr side column is
+   336px wide at a 1440px window, while the row's natural content needs ~480px — a
+   nowrap flex row then shrank the last button to 45px, its label wrapped to three lines and
+   the control rendered 98px tall (the .mini size hid this by being narrow enough to fit).
+   Solution: the row may WRAP, and every control keeps its natural size (flex: 0 0 auto +
+   nowrap label). One line stays one line when there is room (>= ~1800px windows), and a
+   narrow window gets two tidy lines instead of a stretched button. The pagination is in its
+   own middle column, so centring is unaffected either way. */
+#tab-maps .filters { flex-wrap: wrap; }
+#tab-maps .filters > * { flex: 0 0 auto; }
+#tab-maps .filters button { white-space: nowrap; align-self: center; }
+#tab-maps .filters #maps-filter { width: 200px; min-width: 0; }
 
 /* Kept for legacy h3 (used by dynamically rendered functions) */
 h3 {
@@ -481,6 +508,21 @@ button.icon-btn {
   display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
 }
 
+/* Fullscreen controls of the 3D replay (2026-10): the replay card's title row, right
+   after the pane label. Two buttons: page fullscreen (enlarge inside the app window)
+   and the browser's own fullscreen. They own the state; the label switches to the exit
+   wording while active, and .active marks which one is on. */
+.fs-controls { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+button.fs-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px; font-size: var(--fs-xs);
+}
+button.fs-btn svg { width: 13px; height: 13px; display: block; }
+button.fs-btn.active {
+  background: linear-gradient(135deg, rgba(255, 61, 90, 0.22), rgba(61, 155, 255, 0.22));
+  border-color: rgba(61, 155, 255, 0.55);
+  color: var(--text);
+}
 input[type="checkbox"] { cursor: pointer; accent-color: var(--blue); }
 select, input[type="text"], input:not([type]) {
   background: var(--surface-2); border: 1px solid var(--border-strong);
@@ -668,10 +710,12 @@ select, input[type="text"], input:not([type]) {
    The sort control is the shared glass list popover (.enum-select / .enum-trigger), sized
    like the filter controls instead of the settings form's 190px. */
 .map-item .pills { margin-top: 4px; }
-.maps-count { color: var(--muted); font-size: var(--fs-xs); margin-left: 4px; }
-.enum-select.maps-sort { min-width: 132px; vertical-align: middle; }
+/* (no .maps-count rule: the "N maps" counter was removed in 2026-10 — the pagination row
+   already states the total, so the tab has one count and not two.) */
+.enum-select.maps-sort { min-width: 0; vertical-align: middle; }
 /* Direction toggle next to the sort control: the label names the state it switches TO, so a
-   press is never a surprise; the arrow flips to match. */
+   press is never a surprise; the arrow flips to match. Sized like the other controls on this
+   row (no .mini): it is an action, not a badge. */
 button.maps-dir { display: inline-flex; align-items: center; gap: 5px; }
 button.maps-dir .dir-icon { transition: transform var(--t-fast); }
 button.maps-dir[aria-pressed="true"] { color: var(--text); border-color: var(--border-strong); }
@@ -713,11 +757,11 @@ mark {
 }
 
 /* Map detail (2026-10): shares the replay detail's skeleton (hero card, tabs, card grid). The
-   tabs are one page per difficulty, so they wrap and each carries the play count of that chart. */
+   tabs are one page per difficulty, so each carries the play count of that chart; the strip's
+   own layout (compact, hugging its tabs) is defined with the card switcher further down. */
 .map-hero .cover { background: var(--surface-2); }
 .map-hero h2 .k { font-size: var(--fs-sm); color: var(--muted); font-weight: 400; }
 .map-hero .hero-kpi .v .k { font-size: 10px; }
-.md-diff-tabs { flex-wrap: wrap; }
 .dt-tab.md-diff { padding: 6px 14px; font-size: var(--fs-sm); }
 .md-diff-played {
   display: inline-block; margin-left: 6px; padding: 0 6px;
@@ -888,6 +932,110 @@ mark {
    bar; the 16:9 height is set dynamically by JS */
 #replay-frame-wrap { padding: 2px; }
 
+/* Page fullscreen for the 3D replay (2026-10): the replay card's title row asks for it
+   (frontend/app.js chro section; the plugin is plugins/chro/). The replay card grows
+   to fill the whole app window — navigation hidden, window untouched. Scoped to the
+   detail + replay tab so a stale class can never blank a different page. The back bar is
+   hidden with the rest of the page furniture: the way out lives in the card title row. */
+html.saberlab-page-fullscreen .app-header,
+html.saberlab-page-fullscreen .sidebar { display: none; }
+html.saberlab-page-fullscreen .main-content {
+  margin: 0; padding: 0; width: 100%;
+  height: 100vh; overflow: hidden;
+}
+/* The detail pane is a section (display: block by default). It owns the window height
+   so nothing below can grow past the viewport. Both detail pages can fill the window: the
+   replay detail and the map detail's 3D preview. */
+html.saberlab-page-fullscreen #tab-detail.active,
+html.saberlab-page-fullscreen #tab-mapdetail.active {
+  display: block; height: 100%; min-height: 0; overflow: hidden;
+}
+html.saberlab-page-fullscreen #tab-detail.active .detail-tabs,
+html.saberlab-page-fullscreen #tab-detail.active .detail-topbar,
+html.saberlab-page-fullscreen #tab-detail.active .detail-hero,
+html.saberlab-page-fullscreen #tab-detail.active .detail-file-missing,
+/* the map detail's 3D preview fills the window the same way: its strip, back bar and hero
+   are page furniture, and the preview card takes over the whole window */
+html.saberlab-page-fullscreen #tab-mapdetail.active .md-diff-tabs,
+html.saberlab-page-fullscreen #tab-mapdetail.active .detail-hero { display: none; }
+/* The detail page shows/hides its back bar through an INLINE display style (app.js
+   openDetail/goBack), and an inline declaration outranks a stylesheet rule. Without the
+   !important this "hide the page furniture" rule silently loses, the back bar stays on top
+   of the filled replay card, and clicking it leaves the page entirely instead of leaving
+   page fullscreen - which is the exact symptom users saw (2026-10). */
+html.saberlab-page-fullscreen #tab-detail.active #detail-topbar { display: none !important; }
+html.saberlab-page-fullscreen #tab-mapdetail.active #mapdetail-topbar { display: none !important; }
+/* The card must first be put back on screen: it is `position: fixed` INSIDE the transformed
+   .panes-track (a 300%-wide slider), so the track is its containing block and the slider's
+   translateX(-66.67%) — a percentage that grows with the track — parks the whole replay pane
+   at a negative x. With everything else hidden that leaves an empty window with just the back
+   bar visible instead of the replay. Dropping the transform while the marker is on pins the
+   pane back to x=0; the three-pane slide is not needed here (the detail tabs are hidden).
+   The map detail's preview is a 200%-wide track with the same problem, hence both rules. */
+html.saberlab-page-fullscreen #panes-track,
+html.saberlab-page-fullscreen #md-track { transform: none !important; }
+/* The replay card itself becomes the full-window layer. `position: fixed` resolves
+   against the transformed .panes-track (an ancestor transform makes it the containing
+   block), so the box is stated in viewport units instead of inset:0. The three-pane
+   slider underneath — a 300%-wide translation, not a layout switch — is simply
+   covered rather than re-engineered. */
+html.saberlab-page-fullscreen #tab-detail.active #pane-replay .surface {
+  position: fixed; top: 0; left: 0; z-index: 60;
+  width: 100vw; height: 100vh;
+  display: flex; flex-direction: column;
+  margin: 0; padding: 0; border: 0; border-radius: 0; background: var(--bg);
+}
+/* The way out lives in this row, so it stays: without the label, just a slim bar with
+   the controls, pinned to the same right edge as in the embedded layout. */
+html.saberlab-page-fullscreen #tab-detail.active #pane-replay .surface-title {
+  position: absolute; top: 4px; right: 10px; left: auto;
+  z-index: 2; margin: 0; padding: 0; min-height: 0;
+}
+html.saberlab-page-fullscreen #tab-detail.active .fs-label { display: none; }
+html.saberlab-page-fullscreen #tab-detail.active button.fs-btn {
+  padding: 4px 8px;
+  /* the controls now float over the replay, so they need their own body to stay readable */
+  background: rgba(14, 17, 23, 0.72); border-color: rgba(255, 255, 255, 0.22);
+}
+html.saberlab-page-fullscreen #tab-detail.active button.fs-btn:hover {
+  background: rgba(14, 17, 23, 0.9); border-color: rgba(255, 255, 255, 0.4);
+}
+/* The card itself becomes the full-window layer, and it carries no band of its own: the
+   replay must cover the whole display, so the title row is taken out of the flow (above)
+   and the viewer takes the full height. */
+html.saberlab-page-fullscreen #tab-detail.active #replay-frame-wrap {
+  flex: 1; min-height: 0; padding: 0;
+}
+html.saberlab-page-fullscreen #tab-detail.active #replay-frame {
+  height: 100%; border: 0; border-radius: 0;
+}
+/* The map detail's preview card gets the same treatment: the card becomes the window layer,
+   its title row keeps the two fullscreen controls (they are the way out) and the viewer takes
+   the full height. */
+html.saberlab-page-fullscreen #tab-mapdetail.active #md-preview-card .surface {
+  position: fixed; top: 0; left: 0; z-index: 60;
+  width: 100vw; height: 100vh;
+  display: flex; flex-direction: column;
+  margin: 0; padding: 0; border: 0; border-radius: 0; background: var(--bg);
+}
+html.saberlab-page-fullscreen #tab-mapdetail.active #md-preview-card .surface-title {
+  position: absolute; top: 4px; right: 10px; left: auto;
+  z-index: 2; margin: 0; padding: 0; min-height: 0;
+}
+html.saberlab-page-fullscreen #tab-mapdetail.active .fs-label { display: none; }
+html.saberlab-page-fullscreen #tab-mapdetail.active button.fs-btn {
+  padding: 4px 8px;
+  background: rgba(14, 17, 23, 0.72); border-color: rgba(255, 255, 255, 0.22);
+}
+html.saberlab-page-fullscreen #tab-mapdetail.active button.fs-btn:hover {
+  background: rgba(14, 17, 23, 0.9); border-color: rgba(255, 255, 255, 0.4);
+}
+html.saberlab-page-fullscreen #tab-mapdetail.active #md-preview-frame-wrap {
+  flex: 1; min-height: 0; padding: 0;
+}
+html.saberlab-page-fullscreen #tab-mapdetail.active #md-preview-frame {
+  height: 100%; border: 0; border-radius: 0;
+}
 #replay-frame {
   width: 100%;
   border: 1px solid var(--border); border-radius: var(--radius-md);
@@ -1263,6 +1411,52 @@ mark {
 @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
 /* ============================================================
+   Map detail cards (2026-10): the SAME two pieces the replay detail uses — .detail-tabs
+   (the strip stays on screen, its own selected tab is the state) and a slider track
+   (.panes-track there, .md-track here).
+   The strip sits in a .surface-title row (left column = tabs, right = empty placeholder), the
+   same three-column shape the overview/history use for their lists. That row is what makes it
+   hug its tabs: a one-difficulty map shows one small tab with 谱面预览 right beside it, instead
+   of one tab stretched across the page (the 2026-10 user report).
+   Measured difficulty counts on the local library: 1 difficulty 10%, 2 14%, 3 22%, 4 17%,
+   5 26%, 8+ under 1% — so the difficulty tabs may scroll in place on an unusual map, and the
+   preview tab stays beside them either way.
+   ============================================================ */
+.md-strip-row { margin: 0 0 var(--space-4); }
+.md-strip-row .title-left { display: flex; align-items: center; min-width: 0; }
+.md-diff-tabs {
+  display: inline-flex;      /* the strip is as wide as its tabs, never the row */
+  align-items: center;
+  flex-wrap: nowrap;
+  width: fit-content;
+  max-width: 100%;
+}
+/* ONE scroller holds the difficulties AND 谱面预览, in that order: the preview tab always
+   follows the last difficulty (never floats to the page edge), it is always beside the tab
+   when the tabs fit, and on a map with an unusual number of charts the same sideways scroll
+   reaches it. Keeping the button outside this box instead put it on top of the last tab
+   (measured 2026-10: an 11-difficulty map overlapped it by 51px). */
+.md-diff-tabs .md-scroll {
+  display: flex; gap: 4px;
+  max-width: 100%; overflow-x: auto; scrollbar-width: thin;
+}
+.md-diff-tabs .dt-tab { flex: none; }
+.md-diff-tabs .dt-tab.md-diff-preview { margin-left: 4px; }
+.md-track {
+  display: flex; width: 200%;
+  transition: transform var(--t-slow);
+}
+.md-track.no-anim { transition: none; }
+.md-card { width: 50%; flex: none; }
+.md-preview-surface .surface-title { display: flex; align-items: center; }
+
+/* The embedded ChroViewer frame (replay detail's 3D pane and the map detail preview):
+   an iframe has no width rule of its own, so it renders at its intrinsic 300x150 unless it
+   is told otherwise — the height alone was being set from JS. Filling the wrap makes the
+   frame's width follow the card at every window size. */
+.replay-frame-fill { display: block; width: 100%; border: 0; background: #000; }
+
+/* ============================================================
    Detail card entry animation (stagger; the duration is fixed and does not get
    slower with loading)
    ============================================================ */
@@ -1492,7 +1686,16 @@ button.danger-armed:hover { border-color: var(--green); background: rgba(56, 209
 .modal-overlay.closing,
 .modal-overlay.closing .modal { animation: modalFadeOut 0.15s ease-in both; }
 .modal {
-  background: var(--surface); border: 1px solid var(--border-strong);
+  /* Card material = the popover's glass EXACTLY (2026-10, user request: the delete
+     confirmation looked too transparent next to the context menu it was opened from).
+     It used to be var(--surface) — an opaque gray with NO blur — while the scrim was
+     translucent, so the "confirm" card read as a washed-out panel over the content.
+     Same rgba + same blur(14px) saturate(150%) as .popover means the two surfaces are
+     one material; the scrim stays at 0.42 for contrast under the text. */
+  background: rgba(20, 22, 30, 0.66);
+  backdrop-filter: blur(14px) saturate(150%);
+  -webkit-backdrop-filter: blur(14px) saturate(150%);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg); padding: var(--space-5);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
   animation: modalPopIn 0.18s ease-out both;

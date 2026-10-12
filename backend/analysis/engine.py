@@ -61,12 +61,21 @@ def analyze_replay(replay: Replay, cfg, repo: Optional[Repository] = None,
 
     # 6) Completion status determination
     # Priority: filename exit (mid-run exit, authoritative) > modifiers contain NF (auto-enabled after Fail) > fail_time > duration
-    # Fetch the map song_length (queried from the repo)
+    # Fetch the map song_length (queried from the repo).
+    # The lookup goes through the same normalisation every other caller uses (get_map upper-cases
+    # the key). Passing the raw BSOR string only worked by accident: a replay whose hash is not
+    # already upper-case would silently find no map here, and the only thing this value feeds is
+    # the "played less than 98% of the song" rule below.
     song_length = 0.0
     if repo is not None and replay.info.map_hash:
-        map_info = repo.get_map(replay.info.map_hash)
+        map_info = repo.get_map(replay.info.map_hash.strip().upper())
         if map_info:
             song_length = float(map_info.get("song_length") or 0.0)
+    # song_length stays 0 for a level the library cannot read a length from - an official level
+    # (its files are packed game assets) or a custom level whose folder the player deleted. The
+    # duration rule below is then skipped, which is exactly the gap "补全丢失谱面"
+    # (backend/maps/fill.py) closes: a downloaded level carries a real song length, so these
+    # plays are classified from then on instead of defaulting to "completed".
 
     mods = (replay.info.modifiers or "").upper()
     has_nf = "NF" in mods          # No Fail: auto-enabled after energy depletion, i.e. actually failed

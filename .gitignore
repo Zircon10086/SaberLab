@@ -11,6 +11,9 @@ data/raw_replays/
 data/logs/
 # 玩家卡片图片缓存（头像/国旗，v2.2.0）——运行时产物，可随时重新下载
 data/assets/
+# data/levels/: 补全丢失谱面下到这里（一张谱面一个目录）——属于玩家本地数据，不入仓库；
+# 它一直没被忽略，2026-10 发布前发现它会以未跟踪文件形式出现在 git status/导出检查里。
+data/levels/
 reports/
 __pycache__/
 *.pyc
@@ -23,7 +26,13 @@ config/config.yaml
 _tools/
 config/
 packaging/
+# tests/: the directory itself stays ignored so nothing is added by accident, but the test
+# files are part of the repository. A blanket 	ests/ kept every test added after v2.1.0
+# out of it (20 files by v2.3.0) - the pre-release gate in docs/DEVELOPMENT.md 8.7 catches it.
 tests/
+!tests/
+!tests/*.py
+!tests/fixtures/*.bsor
 docs/HANDOFF.md
 # 第一方插件产物（chro = 外部 GPL-2.0 插件，构建产物不入源码仓库；
 # 保留 plugins/ 目录结构与 README。release 用户版打包会自动包含整个

@@ -237,6 +237,125 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
 `_tmp/verify_chro_pause2.mjs`（DOM 回退四路径，全 PASS）、
 `_tmp/probe_chro_readout_cadence.mjs`（读数节奏，判定窗口参数的依据）。
 
+### 5.6c 3D 回放的两个全屏（2026-10）
+
+- **位置**：回放卡片自身标题行的右侧，紧跟「查看回放」标签之后；两个按钮是
+  `页面全屏` / `全屏`。**不在 chro 插件内部**——插件产物保持原样（`plugins/chro/`
+  与 chro 仓库两份字节一致），宿主不改插件、不注入、不依赖插件内部 DOM。
+- **分层用法**：全屏时仍要能点回普通视图，按钮在卡片上随卡片的显隐走，不依赖
+  插件怎么渲染自己的工具栏。
+- **页面全屏**（`页面全屏`）：给 `<html>` 打 `saberlab-page-fullscreen`，由
+  `frontend/style.css` 收起头部与导航，并把回放卡片变成铺满窗口的一层。
+  - 卡片用 `position: fixed` + `width:100vw/height:100vh`：三个 pane 是
+    **300% 宽 track + translateX 位移**的滑块（不是显示切换），且祖先上有 transform
+    （`.panes-track`/`#tab-detail`），`inset:0` 会按该祖先解析、宽度算错，所以铺满
+    写视口单位；卡片盖住滑块即可，不动三 pane 结构。
+  - **必须同时把滑块的 transform 关掉**（`html.saberlab-page-fullscreen #panes-track
+    { transform: none !important; }`，2026-10 修）：卡片是**被 transform 的祖先里的
+    fixed 元素**，所以它的包含块是 `.panes-track` 而不是视口，滑块的
+    `translateX(-66.67%)` 是**按 track 宽算的百分比**——track 宽随 pane 内容变化，
+    这个位移就把整个 pane 推到负 x，卡片被搬到屏幕左侧之外。用户看到的现象正是
+    「点页面全屏后界面全没了、只剩左上角一个返回」（2026-10 用户报告；当时的
+    41 项验收里有一项 `elementFromPoint` 命中检查本来会抓到，但它的前提是手点过
+    三 pane 标签把位移写成了页面内联的 `-66.6667%`，脚本自己点按钮时读到的是历史
+    遗留的矩阵值，于是**偶发通过**）。页面全屏下三 pane 本就不需要滑动（详情页签已隐藏）。
+  - **必须 `!important` 的还有返回条**：`#detail-topbar` 的显示/隐藏是 `app.js`
+    写的**内联 `display`**（`openDetail` 设为 flex、`goBack` 设为 none），内联声明
+    压过样式表规则。少了 `!important`，「收起页面家具」这条规则静默失效，返回条会
+    压在铺满的卡片上面——点它就离开详情页而不是退出页面全屏。
+  - `#tab-detail` 在全屏时给 `height:100% + overflow:hidden`，其下百分比才有解析基准；
+    卡片保留标题行（`页面全屏` 的出口就在那），只隐藏标签文字，按钮收成图标。
+  - 状态属于页面：离开详情页（`switchTab`）与打开另一条回放（`openDetail`）都会
+    `clearChroFullscreen()`，不让放大布局跟着走进下一条回放。
+- **两个控件的分工（2026-10 用户定案，务必不要合并）**：
+  - `页面全屏` = 「让我现在这个窗口被回放填满」——只动页面、不动窗口。**已完善，逻辑不要
+    再改**（用户明确要求）。
+  - `全屏` = **一次点击的完整动作**：先把窗口铺满所在显示器，**再自动进入页面全屏**，于是
+    整屏只剩回放；退出也是一次动作，**先撤页面全屏、再把窗口缩回原大小**（顺序不可颠倒，
+    否则会有一瞬间「小窗口上盖着一层铺满窗口的卡片」）。用户给的口径：「点击全屏后画面自动
+    覆盖显示器，按 Esc 或退出按钮后先退出页面全屏，再回到小窗口」。
+  - 因此「全屏」是**建立在另一个控件之上的复合动作**，不是和它并列的独立状态。
+    （历史教训：中间试过两种错法——① 让「全屏」只做窗口、界面原样；② 对 iframe 调
+    `requestFullscreen()` 只铺满当前窗口。两者都不满足「一键把回放铺满显示器」。）
+- **全屏**（`全屏`）：**宿主窗口铺满所在显示器**，走 pywebview：
+  `POST /api/window/fullscreen` → `backend/dialog.py request_window_fullscreen()` →
+  `window.toggle_fullscreen()`。pywebview 的 WinForms 实现会去掉边框、把窗口边界设为
+  所在显示器的完整边界、最大化，并关掉窗口圆角与边框（DWM）；退出时按记录恢复原状态、
+  原位置与原尺寸（原显示器不在了就居中回主屏）。实测窗口矩形与显示器矩形**逐像素相等**
+  （2560×1440，验收脚本第 7 段用 `backend.desktop` 在宿主侧量的——页面看不到自己的
+  系统窗口矩形，所以这件事**不能在页面里断言**）。
+  - **状态以测量为准，不靠标记（2026-10 改）**：平台的"是否全屏"是 pywebview 自己记的，
+    **窗口一旦被外部改动它就永久错位**（实测：状态说"已覆盖"而窗口停在 1899×1189，按钮与
+    Esc 一起失灵）。现在 `backend/dialog.py` 用 `backend.desktop` 量**真实窗口矩形与所在
+    显示器矩形**：`covers_display()` 相等即视为已覆盖；带 `target` 的请求**先量、需要才
+    `toggle_fullscreen()`、动作后再量一次**作为返回值。重复请求、外部改动、脏状态都自愈。
+    前端只读 `/api/status` 的 `window.covers` / `window.fullscreen`，`window.window`
+    与 `window.monitor` 也一并下发（页面按矩形对比，不按视口猜）。浏览器模式没有窗口，
+    接口返回 `available: false`，前端退回页面全屏。
+  - **`_force_cover` 必须在 toggle 之前**：宿主在"要覆盖"时做一次 DWM 属性清理（关圆角、
+    关边框）。pywebview 按**进入时的窗口状态**记录恢复点，事后改窗口样式会让退出"恢复"成
+    被改过的状态（实测：退出后窗口仍停在显示器尺寸）。该函数现在只碰 DWM 两个属性，
+    不动 style 与位置。
+  - **前端接线**：`loadStatus` 记 `window.windowFullscreen`；点击时打接口，按返回值
+    **进则自动 `applyChroPageFullscreen(true)`**、退则走 `leaveChroFilledLayout()`
+    （先撤页面全屏 → 下一帧再发接口缩窗口，见 `chroCoverExitPending` 标记）；按钮文案
+    （`window.fullscreen` / `window.exit_fullscreen`）随之同步。
+    `startChroWindowWatch()` 每秒半问一次状态，外部改动也能同步回界面。
+- **Esc 退出**：一次 Esc = 一次完整退出（窗口 + 页面全屏），顺序同上。
+  - **焦点落进 chro 帧后，页面完全收不到 Escape**（2026-10 实测：父页面与 iframe 的
+    `keydown` 都不触发，同一时刻按字母键却正常到达 iframe），所以这一半只能由宿主兜底：
+    `host.py` 的 `_escape_watch` 线程用 `GetAsyncKeyState` 每 50ms 看一次键态，
+    **只在这两种全屏之一开着时才动作**——窗口覆盖时先还原窗口，然后一律
+    `dialog.signal_cover_escape()` 置标记；页面每秒轮询 `/api/status` 读到
+    `window.cover_escape` 后走与按钮相同的退出流程（宿主也会立刻
+    `evaluate_js(window.__saberlabCoverEscape())` 叫一次，轮询是兜底）。
+    先试过 `WH_KEYBOARD_LL` 钩子：**在本进程里从不触发**（低层钩子要求安装线程跑消息泵，
+    而主线程在 `webview.start()` 之前没有消息泵）。
+    - **页面全屏也要让宿主知道**（2026-10 补）：`applyChroPageFullscreen()` 每次变化时发
+      `POST /api/window/page-fill {on}`，`dialog.set_page_fill()` 记着，
+      `dialog.fullscreen_on()` = 页面全屏 ∨ 窗口覆盖。这样"焦点在回放里"时**页面全屏
+      同样能一个 Esc 退出**——否则宿主只认窗口覆盖，页面全屏就没有捕获机制。
+  - 焦点在应用自己这边时，前端 `document` 的 keydown **capture** 阶段处理并
+    `stopPropagation`：**同一次 Esc 不会再触发详情页的「Esc = 返回」**（那个返回处理器在
+    正文里，我们比它先跑）。
+  - 历史教训：曾写成「一次只撤一层、由外向内」，用户按一次只回到「小窗口 + 页面全屏」，
+    与他要的「按一次就回到进来之前」不符——现在的口径是**进来是一步、出去也是一步**。
+- **进入时的提示（toast）**：`页面全屏` 与 `全屏` 成功后各弹一条 info 提示说明"已铺满、
+  按 Esc 退出"（`replay.page_fullscreen_on` / `replay.fullscreen_on`，三语齐备）。
+  从「页面全屏」进「全屏」时只弹后者（前者传 `quiet` 抑制），避免两条同时出现；
+  退出时不弹（用户要的是进入提示，退出本身看得见）。
+  `applyChroPageFullscreen(on, {quiet})` 是唯一入口，`quiet` 只影响提示。
+- **页面全屏下标题行改为浮层**：回放必须真正贴满四边，所以 `.surface-title` 在页面全屏时
+  改成 `position:absolute`（右上角浮在画面上，见 style.css），退出用的按钮自带半透明底以
+  保证在画面上可读；`app.js` 的 `resizeFrame()` 在页面全屏下也不再留 4px 余量
+  （实测修好后 frame 与视口**逐像素相等**：2560×1440 vs 2560×1440）。
+- **文案**：`replay.page_fullscreen` / `replay.exit_page_fullscreen` 与
+  `window.fullscreen` / `window.exit_fullscreen` 中英日齐备；按钮的 `aria-label` 与
+  `title` 随状态同步，不写“为什么”。
+- **验收**：`_tools/verify_replay_fullscreen.py`（**61 项**，`run.bat` 窗口 + CDP 9222）。
+  两个按钮都用**真实鼠标事件**按、Esc 用**真实按键**发送并且**每次都只发一次**（第二个
+  Esc 就是详情页的返回键）。脚本头部记着环境事实：该窗口 `document.visibilityState`
+  实测为 `visible`；窗口覆盖后视口变成整个显示器（本机 `screen=2560x1440`、`dpr=1.5`），
+  脚本判定「一键进入后回放贴满整屏」与「一键退出后回到进入前的框」。
+  退出顺序有一条专门检查：用 MutationObserver + fetch 包装记录「撤页面全屏」与
+  「请求缩窗口」谁先发生，断言**先撤页面全屏**。
+  宿主侧几何检查（第 7 段）自己 EnumWindows 找到窗口句柄再量矩形，跑完把窗口还原。
+
+**待办：chro 独立构建**（用户 2026-09-14 决定延期）。调查结论（`_tools` 外的实验已清理）：
+`scripts/build.py` 只产桌面版，没有产插件包的那一步；要产可静态部署的 `/chro/` 包需要
+① 新增静态入口（现源码没有 index.html，由框架生成）② 构建配置分模式（`base:'/chro/'`、
+去掉 nitro/Start 服务端插件）③ 把服务端专属路由与函数从客户端路由树隔离出去并重新生成
+路由树（生成的路由树会把 `routes/api/preview.*` 一起拉进来，那条链依赖
+`@resvg/resvg-js` 原生二进制与 `satori`）④ 在真实窗口里验证地图包加载与 3D 渲染。
+服务端面很小（3 个元数据函数 + 4 个 API 路由，只服务分享预览），播放引擎本身零服务端依赖；
+难点不是"问题多"而是"根本没有静态产物这条路"。估计 1–2 天。
+
+- **提交归属**：chro 的源码改动提交到它自己的仓库（同款 GPL-2.0）；
+  SaberLab 提交**不得包含 `plugins/` 下任何文件**（`.gitignore` 已排除 `plugins/chro/`）。
+  桥接补丁属于**产物文件**，随 `plugins/chro/` 一起走（发布打包会带上整个目录）。
+
+
+
 ### 5.7 双平台云端数据（scoresaber | beatleader，2026-08）
 - **数据源切换**：设置 → 玩家 →「云端数据源」卡片（segmented control，
   `player.data_source` 配置项，schema 驱动）；点击即保存并刷新页面
@@ -511,7 +630,6 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
 - **待办**：按预测 ACC 的五色分档（`skill_model.predicted_acc()` 已实现未接线）。
 
 ### 5.14 谱面管理（2026-10，基础界面；管理页下一步）
-
 导航「对比」下方的**谱面管理**：把本地 CustomLevels 谱面库列出来，点一条进入
 **谱面详情**（§5.15），查看各难度的数据、密度曲线与本地游玩记录。
 
@@ -701,14 +819,269 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
   的 bug）。
 - **导航项**：`nav.mapdetail`。直接点它而没有打开过谱面时显示提示语；打开过则恢复那张谱面
   （`switchTab` 里恢复页面/顶栏，离开时隐藏顶栏）。两条通路：谱面列表点行、导航项。
-  注：**replay 详情还没有"跳到它的谱面详情"入口**（需要一个 map_hash → 是否在库里的查询）；
-  目前用列表搜索代替，待办见 §9。
+- **"正在打开"也算有内容**（2026-10 用户报告的提示与谱面同屏）：`openMapDetail()` 会先
+  清空容器并显示它，请求还在飞的时候 `currentMapDetail` 仍是 `null`；此时切到别的页面再
+  切回谱面详情，旧版 `switchTab` 的 `if (currentMapDetail)` 判定为假，于是把
+  「点击一张谱面查看详情」的提示显示出来——而容器里已经是正在渲染的谱面，提示就留在了上方
+  （只有 `openMapDetail` 会再把它藏起来，所以它一直挂到下一次打开谱面）。
+  现在判定是 **`currentMapDetail || 请求在飞`**（`mapDetailReqSeq > 0 && 容器未隐藏`），
+  提示只在真正什么都没有时才出现
+- **谱面预览卡（2026-10，用户需求：难度页签右边一个按钮，点开就是内嵌 3D 看谱）**：
+  - **设计必须是 Replay 详情那一套，不要另做一套**（用户 2026-10 明确要求，第一版做成了
+    "自定义切换 UI + 隐藏页签"，被要求重做）：**页签条留在屏幕上**（它自己带选中态），
+    下面是 `.panes-track` 同款滑块 `#md-track`（200% 宽、`.md-card` 各 50%、
+    `translateX(0 / -50%)` + `--t-slow`）；`mapDetailTab(name, instant)` 负责切换与复位。
+    **不要**改成"隐藏一张显示另一张"
+  - **页签条长什么样**：难度页签 + 末尾的「谱面预览」都住在 `#md-diff-tabs` 里，
+    而 `#md-diff-tabs` 放在 `.surface-title.md-strip-row` 的**左栏**（中/右栏是空占位）——
+    与总览/历史的列表同一个三栏骨架。这一行是"紧凑"的来源：
+    - 只有一个难度时：页签 91px + 「谱面预览」105px 紧挨着（实测 `strip 213px`），
+      不再被拉伸到整行（用户报的正是这个）
+    - 难度多时：`#md-diff-tabs .md-scroll` 是唯一的横向滚动容器，**难度页签与「谱面预览」
+      都在它里面、顺序也是页签在前**，所以按钮永远跟在最后一个难度后面；11 个难度的实测
+      是"整条一起滚动"，而不是按钮压住最后一个页签（那正是分成两个滚动盒子的后果）
+    - **别再往 `.title-left` 里塞东西**：它是 flex 容器，塞进去的盒子 `max-width: 100%`
+      不生效，会让内部滚动盒子失去收缩能力
+  - **切难度也要滑**（用户 2026-10 要求，与 Replay 详情切卡片同一套动画）：
+    `slideDifficultyPage(render)` 把"当前页"复制成一份冻结克隆放到新页旁边，轨道滑一张卡宽，
+    结束后再拆克隆复位；第一次渲染（页里还是空的）不滑，骨架定时器仍走原来的渐入
+    （它是占位符不是难度）
+  - **页面全屏 / 全屏照搬**：预览卡标题行有与 Replay 详情同款的两个按钮
+    （`data-chro-fullscreen` 分组 + `data-fullscreen-mode="page|native"`）。全屏逻辑已泛化：
+    `chroFullscreenToggler()` 取所有分组、`bindChroFullscreenControls(root)` 按卡片接线、
+    `chroViewerFrame()` 按当前卡片返回 iframe、`chroReplayPaneSelected()` 把"谱面预览卡打开"
+    也算作 3D 卡在屏幕上（否则离开页面时会漏掉暂停）。**页签/顶栏/hero 在页面全屏时隐藏
+    靠 `#tab-mapdetail.active` 那一组 CSS**，与 `#tab-detail.active` 平行
+  - **iframe 只在第一次进预览卡时创建**（`loadMapPreview()`），回到难度卡不销毁，
+    所以来回切换不会重载 3D 场景；`resetMapPreview()` 在 `openMapDetail`/`closeMapDetail`
+    里清掉它（换谱面 / 离开页面必须让引擎停下）
+  - **交给 3D 组件的是整张谱面**：宿主把 `/api/maps/{hash}/package` 的压缩包（info.dat +
+    全部难度 .dat + 封面 + 音频，**一次全部**）交给 chro。**绝不能只给 info.dat**——
+    实测（与本机 LocalChroViewer 独立版同款手法）组件不会自己去找其余文件，少一个就播不了
+  - **通道是 postMessage + 注入脚本**（同一版块 §5.6b 的宿主桥）：`plugins/chro/index.html`
+    里的桥脚本（生成器 `_tools/inject_chro_bridge.py`，产物随附 `inject_saberlab_bridge.py`）
+    收到 `{type:'saberlab:loadmap', hash, difficultyLabel}` 后下载压缩包、合成一个 File、
+    **用一次合成 drop 事件**交给组件自己的文件通道（`event.dataTransfer.files`；
+    目标是 `#root` 的第一个子元素——实测派发到 `<body>` 会被忽略），等难度下拉可用后按
+    **标签**选中对应难度，并通过 `{type:'saberlab:mapload', event:'load'|'ready'|'error'}`
+    回报宿主
+  - **为什么不能用 `?map=` 打开**（2026-10 实测，别再试）：SaberLab 版 chro 关掉了远端源
+    （`VITE_ENABLED_SOURCES` 为空），而它自己的 `?map=` 走 BeatSaver 源，一进门就报
+    "This source is not enabled on this ChroViewer deployment"；本地的地图解包函数只服务于
+    "回放 → 它的谱面"那条链。所以地图必须由宿主喂给它的文件通道
+  - **难度按标签匹配**：chro 的难度名 = 该谱面自己的 `_difficultyLabel`，没写标签时
+    ExpertPlus 显示 `Expert+`（`parse-map-package.ts` 的 `difficultyLabel()`）；SaberLab 在
+    扫描时记录的 `label` 就是这个值，所以直接拿它匹配（11 个难度实测全部命中）
+  - **换难度 = 重开一次组件**（`location.replace('/chro/')` + 把请求存在 sessionStorage 里
+    由新文档续做）：组件每次换难度都会重新解析谱面，而在解析过程中点击难度下拉会读到**旧的**
+    选项列表——实测会陷入"永远选到同一个难度"的循环；重开可预测，压缩包走组件自己的缓存，
+    不会二次下载
+  - **文件在打开的一瞬间就交出去**（用户 2026-10 反馈"要等零点几秒才传入"）：请求写在
+    **iframe 的 URL** 里（`/chro/?saberlabMap=<hash>&saberlabLabel=<label>`），桥在文档启动时
+    读它并立刻开始下载——与 Replay 详情用 `?replayUrl=` 是同一个形状。早期版本是父页面在
+    iframe 出现之后再 `postMessage`，那要等父页面醒来、再等一帧，实测多出零点几秒；
+    而且这条路上有一个坑：桥脚本在 `<head>` 里，此时 `document.body` 还不存在，
+    `loadMap()` 往 body 上挂"加载中"遮罩会抛 TypeError、整个请求被静默丢掉——**启动路径必须
+    等 `DOMContentLoaded`**（实测踩到过：打开预览后查看器一直停在初始页，且宿主收不到任何回报）
+  - **离开 3D 卡会暂停**（用户 2026-10 反馈）：`mapDetailTab()` 末尾调 `syncChroPlayback()`，
+    与离开 Replay 详情的回放页一致；`resetMapPreview()`（换谱面 / 关页面）在拆掉 iframe 之前
+    也先暂停一次。**注意**：点"当前已选中的那个难度页签"同样是"从 3D 卡回来"的常见动作，
+    所以页签点击处理里 `mapDetailTab("page")` 必须**无条件**执行，只有页面重渲染是有条件的
+    ——早版把两者一起 `return` 掉，暂停就漏了。`chroSendPause()` 与 `chroFrameDoc()` 现在
+    都走 `chroViewerFrame()`，也就是"当前在屏幕上的那张 3D 卡"
+  - **全屏接线的两个坑（2026-10 回归，用户报告"两个按钮都没反应"）**：
+    ① 把接线从 `#chro-fullscreen-controls` 泛化成 `[data-chro-fullscreen]` 时，回放卡片那一组
+    忘了加这个属性 → 它的按钮彻底失去 onclick；② `toggleChroNativeFullscreen()` 仍把
+    `chroFullscreenToggler()`（现在是**数组**）当成单个元素调 `querySelector`，抛
+    `TypeError: group.querySelector is not a function`，把整个「全屏」动作打断。
+    **改这类共享选择器时，两张卡要一起改**，并跑 `verify_map_preview.py` 的第 8 步
+    （它按两张卡 × 两个按钮逐个点，并读回宿主窗口状态）
+  - **`?shell=webview` 不能丢**：宿主窗口用它开启外壳能力（含"让窗口铺满显示器"）。
+    验收脚本若直接 `navigate('http://127.0.0.1:6980/')`，页面就落进浏览器模式，
+    「全屏」只会退化成页面放大——这是脚本问题，不是功能问题。脚本改用
+    `http://127.0.0.1:6980/?shell=webview`，非外壳模式下明确 SKIP 那一条
+  - **`.replay-item` 被谱面卡片复用的连带 bug**（2026-10 回归）：`bindReplayItems()` 原来给
+    所有 `.replay-item` 绑点击，而谱面卡片也带这个类（借用卡片布局），于是**点一张谱面会打开
+    某个回放的详情页**。现在绑定 `.replay-item:not(.map-item)`，由
+    `tests/test_map_detail_frontend.py` 钉住
+  - **查看器会偶发卡住，桥有一次重试**（2026-10 实测）：同一个谱面在这个浏览器会话里反复预览时，
+    嵌入式组件偶尔收下压缩包后一直停在自己的 "Loading map…"，既不报错也不给难度列表
+    （实测：重开一次或换个会话就正常，说明是组件状态问题而不是压缩包坏了）。桥在
+    `pickDifficulty()` 超时后**重启一次查看器并重放同一次请求**
+    （`sessionStorage['saberlab:maploadRetried']` 标记，只试一次，避免死循环）。
+    这是既有行为的延续：换难度时桥本来就会重启查看器
+  - **画面尺寸跟卡片走**（2026-10 用户反馈"高度是固定的"）：`sizeMapPreviewFrame()` 与
+    Replay 详情同一条规则——**非全屏时 16:9**（`wrap.clientWidth * 9 / 16`），
+    **页面全屏时取卡片自身高度**（`max(240, wrap.clientHeight)`，铺满整窗不留边）；
+    并且用一个 **ResizeObserver**（`watchMapPreviewSize()`，模块级单例，换谱面时
+    `disconnect + observe` 复用）盯住卡片。早版只在创建 iframe 那一刻量了一次，
+    所以窗口缩放、切卡、退出全屏都不会重算——"高度固定"就是这么来的
+  - **验收**：`_tools/verify_map_preview.py`（**49 项**，可跑真实窗口 9222 或无头 Edge 9333；
+    页签顺序与紧凑度、滑块位移恰为一张卡宽且带过渡、切难度时轨道确实在动、组件只被要求加载
+    一次、查看器显示该谱面与播放控件、**打开预览后 15 秒内就绪且只请求一次**、
+    **画面在 1200/1600/1000 三种卡宽下都保持 16:9**、同难度返回不重载、
+    **离开 3D 卡后播放器变暂停且时钟停走**、换难度后标题显示的就是那个难度的标签、
+    **两张卡的两个全屏按钮都接线且真的执行**、**单难度谱面**的页签不拉伸且按钮紧邻）
 - **验收**：`tests/test_chart_timeseries.py` 验证时间桶位置与计数；
   `tests/test_map_detail_frontend.py` 用 Node 执行源码中的函数，固定缓存、旧响应隔离、
   页签作用域、图表一次性高度与渐入清理；真实窗口用 `_tools/verify_map_detail_timeline.py`
   （**45 项通过**），覆盖首次打开/切难度渐入、缓存切回、重复打开、勾选恢复、Replay 页签、
   乱序成功/失败、延迟骨架、错误/无图/无游玩状态、离开取消与窗口缩放。
   探针只在页面内注入受控响应，不修改真实谱面、回放、配置或数据库。
+- **上面那条提示同屏的回归**：`_tools/verify_maps_layout.py`（无头 Edge，14 项）把谱面详情的
+  请求人为放慢到 900ms，再在飞行中切页回来，断言提示没有出现、容器仍然可见；
+  同一脚本还量了谱面管理的分页居中与控件尺寸
+
+### 5.16b 官方曲目的回放为什么看不了，以及怎么修（2026-10，用户报告）
+
+嵌入的 3D 组件用 `/([0-9a-f]{40})$/i.exec(replay.metadata.levelId)` 判断"这张回放属于哪张本地
+谱面"——只认**自制谱面**。官方曲目的 `levelId` 是 `custom_level_SPINETERNALLY`（前缀由回放
+工具加），正则匹配不到，组件于是直接拒收，报
+`ScoreSaber replay is missing a custom map hash`；把这一处放宽之后，后面两处"必须是 40 位哈希"
+的守卫又把它变成 `invalid Beat Saber map hash`（其中一处在取 SaberLab 的
+`/api/maps/{id}/package` 之前）。
+
+- **修法**：`_tools/patch_chro_official_replays.py` 把"身份"改成 **有 40 位哈希就用哈希，
+  否则用去掉 `custom_level_` 前缀的关卡 ID**，并让读取本地谱面包的守卫接受这种 ID。
+  关卡 ID 正好就是 SaberLab 自己的键：§5.16 把官方曲目存在 `data/levels/<关卡ID>`，
+  `package` 端点按同一个键取包，所以两边天然对上
+- **这是对构建产物的补丁**（插件是外部 GPL-2.0 项目 Local-ChroViewer 的 Vite 产物）：脚本
+  幂等、可 `--revert`，首次修改前留 `.orig` 备份。**插件一旦重新构建就要重跑**；更好的做法是
+  把同样的改动落到插件源码里（见 HANDOFF 待办）
+- **SaberLab 侧同时放宽了身份识别**：`normalize_level_id()` 去掉 `custom_level_` 前缀，用于
+  `/api/maps/{hash}/detail`、`/api/maps/{hash}`、`/api/replays/by-map/{hash}`、`ensure-preview`
+  与下载器入口——带前缀的请求不会再变成 404，也不会把 `custom_level_<hash>` 形式的历史数据
+  当成另一张谱面
+- **验收**：`_tools/verify_official_replay.py`（**6 项**，真实窗口 9222 或无头 Edge 9333）
+  打开一条官方曲目回放，断言它真的在播且两种报错都不出现，再验一条自制谱面回放没有被这个
+  补丁带坏
+
+### 5.16 补全丢失谱面（2026-10，用户需求）
+
+回放只带一个关卡标识：`replays.map_hash`（BSOR 的 `mapHash`）。它的取值把两种世界分开，
+各自有各自的来源，这也是整个功能的骨架：
+
+| 标识形态 | 是什么 | 下载来源 |
+|---|---|---|
+| 40 位十六进制 | 自制谱面（SongCore 哈希） | BeatSaver：`GET api.beatsaver.com/maps/hash/<小写hash>`，用返回的 `versions[].downloadURL` |
+| 其它大写 ID（`100BILLS` / `CRABRAVE`） | 游戏自带（OST/DLC）曲目 | `cdn.songs.beatleader.xyz/<歌名去掉非字母数字>.zip` |
+
+- **官方曲目为什么本地永远找不到**（实测，别再试别的路子）：它们不是关卡文件夹，而是打包
+  资源（`Beat Saber_Data\StreamingAssets\BeatmapLevelsData\<id小写>\<id>`、`DLC\Levels\<名>\<名>`），
+  没有 info.dat、没有难度 .dat，`compute_level_hash()` 第一步就是找 info.dat，找不到即跳过
+  ——本机 29 个官方 ID、65 条回放因此全部断链
+- **官方压缩包的命名规则**：CDN 上是**歌名**去掉非字母数字（`Be There For You` →
+  `BeThereForYou`、`$100 Bills` → `100Bills`），**不是**关卡 ID 的驼峰化（`BETHEREFORYOU`
+  驼峰化得到 `Bethereforyou`，CDN 上没有这个名字）。所以 `official_zip_names()` 把**歌名拼法
+  放在第一位**，关卡 ID 只作兜底（单词 ID 两种拼法相同，如 `CRABRAVE` → `CrabRave`）。
+  实测本机 29 个官方 ID 中 **18 个能下到**；其余 11 个（Alone / Icarus / Numb / Starboy /
+  Stronger / Get Lucky / Light It Up / Ludicrous+ / Mercenary / I Feel It Coming /
+  DABADABADABADABA）是**付费 DLC**，所有命名变体都不存在——这类只能如实报告「取不到」
+- **落盘位置**：`data/levels/<标识>/`（SaberLab 自己的目录，**不动用户的游戏目录**，用户决定）。
+  配置键 `game.downloaded_levels_dir` 可覆盖（默认 `PROJECT_ROOT/data/levels`），设置页不暴露
+- **查找顺序**：CustomLevels → 下载目录 → 下载流程。`MapResolver` 现在有两个根
+  （`levels_dir` + `extra_levels_dir`），`scan()` 遍历两者；下载根里的**文件夹名就是身份**
+  （自定义谱面是哈希、官方曲目是关卡 ID），所以扫描不重算哈希。`resolve()` 命中不到时会先
+  `adopt_downloaded_folder()` 直接认领（比全量扫描便宜得多），再退到扫描。**注意
+  `trigger_scan=False` 的批处理契约**：那条路径不查找、不认领，有测试钉住
+- **两个入口**：总览的「补全丢失谱面」（批量任务 `map_fill`，`POST /api/maps/fill`，进度写
+  `_tasks`，前端 1.5s 轮询，与其它任务同一条链路；`GET /api/maps/missing` 给出待补清单与分类
+  计数）；谱面详情的 3D 预览入口（`POST /api/maps/{hash}/ensure-preview`，单张，
+  `loadMapPreview()` 在 `in_library` 为假时先补一次，成功则重开详情页，失败则 toast：
+  `not_found` → 「无法下载 DLC 谱面」，其它 → 「谱面文件获取失败」）
+- **礼貌与安全（都是硬要求）**：
+  - **每个来源同时只有 1 个请求**（`_host_lock`）+ 请求间最小间隔 0.4s；总并发由
+    `network.download_concurrency`（默认 3，钳制 1..8）决定。这两个 CDN 是社区公益镜像
+  - 429/5xx 读 `Retry-After` 退避重试（最多 3 次），404 **不重试**
+  - 只允许 https；响应体上限 64MB；**魔数校验**（必须 `PK`）不信 Content-Type
+  - **解包是本仓库第一段 zip 解包代码**，所以防护写全：拒绝绝对路径 / 盘符 / `..` / 反斜杠
+    穿越，条目数 ≤4000，解压后总量 ≤256MB（zip 炸弹），空包即失败
+  - **一致性校验**：自定义谱面复算 SongCore 哈希，等于请求的标识即为 `hash`；
+    **哈希不同不等于错**（实测 `052AAA3A…` 取回的是 `82D8B81F…`）——BeatSaver 只提供该谱面的
+    **当前版本**，谱面上传者重传过就会换哈希，而玩家的回放指向旧版本。所以哈希不符时再比歌名
+    （去符号、忽略大小写，允许一方包含另一方），相符即接受并记为 `version_changed`，并且
+    照旧按**请求的标识**落盘（这样指向旧版的回放都能命中）；只有歌名也对不上才报
+    `hash_mismatch` 并丢弃整个临时目录。官方包没有可复算的标识，做结构校验（可解析、
+    有难度）加歌名比对，不符只记 `unverified` 而不静默接受
+  - **谱面本身不在库里时，谱面详情页也要能打开**（否则旧回放点「查看谱面」只能看到报错）：
+    `/api/maps/{hash}/detail` 返回 404 时，前端用 `replayFallbackRow()` 走
+    `GET /api/replays/by-map/{hash}` 取回「歌名、谱师、玩过几次、上次玩的难度」，用这些元数据
+    把页面搭起来并把 `in_library` 置 false，3D 卡据此先补谱面。**注意路径里那个 `by-map`
+    字面段**：`/api/replays/{replay_id}` 是它的同级路由，实测会把
+    `/api/replays/lookup?map_hash=…` 这种请求吃掉并答「replay 不存在」
+  - **详情新增两个字段**：`in_library`（行在但文件夹没了时为 false）与 `played_difficulty`
+    （回放记录的难度：谱面文件缺失时这是唯一的难度信息，3D 组件按它选中难度）
+  - 解到临时目录 → 校验 → **原子搬入** `data/levels/<标识>/`（已存在时先改名旧目录再替换，
+    读者永远看不到半个谱面）
+- **副作用**：下载成功后立刻 `upsert_map`（`hash_source='downloaded'`）并清掉该标识的负缓存，
+  所以封面、`/api/maps/{hash}/package`（3D 看谱）、详情、NPS 立即可用，不需要重启。
+  官方曲目入库后**连带修好**一个既有问题：`analysis/engine.py` 的"时长不足 98% 即未完赛"判定
+  以前对官方回放恒不触发（`maps.song_length` 取不到），现在这些回放有了真实时长
+- **验收**：
+  - `tests/test_map_fill.py`（**45 项**，纯离线，网络被替身替换）：标识判别、官方命名候选与
+    顺序、BeatSaver 取 URL、404 不重试、429 退避、超大响应拒绝、**同源请求不重叠且按间隔**
+    （跑的是真实 `http_get`，只替身连接）、解包穿越/盘符/反斜杠/条目数/总量/空包、哈希不符拒绝、
+    版本变化接受并标记、官方结构校验、落盘原子性与无残留、`missing_levels` 分组与计数
+    （大小写不敏感）、双根扫描与直接认领、`trigger_scan=False` 不查找、配置项钳制
+  - `_tools/verify_map_fill.py`（**25 项**，真实窗口 9222 或无头 Edge 9333）：按钮存在且位于两个
+    刷新按钮之间、进了 `ACTION_BUTTONS`（运行期禁用）、`/api/maps/missing` 的分类与计数、
+    **点真实按钮**起任务 → KPI 显示 → 完成后按钮恢复 → 完成文案不是裸 key、三条预览文案已翻译、
+    `ensure-preview` 对 DLC 返回 `not_found`、**从回放走进缺谱面的详情页再打开 3D 卡**，
+    取不到时页面显示「无法下载 DLC 谱面」
+  - `_tools/verify_official_replay.py`（**6 项**）：官方曲目与自制谱面的回放都会在 3D 区域里
+    真的播起来（依赖 §5.16b 的产物补丁；插件产物更换后这项会先失败）
+  - `_tools/live_map_fill.py`（**15 项，需要联网**）：对真实 BeatSaver / BeatLeader 下载
+    「一张自制谱面 + 两个官方曲目 + 一个 DLC」，校验自制谱面哈希复算相等、官方包可解析且有时长、
+    DLC 报 `not_found`、下载根里没有残留临时目录
+### 5.17 chro 插件：两个项目各自独立演进（2026-10，用户决定）
+
+**决定**：`Local-ChroViewer`（桌面版）与 `saberlab/chro`（SaberLab 插件分发）按**两个独立项目**
+维护，不再追求互相同步。SaberLab 继续带着插件一起开发自己的功能；Local-ChroViewer 专注自己的
+桌面体验。
+
+这不是偷懒，而是被实测逼出来的：两个产品的**渲染模式不同**。SaberLab 的插件是挂在 `/chro/`
+下的纯客户端应用（`createRoot(#root)`），而 Local-ChroViewer 的主体走整文档 hydrate
+（`hydrateRoot` + prerender）。把当前源码的构建产物按 `/chro/` 挂好实测会 `Invariant failed`
+并渲染空白，而且 `saberlab/chro` 里那份 `createRoot` 形态的产物在本仓库历史里找不到对应源码
+（v1.0.0 的 `start.ts` 与当前一致）。所以"一条命令重建插件产物"这件事本身不成立，除非先给
+分发加一个 SPA 模式——那是分发自己的架构工作，不是同步问题。
+
+**因此当前的产物维护方式**（这是正式方式，不是临时手段）：
+
+| 位置 | 状态 |
+|---|---|
+| `plugins/chro/`（SaberLab 仓库，gitignored） | 在用的插件产物，随 SaberLab 一起就地演进 |
+| `Local-ChroViewer/saberlab/chro/` | 同一份产物的独立副本，两份**字节一致**（`684952b2…`） |
+| `_tools/patch_chro_official_replays.py` | 幂等地把官方曲目身份修复打到**两份**产物上（`--check` 只报告，`--revert` 还原） |
+
+源码层面的修复依然落在插件源码里，这才是长期位置（见下表）；产物补丁只是让在用的产物与
+源码结论一致，插件将来重做产物时可以整个删掉。
+
+**源码现状**（已改，`pnpm exec vp check` 全绿，311 文件）：
+
+- `web/src/core/replay/types.ts` — `replayMapHash()`：有 40 位哈希用哈希，否则用去掉
+  `custom_level_` 前缀的关卡 ID（官方曲目回放的身份，缺失即回放被拒）
+- `web/src/sources/local/provider.ts` — `fetchLocalMap()` 接受关卡 ID、不再小写化；并且
+  **移植了 SaberLab 的「缺谱面自动补全」**：首次取包失败时调
+  `POST /api/maps/{id}/ensure-preview`，再轮询 `GET /api/maps/{id}/package` 直到拿到包。
+  后端没有这个端点时静默跳过，行为退回原文案（不认识的契约不该影响它）
+- 顺手修掉**既有**类型错误：模块级 `resolveLocalFirst` 调用 hook 闭包里的 `downloadOptions`
+  （TS2304 + 缺 `BeatSaverMapSource` 导入），此前让 `pnpm verify` 一直是红的
+
+**重建工具链**（备好并逐段验证，等分发将来做 SPA 模式时可直接用）：
+
+| 脚本 | 作用 |
+|---|---|
+| `web: pnpm exec vp build --base=/chro/`（`VITE_ENABLED_SOURCES=""`） | 产出挂在 `/chro/` 下的本地源版本 |
+| `_tools/package_chro_saberlab.py --stage <dir>` | 抽取 assets/environments/fonts/hitsounds/models/textures/twemoji（丢掉 `.br`/`.gz` 孪生文件） |
+| `_tools/build_chro_shell.py --from <public> --out <index.html>` | 生成入口文档并把根相对路径重写到 `/chro/` |
+| `_tools/inject_chro_bridge.py --target <index.html>` | 注入宿主桥（幂等） |
+| `_tools/verify_chro_dist.py --dist <dir>` | 临时静态服务 + 无头 Edge 验证产物，**再**动 SaberLab |
+
+**桥与源码的分工**：源码自带 `use-host-playback-commands.ts`（暂停契约），而注入桥的 DOM
+点击式暂停不依赖 React 挂载，弱机上更可靠；两者收到同一条 pause 消息、都幂等（只在播放时
+暂停、只暂停不重启），保留双保险是有意的。
+
 
 ## 6. 前端要点
 
@@ -729,8 +1102,7 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
   一次性固定图表高度（不要改回 `height: auto` 实时计算，会触发高度正反馈循环）
 - 毛玻璃层：`#acrylic-backdrop`（fixed inset 0 + blur），移动中 `.moving` class 拉满模糊
 
-### 6.1 右键菜单框架（context menu，2026-09）
-- **下拉/浮层别再造第二套**：菜单与下拉都建立在通用 `openPopover` 之上；如果要做的是
+### 6.1 右键菜单框架（context menu，2026-09）- **下拉/浮层别再造第二套**：菜单与下拉都建立在通用 `openPopover` 之上；如果要做的是
   "从固定选项里选一个"，直接用 **§6.3 的毛玻璃列表下拉**（`openListPopover`），不要用
   原生 `<select>`，也不要另写浮层。
 - **目标**：新增右键功能 = 往注册表加一条，**不改框架代码**。文件都在 `frontend/app.js`：
@@ -743,16 +1115,53 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
   `className`、`blockContextMenu`。因此菜单的毛玻璃材质、出入场动画、Escape 关闭、
   外部点击关闭、滚动/缩放关闭**全部继承**现有组件；`blockContextMenu` 让"在别处再点
   右键"先关旧菜单（捕获阶段监听 `contextmenu`），避免菜单叠加
-- **菜单项**：`{ label, action(ev, el), danger?, disabled? }` 或 `ctxSeparator()`。
-  `label` 由注册项自己 `t()` 取（框架只做 `escHtml` 兜底转义）；`danger` 红字（危险操作），
+- **确认弹窗卡片与菜单同一材质**（2026-10 用户要求）：`.modal` 的卡片背景从
+  `var(--surface)`（不透明灰、**无模糊**）改成与 `.popover` **完全相同的**
+  `rgba(20,22,30,0.66)` + `blur(14px) saturate(150%)`。菜单开着时点出确认弹窗，
+  两张卡必须是同一片玻璃；半透明遮罩（`.modal-overlay` 的 0.42）负责文字对比度，
+  卡片本身不再靠不透明背景压住内容。改任一处材质数值时另一处要同步（回放删除与
+  谱面删除用的是同一个 `openModal`）
+- **菜单项**：`{ label, action(ev, el), danger?, disabled? }` 或 `ctxSeparator()`。  `label` 由注册项自己 `t()` 取（框架只做 `escHtml` 兜底转义）；`danger` 红字（危险操作），
   `disabled` 置灰且不触发。**点击后框架先关菜单再执行 action**，action 抛错会上报 toast
 - **放行原生菜单的两种情况**：① 目标在 `input/textarea/[contenteditable]` 内（文本复制
   粘贴是刚需）；② 命中注册项但 `items()` 返回空数组
 - **剪贴板**：`copyText(text, okKey)` 统一处理，按"Clipboard API → 聚焦后重试 → 隐藏
   textarea + execCommand"三级回退；**文档未聚焦时 `writeText` 会失败**（窗口在后台点菜单
-  就会这样），所以有聚焦重试；空值走 `ctx.copy_empty` 明确提示，不静默
-- **已注册：`.replay-item`**（2026-09 用户确定，功能已实装）：
-  **打开详情 · 查看同谱面记录 · —— · 打开文件所在位置 · 删除回放文件**
+  就会这样），所以有聚焦重试；空值走 `ctx.copy_empty` 明确提示，不静默。
+  该函数随"复制 Replay ID"在 2026-09 删除（不留死代码），2026-10 因两个复制项按同一套
+  回退重新引入；`okKey` 让两项各自给 toast 文案（`ctx.copied` / `ctx.copied_link`）
+- **卡片要带齐菜单需要的数据**：注册项只从元素上读（`ctxData(el, KEYS)` 把 `data-*` 收成
+  对象，**缺失保持 `null` 而不是空串**——"没有 key"要和"空 key"区分开，前者置灰）。
+  卡片渲染函数负责把数据写进 `data-*`（如 `replayItem()` 的 `data-song-author` /
+  `data-key` / `data-in-library`）
+- **已注册：`.map-item`（谱面管理卡片）+ `.replay-item`（回放卡片）**（2026-10 用户确定，
+  两类卡片同一套顺序）：
+  **查看详情 · 查看游玩记录 · [查看谱面] · —— · 复制歌曲名称 · 复制下载链接 · ——
+  · 打开谱面所在位置 · 删除谱面文件**（回放卡片的后两项是「打开文件所在位置 · 删除回放文件」）
+  - **`.map-item` 必须注册在 `.replay-item` 之前**：谱面卡片的 class 是
+    `replay-item map-item`（复用卡片布局），而 `closest` 自内向外取**第一个命中的注册项**，
+    顺序反了谱面卡片就会落进回放菜单（`tests/test_ctx_menu.py` 钉住这个顺序）
+  - 谱面卡片**没有"查看谱面"**（它本身就是谱面）
+  - 谱面卡片的两项复制数据不在 `/api/maps/library` 的投影里（该接口只给列表要用的列），
+    由 `fillMapMenuData()` 在渲染前按 map_hash 逐条补齐（每张一次、会话内缓存，失败就保持
+    "未知"让对应项置灰）；**菜单本身绝不发请求等数据**
+  - 后两项依据 `data-folder-available` 置灰（前端乐观标记；真正判定在
+    `_map_folder()`：行不存在 → 404，文件夹不在 → 410）
+- **谱面的两个 OS 动作**（2026-10）：
+  - `POST /api/maps/{hash}/reveal` → `explorer.exe <谱面文件夹>`。**打开的是这张谱面自己的
+    文件夹**，不是 `custom_levels_dir` 根目录（用户明确要求；谱面文件夹就是这张谱面）
+  - `POST /api/maps/{hash}/recycle` → 复用回放删除的两步安全顺序：① `_send_to_recycle_bin()`
+    把**整个谱面文件夹**移入系统回收站（`FileSystem::DeleteDirectory(..., SendToRecycleBin)`，
+    与文件的 `DeleteFile` 同一个 helper，按 `target.is_dir()` 选方法）；② 成功后才
+    `Repository.delete_map()` 在**单个事务**里删 `maps` + `map_ranked_cache` +
+    `scoresaber_leaderboards` 三处，并 `enrichment.invalidate()`（快照按 maps 表构建）。
+    **①失败则 ②不执行**，绝不出现"记录没了但文件夹还在"
+  - **回放行故意不删**：`.bsor` 是用户自己的数据，用户的指令是删谱面；那些回放继续可用，
+    只是列表不再有封面、右键不再有「查看谱面」（与"谱面文件夹缺失"的回放同一表现）。
+    要删回放是另一个动作（回放卡片的「删除回放文件」）
+  - `_send_to_recycle_bin()` 失败会**重试一次**（间隔 0.4s）：2026-10 实测本机有两次回收站
+    操作首次返回非 0（防病毒/索引/云同步短暂占用），重试即成功；真失败（只读卷等）两次都失败
+    仍按 500 报出
   - **查看同谱面记录**填的是**歌曲名**（`data-song`）。历史搜索 `histScore` 只匹配
     歌曲名与 5 位 beatmap_key，**填 map_hash 永远搜不到**——早期版本就是这么错的，
     别改回去
@@ -774,16 +1183,27 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
     的旧行为会让文件在下次扫描时重新入库——删记录时文件已进回收站，不会复活）
   - 弹窗复用 `openModal({ actions })`（新增按钮区）；**点击动作不自动关弹窗**，
     由调用方在请求成功后再关，失败则保留弹窗并恢复按钮——避免"关了但没删掉"的误导
+  - **查看谱面**只在**谱面的谱面文件夹在本库里**时出现（`data-in-library`，由后端
+    enrichment 依据 maps 表给出），否则收起该项——谱面详情页没有可显示的内容
+  - **复制歌曲名称**写入 `歌曲名 - 曲师`（曲师来自 maps 表，经 enrichment 附加在回放行上；
+    本库里没有这张谱面时只有歌名，不会留下空的 ` - ` 尾巴）；**复制下载链接**写入
+    `https://beatsaver.com/maps/{5 位 key}`，没有 key 的谱面（本地 WIP 谱面）该 **项置灰**
 - 新增场景时给元素加 class（或 `data-*` 携带所需数据），再往 `CTX_MENUS` 加一条即可。
-  **注意**：早期版本的 `[data-copy]` 通用兜底与 `copyText()` 已随"复制 Replay ID"
-  一起移除（无调用方＝死代码）；将来若某个菜单项需要复制，按当时需求重新引入
+  **注意**：早期的 `[data-copy]` 通用兜底已随"复制 Replay ID"一起移除（无调用方＝死代码），
+  现在是两个明确命名的复制项各自调用 `copyText()`；不要再加通用兜底注册项
 - **验收脚本**（DOM 级，不依赖肉眼）：
-  `_tmp/verify_ctx_menu.mjs`（坐标定位、菜单项、Escape、不叠加、输入框放行）、
-  `_tmp/verify_ctx_features.mjs`（菜单项全貌、同谱记录填歌名并过滤、删除二次确认、
-  缺失文件禁用）、`_tmp/verify_delete_flow.mjs`（成功/失败两条 UI 路径，**stub 掉
-  fetch 不真删**）、`_tmp/verify_recycle_endpoint.py` +
-  `_tmp/verify_recycle_bin_fs.py`（真实删除 → 读回收站 `$I*` 元数据核验原始路径与
-  内容字节数）、`_tmp/verify_popover_regression.mjs`
+  - 入仓版：`_tools/verify_ctx_menu.py`（**42 项**，`run.bat` 窗口 + CDP 9222；两类卡片的
+    菜单项与顺序、`查看谱面` 的出现/收起、两个复制项的**剪贴板往返**（用 `Get-Clipboard`
+    读回真值）与 toast 文案、无 key 项置灰并实测计算样式、查看谱面跳转与返回、
+    谱面卡片未落进回放菜单、谱面两项动作的**路由与确认流程**（确认前不发请求、取消不发请求、
+    确认后 POST 到该谱面、toast 与列表刷新；只读/破坏性动作在页面内被替换成记录调用，
+    绝不真删），见 `tests/test_map_context_actions.py` 的单元覆盖
+  - `_tools/probe_recycle_folder.py`：**真实回收站探针**（无 mock）——造一个带 info.dat /
+    ExpertPlus.dat / song.egg 的谱面文件夹，调 `_send_to_recycle_bin()`，然后读回收站
+    Shell 命名空间核对条目名与原始父目录
+  - 未入仓的 `_tmp/verify_ctx_menu.mjs` / `_tmp/verify_ctx_features.mjs` /
+    `_tmp/verify_delete_flow.mjs` / `_tmp/verify_recycle_endpoint.py` 等是 2026-09 那轮的
+    一次性脚本（**`_tmp/` 会被清空**，需要时按上面的入仓脚本重写，不要去找它们）
   - **测试环境注意（两个坑，都已踩过）**：① 无头 CDP 里
     `Input.dispatchMouseEvent` 在页面失焦时会**静默丢事件**，右键会"时好时坏"
     ——验收脚本已改为页面内 `MouseEvent` 分发（确定性），真实鼠标路径单独验证过；
@@ -795,6 +1215,17 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
 - **分页位置**：与总览**同款三栏对称 grid**（`#tab-history .surface-title` 复制
   `#tab-overview .surface-title` 的规则；左栏=筛选、中栏=分页、右栏空占位）→ 分页
   置顶且严格水平居中（实测偏差 0px）；历史内容包在 `.surface` 里、筛选控件进 `.title-left`
+- **谱面管理页（2026-10 第四版）同样如此**：`#tab-maps .surface-title` 用同一套 grid，
+  右栏补一个空的 `.title-right` 占位（`index.html`），分页实测居中偏差 0px；三页同一读法
+- **筛选行的尺寸规则（2026-10，用户报"正序/倒序与重新扫描比别的控件小"）**：
+  这两个按钮去掉了 `.mini` 后回到常规尺寸，之前能塞进一行只是因为 `.mini` 更窄。
+  实测根因：grid 两侧 `1fr` 栏在 1440 窗口下只有 **336px**，而该行内容自然宽度 ≈ **480px**
+  （输入 200 + 排序 93 + 方向 78 + 重新扫描 90 + 三个 gap），`nowrap` 的 flex 行于是把最后
+  一个按钮压到 **45px 宽**、文字折成三行、控件高 **98px**（其余控件也被压到 58px）。
+  修法：`#tab-maps .filters` 允许 `flex-wrap`，行内控件 `flex: 0 0 auto` + 按钮
+  `white-space: nowrap`（宽度 ≥ 约 1800px 仍是一行；更窄时折成两行，控件尺寸不变），
+  排序控件在窄栏里不再强制 132px；分页在中间栏，居中不受折行影响。
+  **别用"改小按钮"来修这类问题**：那是把用户抱怨的现象当成解法
 - **搜索取数策略**：**默认与搜索都用 `HIST_SEARCH_LIMIT = 10000`**（前端常量）后
   本地过滤 + 分页——默认视图也必须能翻页（只显示 300 条却不能翻页是不对的）。
   `/api/history` 的 `limit` 上限已放宽到 **50000**（原 2000）
@@ -907,7 +1338,16 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
   `_tmp/probe_*.py` 毛玻璃/KPI/布局探针，文中其他章节提到的 `_tmp/verify_*` 多数也已不在）：
   - 真实窗口：`run.bat` 前设 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222`，
     再用 `_tools/cdp.py`（标准库 CDP 客户端）驱动；`_tools/verify_guard_ui_e2e.py`（33 项
-    UI 流程）、`_tools/verify_guard_live.py`（来源闸门 35 个原始 socket 探针）
+    UI 流程）、`_tools/verify_guard_live.py`（来源闸门 35 个原始 socket 探针）、
+    `_tools/verify_replay_fullscreen.py`（3D 回放两个全屏 40 项，§5.6c）、
+    `_tools/verify_ctx_menu.py`（右键菜单 42 项，含剪贴板往返与谱面确认流程，§6.1）、
+    `_tools/verify_maps_layout.py`（谱面管理排布 + 谱面详情提示状态机 14 项，§5.15）、
+    `_tools/verify_map_preview.py`（谱面预览卡、滑动动画与两张卡的全屏接线 48 项，§5.15）、
+    `_tools/verify_modal_material.py`（弹窗与菜单同材质 7 项，§6.1）
+  - 无需桌面窗口时可用**无头 Edge**（CDP 9333）跑同样的检查：`_tools/verify_maps_layout.py`
+    与 `_tools/verify_modal_material.py` 正是从这个端口量的——只读 HTTP 服务，不碰窗口
+  - 前端纯函数/注册项的回归测试用 Node 跑（`tests/test_ctx_menu.py`、`test_map_detail_frontend.py`）：
+    从 `app.js` **原样抽取函数体**再配桩执行，不复制实现、不另写一份即将过期的替身
   - 网站：`_tools/verify_site.py`、`_tools/intro_frames.py`（§10）
   - 图标：`_tools/icon_preview.py`、`_tools/make_icon.py --check`（§11）
   - 注释语言：`_tools/check_comment_lang.py`（AGENTS §16.1，列出仍含中文的注释行）
@@ -976,15 +1416,30 @@ TanStack Start 服务端构建，产物形态与它完全不同）。用户决�
    （HEAD 提交、工作树状态、测试基线计数），然后才动下一轮代码。HANDOFF §1 声称的
    状态与 `git log -1` 不符时，以仓库为准——旧快照要求过"不要清理工作树"这类
    保护性动作，会让下一位开发者拒绝正常操作。**不要**只改 §1 以外的章节。
-7. **发布前跑测试纳管差集检查**（2026-09 加固，同类漏项已两次）：
-   `tests/` 是否进仓库由 `.gitignore` 决定；发布前必须确认**本地测试文件集合与
-   仓库跟踪集合完全相等**，否则公开仓库跑的测试集与本地不一致。
-   ⚠️ 不要用 `git ls-files --others --exclude-standard tests/` 做这个检查——
-   被 `.gitignore` 忽略的目录在该命令下**恒为空**，漏掉的文件根本不会出现。
-   正确做法是比较两个集合：
+7. **发布前跑"忽略规则是否藏了该进仓库的文件"检查**（2026-09 加固；2026-10 修正做法）：
+   历史：`.gitignore` 里有一条**整目录** `tests/`，而 29 个测试文件是在这条规则之前提交的，
+   于是**此后新增的测试全部被静默忽略**——v2.3.0 发布前实测发现 20 个测试文件（含
+   `test_map_fill.py`、`test_i18n_mapping.py`）根本不在仓库里，公开仓库跑的测试集与本地
+   不一致）。只改 `tests/` 一条不够：任何"忽略整目录、但目录里已有被跟踪文件"的规则都是
+   同一类错误，所以检查要覆盖**全部**目录规则。
+   ⚠️ 不要用 `git ls-files --others --exclude-standard tests/` 做这个检查——被忽略的目录在
+   该命令下**恒为空**，漏掉的文件根本不会出现。
+   正确做法是逐条目录规则比较"跟踪/未跟踪"：
 
    ```bat
-   .venv\Scripts\python.exe -c "import pathlib,subprocess; local={p.name for p in pathlib.Path('tests').glob('*.py')}; tracked={pathlib.Path(l).name for l in subprocess.run(['git','ls-files','tests'],capture_output=True,text=True).stdout.split()}; print('missing:', sorted(local-tracked))"
+   .venv\Scripts\python.exe _tmp\audit_ignored_trees.py
+   ```
+
+   判定：某条目录规则下**同时**存在被跟踪与未被跟踪的文件 → 该规则值得复核（可能正在静默
+   吞掉新文件）。输出为 0 个问题时才算通过。
+   当前 `tests/` 的写法（2026-10 修正）是**目录仍忽略、但文件放行**，这样新测试文件在
+   `git status` 里可见、必须显式 `git add`，而 `__pycache__` 之类仍被挡住：
+
+   ```gitignore
+   tests/
+   !tests/
+   !tests/*.py
+   !tests/fixtures/*.bsor
    ```
 8. **文档语言与代码注释语言**（2026-09-16 用户决策，规则原文见 `AGENTS.md` §16.1）：
    - **文档只有中文**：`AGENTS.md` 与 `docs/` 下的文件（两个 README 除外）只保留中文版。

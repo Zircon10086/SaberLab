@@ -12,7 +12,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.ai.report import run_ai_report  # noqa: E402
 from backend.config import Config  # noqa: E402
-from backend.db.repository import Repository  # noqa: E402
 
 
 class _FakeLLM:

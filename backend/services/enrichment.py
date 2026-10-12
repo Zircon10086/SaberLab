@@ -75,7 +75,7 @@ class EnrichmentService:
     """Map metadata snapshot + replay enrichment (platform-scoped cloud values).
 
     snapshot structure:
-      key_map: {map_hash: {beatmap_key, nps: dict}}
+      key_map: {map_hash: {beatmap_key, song_author, nps: dict}}
       lb_map:  {(map_hash, difficulty_name): leaderboard row}   (active platform)
       rc:      {(map_hash, difficulty): ranked cache row}       (active platform)
 
@@ -108,8 +108,14 @@ class EnrichmentService:
                 nps = json.loads(m.get("nps_json") or "{}")
             except (json.JSONDecodeError, TypeError):
                 nps = {}
+            # One snapshot serves the whole list: the BeatSaver key (replay list badge and the
+            # context menu's download link) and, since 2026-10, the song author. The author is
+            # NOT a column of replays - it belongs to the level folder - so a replay row can only
+            # carry it through this lookup. Its presence also answers "does this level folder
+            # exist locally": a map_hash with no entry here is one the map library cannot open.
             key_map[m["map_hash"]] = {
                 "beatmap_key": m.get("beatmap_key") or "",
+                "song_author": m.get("song_author") or "",
                 "nps": nps if isinstance(nps, dict) else {},
             }
         lb_map: dict[tuple, dict] = {}
@@ -187,7 +193,7 @@ class EnrichmentService:
         return index
 
     def enrich(self, days: list[dict], platform: str = "scoresaber") -> None:
-        """Attach beatmap_key / stars / pp / nps to the per-day grouped replay lists."""
+        """Attach beatmap_key / song_author / in_library / stars / pp / nps to the grouped replay lists."""
         if not days:
             return
         key_map, lb_map, rc = self._ensure_snapshot(platform)
@@ -196,6 +202,12 @@ class EnrichmentService:
                 mh = (r.get("map_hash") or "").upper()
                 meta = key_map.get(mh, {})
                 r["beatmap_key"] = meta.get("beatmap_key", "")
+                r["song_author"] = meta.get("song_author", "")
+                # Whether the level folder is in the local library, i.e. whether the replay can
+                # be taken to its map detail page. It is a fact about the maps table, not a
+                # derived metric: no row here means the scanner never found a CustomLevels
+                # folder carrying this hash.
+                r["in_library"] = mh in key_map
                 # NPS: note density (match difficulty file by mode|difficulty)
                 nps_map = meta.get("nps") or {}
                 diff = r.get("difficulty") or ""

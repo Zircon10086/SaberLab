@@ -111,7 +111,7 @@ class TestBranches(unittest.TestCase):
         self.assertEqual(res["method"], "blend8-19")
         self.assertEqual(res["sample_count"], 12)
         # personal = round_quarter((Q25+Q50)/2); yellow = round_quarter((personal+fallback)/2)
-        # max_pp = 261 -> stage 进阶/高阶 fallback 7.0
+        # max_pp = 261 -> the "advanced/high-tier" stage, fallback 7.0
         self.assertEqual(res["fallback_stars"], 7.0)
         self.assertTrue(6.0 <= res["yellow_stars"] <= 7.0)
 
@@ -119,7 +119,7 @@ class TestBranches(unittest.TestCase):
         records = [rec(6.0, 150), rec(6.5, 180), rec(7.0, 190)]
         res = classify_player(records)
         self.assertEqual(res["method"], "fallback")
-        # max_pp=190 < 200 -> 初级/休闲 fallback 5.75
+        # max_pp=190 < 200 -> the "beginner/casual" stage, fallback 5.75
         self.assertEqual(res["stage"], "初级/休闲")
         self.assertEqual(res["yellow_stars"], 5.75)
 

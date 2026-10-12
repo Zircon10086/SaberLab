@@ -34,8 +34,9 @@ from backend.config.schema import STAR_PALETTES
 from backend.config.service import ConfigService, check_paths
 import backend.beatleader as beatleader
 from backend.db.repository import Repository
-from backend.maps.resolver import (MapResolver, read_chart_stats, read_chart_timeseries,
-                                   read_level_info)
+from backend.maps.resolver import (MapResolver, normalize_level_id, read_chart_stats,
+                                   read_chart_timeseries, read_level_info)
+from backend.maps import fill as map_fill
 from backend.services.enrichment import EnrichmentService
 from backend.services import energy_curve, player_assets, skill_tracks, timeline
 from backend.watcher import ReplayPipeline
@@ -46,7 +47,8 @@ import backend.scoresaber as scoresaber
 
 cfg: Config = load_config()
 repo = Repository(cfg.db_path)
-resolver = MapResolver(cfg.custom_levels_dir, repo, cfg.songcore_cache)
+resolver = MapResolver(cfg.custom_levels_dir, repo, cfg.songcore_cache,
+                       cfg.downloaded_levels_dir)
 pipeline = ReplayPipeline(cfg, repo, resolver)
 llm = LLMClient(cfg)
 config_svc = ConfigService()
@@ -60,8 +62,32 @@ def reload_runtime_config() -> None:
     global cfg
     cfg = load_config()
     resolver.update_paths(cfg.custom_levels_dir, cfg.songcore_cache)
+    # The download root is not a settings-page field, but a portable setup may move it in
+    # config.yaml; keeping it in step here avoids "restart to pick that up" surprises.
+    resolver.extra_levels_dir = pathlib.Path(cfg.downloaded_levels_dir) if cfg.downloaded_levels_dir else None
     pipeline.update_config(cfg)
     llm.update_config(cfg)
+
+
+def _window_fullscreen() -> bool:
+    """Whether the host window covers its display (window mode only; False without a host)."""
+    from backend.dialog import window_fullscreen  # lazy import to avoid circular dependencies
+    return window_fullscreen()
+
+
+def _window_geometry() -> dict:
+    """Window + display rectangles for the page ({} without a host window)."""
+    from backend.dialog import window_geometry  # lazy import to avoid circular dependencies
+    return window_geometry()
+
+
+def _consume_cover_escape() -> bool:
+    """Whether the host saw an Escape press while the window covered the display."""
+    from backend.dialog import consume_cover_escape  # lazy import to avoid circular dependencies
+    seen = consume_cover_escape()
+    if seen:
+        print("[api] status: handing the host's Escape over to the page", flush=True)
+    return seen
 
 
 def _scoresaber_id() -> str:
@@ -527,8 +553,7 @@ def api_status():
         "db": {
             "replays": repo.count_replays(),
             "maps": repo.map_count(),
-        },
-        "ai": {
+        },        "ai": {
             "provider": cfg.ai_provider,
             "model": cfg.ai_model,
             "configured": llm.configured,
@@ -536,6 +561,12 @@ def api_status():
             "api_key_source": cfg.ai_api_key_source(),
         },
         "chro": {"available": CHRO_AVAILABLE},
+        # Whether the host window covers its whole display (window mode only) and the real
+        # window/display rectangles behind that answer: the page reads these instead of
+        # guessing (2026-10, the 全屏 control).
+        "window": {"fullscreen": _window_fullscreen(),
+                   "cover_escape": _consume_cover_escape(),
+                   **_window_geometry()},
         # Star rating colour scheme: current selection + palette definitions (single
         # source for the frontend's starColor tiers). The selectable set is the skill
         # tracks whose rating exists on the ACTIVE platform (cached; absent offline ->
@@ -804,6 +835,43 @@ def api_replay_reveal(replay_id: str):
     raise HTTPException(410, "文件与所在文件夹都不存在")
 
 
+def _send_to_recycle_bin(target: pathlib.Path) -> None:
+    """Move a file or a folder to the OS recycle bin (never a permanent delete).
+
+    Microsoft.VisualBasic.FileIO.FileSystem is the documented way to do this on Windows and
+    needs no extra dependency. The path is base64-encoded so any character (quotes, unicode,
+    spaces) survives the PowerShell command line intact. Raises HTTPException on failure so
+    the caller can stop BEFORE touching the database: a record must never be removed while
+    the file is still on disk.
+
+    One retry after a short pause: an antivirus / indexer / cloud-sync transiently holding the
+    file makes the shell call fail with a non-zero exit code on the first attempt, and that was
+    measured on this machine during the 2026-10 map-folder work (two folders were refused on the
+    first try and moved on a later attempt). A real refusal (a read-only volume, a path that is
+    not in the shell namespace) fails twice and still raises.
+    """
+    b64 = base64.b64encode(str(target).encode("utf-8")).decode("ascii")
+    method = "DeleteDirectory" if target.is_dir() else "DeleteFile"
+    script = (
+        "Add-Type -AssemblyName Microsoft.VisualBasic; "
+        f"$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64}')); "
+        f"[Microsoft.VisualBasic.FileIO.FileSystem]::{method}("
+        "$p,'OnlyErrorDialogs','SendToRecycleBin')"
+    )
+    last = 0
+    for attempt in range(2):
+        try:
+            last = _run_hidden(["powershell.exe", "-NoProfile", "-NonInteractive",
+                                "-Command", script], wait=True)
+        except subprocess.TimeoutExpired as e:
+            raise HTTPException(504, "回收站操作超时") from e
+        if last == 0:
+            return
+        if attempt == 0:
+            time.sleep(0.4)
+    raise HTTPException(500, f"移动到回收站失败（退出码 {last}）")
+
+
 @app.post("/api/replays/{replay_id}/recycle")
 def api_replay_recycle(replay_id: str):
     """Delete a replay: move its .bsor to the OS recycle bin AND drop the record.
@@ -827,24 +895,7 @@ def api_replay_recycle(replay_id: str):
     file_recycled = False
 
     if target is not None and target.exists():
-        # Microsoft.VisualBasic.FileIO.FileSystem is the documented way to send a file
-        # to the recycle bin; it needs no extra dependency and never hard-deletes.
-        # The path is base64-encoded so any character (quotes, unicode, spaces)
-        # survives the PowerShell command line intact.
-        b64 = base64.b64encode(str(target).encode("utf-8")).decode("ascii")
-        script = (
-            "Add-Type -AssemblyName Microsoft.VisualBasic; "
-            f"$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64}')); "
-            "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
-            "$p,'OnlyErrorDialogs','SendToRecycleBin')"
-        )
-        try:
-            rc = _run_hidden(["powershell.exe", "-NoProfile", "-NonInteractive",
-                              "-Command", script], wait=True)
-        except subprocess.TimeoutExpired as e:
-            raise HTTPException(504, "回收站操作超时") from e
-        if rc != 0:
-            raise HTTPException(500, f"移动到回收站失败（退出码 {rc}）")
+        _send_to_recycle_bin(target)
         file_recycled = True
 
     counts = repo.delete_replay(replay_id)
@@ -1025,11 +1076,80 @@ def api_map_package(map_hash: str):
     )
 
 
+@app.get("/api/replays/by-map/{map_hash}")
+def api_replay_by_map(map_hash: str):
+    """The level facts a replay can supply when the map itself is not in the library.
+
+    The map detail page needs *something* for a level whose files are gone; a replay carries the
+    song name, the mapper and the difficulty that was played. Answers 404 when no replay in the
+    library refers to this level (there is nothing to show then).
+
+    The path carries a literal segment on purpose: `/api/replays/{replay_id}` is a sibling route
+    and would otherwise swallow this request (measured: it answered "replay 不存在" for a hash).
+    """
+    key = normalize_level_id(map_hash)
+    if not key:
+        raise HTTPException(400, "缺少谱面标识")
+    plays = repo.map_play_stats(key)
+    if not plays:
+        raise HTTPException(404, "没有引用该谱面的回放")
+    newest = plays[0]
+    cleared = sum(1 for p in plays if p.get("won"))
+    return {
+        "map_hash": key,
+        "song_name": newest.get("song_name") or "",
+        "song_author": "",
+        "mapper": newest.get("mapper") or "",
+        "difficulty": newest.get("difficulty") or "",
+        "mode": newest.get("mode") or "",
+        "plays": {"count": len(plays), "cleared": cleared,
+                  "last_ts": newest.get("timestamp")},
+    }
+
+
 # ---------- maps ----------
 # Not used by the frontend; kept for API completeness.
 @app.get("/api/maps")
 def api_maps():
     return repo.list_maps()
+
+
+@app.post("/api/maps/{map_hash}/ensure-preview")
+def api_map_ensure_preview(map_hash: str):
+    """Fetch one specific level so its 3D preview can open (single level, not a batch).
+
+    Called from the map detail page when the replay refers to a level we do not have. A custom
+    level comes from BeatSaver, an official one from the community archive of the game's own
+    levels; a paid DLC track exists in neither, and that answer (`not_found`) is what the UI
+    turns into "cannot be downloaded".
+    """
+    key = normalize_level_id(map_hash)
+    if not key:
+        raise HTTPException(400, "缺少谱面标识")
+    row = repo.get_map(key)
+    if row and row.get("path") and pathlib.Path(row["path"]).exists():
+        return {"status": "ok", "reason": "already_local", "map_hash": key}
+
+    resolver.clear_missing(key)                # a new attempt may well succeed
+    song_name = ""
+    existing = repo.list_replays_for_missing_levels()
+    for item in existing:
+        if item["map_hash"] == key:
+            song_name = item.get("song_name") or ""
+            break
+    res = map_fill.fill_one(
+        key, song_name, repo=repo, resolver=resolver,
+        levels_dir=pathlib.Path(cfg.downloaded_levels_dir or map_fill.LEVELS_DIR),
+        proxy=cfg.proxy, timeout=cfg.download_timeout_seconds,
+    )
+    return {
+        "status": "ok" if res.get("status") in ("ok", "skipped") else "failed",
+        "reason": res.get("reason", ""),
+        "detail": res.get("detail", ""),
+        "source": res.get("source", ""),
+        "song_name": res.get("song_name", ""),
+        "map_hash": key,
+    }
 
 
 def _map_library_item(row: dict) -> dict:
@@ -1191,7 +1311,9 @@ def api_map_detail_page(map_hash: str):
     NPS, NJS, and - computed on demand - note count, span and file size). `plays` is the map-scoped
     play history summary plus the replays themselves, which the page lists with the replay card.
     """
-    row = repo.get_map(map_hash)
+    # The identity may arrive with the game's `custom_level_` prefix (the 3D viewer passes its own
+    # identity straight into a URL): SaberLab looks up the bare value.
+    row = repo.get_map(normalize_level_id(map_hash))
     if not row:
         raise HTTPException(404, "谱面不存在")
     platform = _active_platform()
@@ -1272,6 +1394,13 @@ def api_map_detail_page(map_hash: str):
         "version": info.get("version") or "",
         "folder_name": row.get("folder_name") or "",
         "folder_path": row.get("path") or "",
+        # Whether the level files are actually here. A row can outlive its folder (the player
+        # deleted it) - the page shows the replay's own metadata then, and the 3D card uses this
+        # to decide between "open the viewer" and "fetch the level first" (backend/maps/fill.py).
+        "in_library": bool(row.get("path")) and pathlib.Path(str(row["path"])).exists(),
+        # The difficulty this map was last played at: the only difficulty fact available while
+        # the level files are missing (the 3D card passes it to the viewer's picker).
+        "played_difficulty": (plays[0].get("difficulty") or "") if plays else "",
         "added_at": row.get("added_at") or "",
         "last_scanned": row.get("last_scanned") or "",
         "platform": platform,
@@ -1412,6 +1541,51 @@ def _run_map_scan():
         _set_task("map_scan", running=False, error=f"{e}\n{traceback.format_exc()}")
 
 
+def _run_map_fill():
+    """Background "补全丢失谱面" task: fetch every level a replay refers to but we do not have.
+
+    The heavy lifting (source resolution, politeness limits, unpacking, identity check) lives in
+    backend/maps/fill.py; here we only wire it to the task table the frontend polls.
+    """
+    try:
+        def cb(i, n, name):
+            _set_task("map_fill", done=i, total=n, current=f"补全谱面:{name}")
+
+        _set_task("map_fill", done=0, total=0, current="正在整理缺失谱面…")
+        report = map_fill.fill_missing(
+            repo, resolver,
+            levels_dir=pathlib.Path(cfg.downloaded_levels_dir or map_fill.LEVELS_DIR),
+            proxy=cfg.proxy,
+            timeout=cfg.download_timeout_seconds,
+            concurrency=cfg.download_concurrency,
+            progress_cb=cb,
+        )
+        _set_task("map_fill", running=False, current="", results=[{"kind": "map_fill", **report}])
+    except Exception as e:  # noqa: BLE001
+        _set_task("map_fill", running=False, error=f"{e}\n{traceback.format_exc()}")
+
+
+@app.get("/api/maps/missing")
+def api_maps_missing():
+    """What "补全丢失谱面" would fetch: the levels replays point at that are not in the library."""
+    report = map_fill.missing_levels(repo)
+    return {
+        "total": len(report["items"]),
+        "plays": report["plays"],
+        "official": len(report["official"]),
+        "custom": len(report["custom"]),
+        "items": report["items"][:200],
+    }
+
+
+@app.post("/api/maps/fill")
+def api_maps_fill():
+    """Start the "补全丢失谱面" task (same task-table contract as the other long tasks)."""
+    _require_db_populated()   # nothing to complete on an empty database
+    _start_task("map_fill", _run_map_fill)
+    return {"status": "started"}
+
+
 # DEPRECATED (2026-08): not used by the frontend (one-click refresh covers it);
 # kept for API compatibility, intentional no-delete.
 @app.post("/api/maps/rescan")
@@ -1425,7 +1599,7 @@ def api_maps_rescan():
 # Not used by the frontend; kept for API completeness.
 @app.get("/api/maps/{map_hash}")
 def api_map_detail(map_hash: str):
-    m = repo.get_map(map_hash)
+    m = repo.get_map(normalize_level_id(map_hash))
     if not m:
         raise HTTPException(404, "谱面不存在")
     return m
@@ -1453,6 +1627,60 @@ def api_map_cover(map_hash: str):
             return FileResponse(default)
         raise HTTPException(404, "无封面")
     return FileResponse(p)
+
+
+# ---------- OS integration for a map's level folder (2026-10, right-click menu) ----------
+
+def _map_folder(map_hash: str) -> tuple[dict, pathlib.Path]:
+    """The map row and its existing level folder, or an HTTP error explaining what is wrong.
+
+    Both map actions below act on the level folder inside CustomLevels: that folder IS the map
+    (SaberLab stores only its metadata), so revealing it opens THAT folder rather than the
+    CustomLevels root, and deleting it deletes the map itself.
+    """
+    m = repo.get_map(map_hash)
+    if not m:
+        raise HTTPException(404, "谱面不存在")
+    raw = m.get("path") or ""
+    folder = pathlib.Path(raw) if raw else None
+    if folder is None or not folder.is_dir():
+        raise HTTPException(410, "谱面文件夹不存在")
+    return m, folder
+
+
+@app.post("/api/maps/{map_hash}/reveal")
+def api_map_reveal(map_hash: str):
+    """Open the level folder of this map in the OS file browser."""
+    m, folder = _map_folder(map_hash)
+    _run_hidden(["explorer.exe", str(folder)])
+    return {"status": "opened", "path": str(folder), "folder_name": m.get("folder_name") or ""}
+
+
+@app.post("/api/maps/{map_hash}/recycle")
+def api_map_recycle(map_hash: str):
+    """Delete a map: move its level folder to the OS recycle bin AND drop the map record.
+
+    Two explicit steps, in this order (2026-10, user decision — the same safety order as the
+    replay delete, see api_replay_recycle):
+      1. the whole level folder goes to the OS recycle bin, so the user can always pull it
+         back out; if this fails, step 2 does NOT run and no record is removed;
+      2. SaberLab removes the map row and the rating / leaderboard caches that belong to it.
+
+    Replays of this map are deliberately kept: they are the user's own .bsor files in the
+    replays folder, and their analysis stays readable. Those rows remain valid — the list just
+    drops the cover and the "view map" entry, exactly like a replay whose level folder is gone.
+    """
+    m, folder = _map_folder(map_hash)
+    name = m.get("song_name") or m.get("folder_name") or ""
+
+    _send_to_recycle_bin(folder)
+
+    counts = repo.delete_map(map_hash)
+    # The map is gone from the maps table: the enrichment snapshot (beatmap_key / stars / pp /
+    # nps and the map-library star index) is built from it and must not outlive the row.
+    enrichment.invalidate()
+    return {"status": "deleted", "song_name": name, "path": str(folder),
+            "folder_name": folder.name, "removed": counts}
 
 
 # ---------- profiles & experiments ----------
@@ -1792,6 +2020,16 @@ class SettingsBody(BaseModel):
     instance_root: str = ""
 
 
+class WindowFullscreenBody(BaseModel):
+    # None = toggle; True = cover the display; False = stop covering it.
+    fullscreen: Optional[bool] = None
+
+
+class PageFillBody(BaseModel):
+    # Whether the page-level enlargement (页面全屏) is currently on.
+    on: bool = False
+
+
 class SettingsSaveBody(BaseModel):
     values: dict = {}
 
@@ -1922,6 +2160,52 @@ def api_settings_clear_cache():
 
 
 # ---------- desktop integration (acrylic plan C: wallpaper push; design notes in the local-only others/ folder) ----------
+@app.post("/api/window/fullscreen")
+def api_window_fullscreen(body: Optional[WindowFullscreenBody] = None):
+    """Cover / uncover the host display with the window (the replay card's 全屏 control).
+
+    Window mode routes to pywebview's window fullscreen through the dialog bridge, which
+    measures the real window afterwards so the answer cannot drift; browser mode reports
+    unavailable and the frontend enlarges the page instead. An explicit target ("make it
+    cover" / "stop covering") is honoured by state, so the same request twice never leaves
+    the window in the opposite state. This is the "cover the whole display" control - the
+    page's own enlargement inside the current window is a separate control.
+    """
+    from backend.dialog import request_window_fullscreen  # lazy import to avoid circular dependencies
+    target = None if body is None or body.fullscreen is None else bool(body.fullscreen)
+    res = request_window_fullscreen(target)
+    if res.get("unavailable"):
+        return {"ok": True, "available": False, "fullscreen": False}
+    answer = {"ok": True, "available": True, "fullscreen": bool(res.get("fullscreen"))}
+    if res.get("window") and res.get("monitor"):
+        answer["window"] = res["window"]
+        answer["monitor"] = res["monitor"]
+    return answer
+
+
+@app.get("/api/window/geometry")
+def api_window_geometry():
+    """The window's rectangle and its display's rectangle ({} without a host window).
+
+    The page uses this to compare like with like instead of guessing coverage from the
+    viewport size, which at high DPI is a different unit.
+    """
+    return _window_geometry()
+
+
+@app.post("/api/window/page-fill")
+def api_window_page_fill(body: PageFillBody):
+    """Tell the host whether the page-level enlargement (页面全屏) is on.
+
+    The host needs it because leaving it has to work like leaving the covered window - one
+    Escape from anywhere - and when the replay has the keyboard the page never sees the key
+    at all (see the Escape watch in backend/host.py).
+    """
+    from backend.dialog import set_page_fill  # lazy import to avoid circular dependencies
+    set_page_fill(bool(body.on))
+    return {"ok": True, "page_fill": bool(body.on)}
+
+
 @app.post("/api/desktop/backdrop-ready")
 def api_desktop_backdrop_ready():
     """Frontend acrylic-layer ready notification (page load / language-switch

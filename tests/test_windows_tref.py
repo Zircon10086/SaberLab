@@ -1,9 +1,11 @@
-"""窗口时间轴锚点 t_ref 回归测试（v1.4.1 方案 E）。
+"""Window timeline anchor t_ref regression test (v1.4.1 option E).
 
-背景：窗口 x 坐标曾用窗口中心 [t, t+30]/2，稀疏段与窗口内 note 实际
-时间偏差 ±15s（Hatatagami 实测：首窗中心 15s vs 真实 note 21.61s）。
-修复：t_ref = 窗口内 note 事件时间的中位数——密集段≈中心，
-稀疏段/首尾锚定真实数据位置。
+Background: the window x coordinate used to be the window centre [t, t+30]/2, which
+put sparse sections up to ±15s away from the real time of the notes inside the window
+(measured on Hatatagami: first window centre 15s vs the real note at 21.61s).
+Fix: t_ref = median of the note event times inside the window — in dense sections it is
+≈ the centre, while sparse sections / the first and last windows anchor the real data
+position.
 """
 import pathlib
 import sys
@@ -14,7 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import numpy as np  # noqa: E402
 
-from backend.bsor.models import Replay, ReplayInfo, NoteEvent, GOOD, MISS  # noqa: E402
+from backend.bsor.models import Replay, ReplayInfo  # noqa: E402
 from backend.bsor.parser import FRAME_DTYPE  # noqa: E402
 from backend.analysis.windows import build_windows  # noqa: E402
 from tests.test_metrics import good  # noqa: E402
@@ -39,43 +41,43 @@ def make_replay(notes, duration=120.0):
 
 class TestWindowTRef(unittest.TestCase):
     def test_tref_anchors_sparse_notes(self):
-        """稀疏段：t_ref 锚定窗口内 note 真实时间，而非窗口中心。"""
-        # 模拟 Hatatagami：第一个 note 在 21.61s（长前奏），窗口宽 30 步长 10
+        """Sparse section: t_ref anchors the real note time inside the window, not the window centre."""
+        # simulating Hatatagami: the first note is at 21.61s (long intro), window 30, step 10
         notes = [good(21.61 + i, speed=20.0) for i in range(5)]     # 21.61~25.61
         notes += [good(60.0 + i, speed=20.0) for i in range(5)]     # 60~64
         r = make_replay(notes, duration=120.0)
         wins = build_windows(r, window_sec=30.0, step_sec=10.0)
-        # 首窗口 [0,30] 内 note 21.61~25.61 → 中位数 23.61
+        # notes 21.61~25.61 inside the first window [0,30] -> median 23.61
         w0 = wins[0]
         self.assertEqual(w0["t_start"], 0.0)
         self.assertEqual(w0["t_end"], 30.0)
         self.assertIsNotNone(w0["t_ref"])
-        self.assertGreater(w0["t_ref"], 21.0)      # 锚定真实 note，而非中心 15
+        self.assertGreater(w0["t_ref"], 21.0)      # anchors the real note, not the centre 15
         self.assertLess(w0["t_ref"], 26.0)
-        # 窗口中心是 15 → t_ref 必须显著偏离中心（稀疏段锚定生效）
+        # the window centre is 15 -> t_ref must clearly deviate from it (sparse anchoring works)
         self.assertGreater(abs(w0["t_ref"] - 15.0), 5.0)
 
     def test_tref_empty_window_none(self):
-        """无 note 的窗口：t_ref=None（前端跳过，无 acc 值）。"""
+        """Window without notes: t_ref=None (the frontend skips it, there is no acc value)."""
         notes = [good(10.0, speed=20.0)]
         r = make_replay(notes, duration=120.0)
         wins = build_windows(r, window_sec=30.0, step_sec=30.0)
         self.assertEqual(len(wins), 4)             # [0,30],[30,60],[60,90],[90,120]
-        self.assertIsNotNone(wins[0]["t_ref"])     # [0,30] 含 10.0
+        self.assertIsNotNone(wins[0]["t_ref"])     # [0,30] contains 10.0
         for w in wins[1:]:
-            self.assertIsNone(w["t_ref"])          # 无 note 窗口
+            self.assertIsNone(w["t_ref"])          # window without notes
 
     def test_tref_dense_window_near_center(self):
-        """密集段：note 均匀分布时 t_ref ≈ 窗口中心（观感与旧版一致）。"""
-        notes = [good(5.0 + i, speed=20.0) for i in range(25)]   # 5~29 均匀
+        """Dense section: with evenly spread notes t_ref ≈ the window centre (looks like the old version)."""
+        notes = [good(5.0 + i, speed=20.0) for i in range(25)]   # 5~29, evenly spread
         r = make_replay(notes, duration=120.0)
         wins = build_windows(r, window_sec=30.0, step_sec=10.0)
-        w0 = wins[0]                               # [0,30] 内 5~29 中位 17
+        w0 = wins[0]                               # 5~29 inside [0,30], median 17
         self.assertIsNotNone(w0["t_ref"])
-        self.assertLess(abs(w0["t_ref"] - 15.0), 4.0)   # 接近窗口中心 15
+        self.assertLess(abs(w0["t_ref"] - 15.0), 4.0)   # close to the window centre 15
 
     def test_save_get_windows_roundtrip(self):
-        """t_ref 落库 round-trip（repository 层）。"""
+        """t_ref persisted and read back — round-trip at the repository layer."""
         import shutil
         import tempfile
         from backend.db.repository import Repository

@@ -1,13 +1,17 @@
-"""数据库 schema 自举回归测试。
+"""Database schema self-bootstrap regression tests.
 
-背景（架构审查 P0-2.1）：历史上 v2/v4/v5 的表结构变更散落在 _tools/migrate_db*.py，
-models.py SCHEMA 缺 beatmap_key / nps_json / map_ranked_cache /
-scoresaber_leaderboards —— 全新数据库实例化 Repository 后首个查询即崩。
-迁移史收敛进 SCHEMA + _migrate() 后，此测试保证：
+Background (architecture review P0-2.1): historically the v2/v4/v5 table structure
+changes were scattered across _tools/migrate_db*.py, and models.py SCHEMA was
+missing beatmap_key / nps_json / map_ranked_cache / scoresaber_leaderboards — so a
+brand-new database crashed on the very first query after instantiating Repository.
+With the migration history collapsed into SCHEMA + _migrate(), this test
+guarantees:
 
-1. 全新库：建库 → 常规读写全链路不抛错（独立化打包后的首次启动路径）
-2. 旧库升级：模拟 pre-v2 老结构（无 beatmap_key/nps_json、无两张缓存表、
-   replays 无 analysis_status）→ 打开即完成迁移，数据保留、beatmap_key 回填
+1. Fresh database: create it → the whole normal read/write path raises nothing (the
+   first-startup path of the self-contained build)
+2. Legacy upgrade: simulate the pre-v2 structure (no beatmap_key/nps_json, neither
+   cache table, replays without analysis_status) → opening it completes the
+   migration, the data survives and beatmap_key is backfilled
 """
 import pathlib
 import sqlite3
@@ -19,7 +23,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from backend.db.repository import Repository
 
-# pre-v2 旧结构（与 v1 时代 models.py 一致的最小子集，够触发迁移即可）
+# pre-v2 legacy structure (the minimal subset matching the v1-era models.py, just
+# enough to trigger the migration)
 LEGACY_SCHEMA = """
 CREATE TABLE maps (
     map_hash        TEXT PRIMARY KEY,
@@ -75,7 +80,7 @@ def _close_repos(case) -> None:
 
 
 class TestFreshDatabase(unittest.TestCase):
-    """全新数据库：建库后常规读写全链路可用。"""
+    """Fresh database: after creation the whole normal read/write path works."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -86,7 +91,7 @@ class TestFreshDatabase(unittest.TestCase):
 
     def test_fresh_db_full_workflow(self):
         repo = Repository(self.db_path)
-        # maps：upsert（含 nps_json）+ list（含 beatmap_key 列）
+        # maps: upsert (with nps_json) + list (with the beatmap_key column)
         repo.upsert_map({
             "map_hash": "AA" * 20, "folder_name": "16633 (song - mapper)",
             "path": "X:/levels/16633", "song_name": "Test Song",
@@ -96,10 +101,11 @@ class TestFreshDatabase(unittest.TestCase):
         })
         maps = repo.list_maps()
         self.assertEqual(len(maps), 1)
-        self.assertEqual(maps[0]["beatmap_key"], "")   # 新列可读
-        # nps_json 缺省 None：scan 不覆盖已计算 NPS（upsert_map 行为变更）
+        self.assertEqual(maps[0]["beatmap_key"], "")   # the new column is readable
+        # nps_json defaults to None: a scan does not overwrite an already computed NPS
+        # (upsert_map behaviour change)
         self.assertIsNone(maps[0]["nps_json"])
-        # scoresaber_leaderboards：upsert + list
+        # scoresaber_leaderboards: upsert + list
         repo.upsert_ss_leaderboard({
             "leaderboard_id": 1, "map_hash": "AA" * 20, "difficulty_rank": 7,
             "difficulty_name": "Expert", "game_mode": "SoloStandard",
@@ -109,14 +115,14 @@ class TestFreshDatabase(unittest.TestCase):
         })
         self.assertEqual(repo.count_ss_leaderboards(), 1)
         self.assertEqual(len(repo.list_ss_leaderboards()), 1)
-        # map_ranked_cache：upsert + list + get
+        # map_ranked_cache: upsert + list + get
         repo.upsert_ranked_cache("AA" * 20, "Expert", 5.0, 123.4, "now")
         rc = repo.list_ranked_cache()
         self.assertEqual(len(rc), 1)
-        got = repo.get_ranked_cache("aa" * 20, "Expert")  # 大小写不敏感
+        got = repo.get_ranked_cache("aa" * 20, "Expert")  # case-insensitive
         self.assertIsNotNone(got)
         self.assertAlmostEqual(got["pp"], 123.4)
-        # replays：upsert + count + list
+        # replays: upsert + count + list
         repo.upsert_replay({
             "replay_id": "r1", "file_path": "x.bsor", "timestamp": 1000,
             "map_hash": "AA" * 20, "song_name": "Test Song",
@@ -125,7 +131,7 @@ class TestFreshDatabase(unittest.TestCase):
         })
         self.assertEqual(repo.count_replays(), 1)
         self.assertEqual(len(repo.list_replays()), 1)
-        # clear_analysis_cache（内部 DELETE 两张新表）
+        # clear_analysis_cache (internally DELETEs from the two new tables)
         result = repo.clear_analysis_cache()
         self.assertTrue(result["cleared"])
         self.assertEqual(repo.count_replays(), 0)
@@ -133,7 +139,7 @@ class TestFreshDatabase(unittest.TestCase):
 
 
 class TestLegacyDatabaseUpgrade(unittest.TestCase):
-    """旧版数据库：打开即迁移，数据不丢、beatmap_key 回填。"""
+    """Legacy database: opening it migrates in place, no data is lost and beatmap_key is backfilled."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -162,18 +168,18 @@ class TestLegacyDatabaseUpgrade(unittest.TestCase):
 
     def test_upgrade_from_pre_v2(self):
         self._create_legacy_db()
-        repo = Repository(self.db_path)  # 打开即迁移
-        # 列已补齐且数据保留
+        repo = Repository(self.db_path)  # opening it performs the migration
+        # the columns are added and the data is kept
         m = repo.get_map("bb" * 20)
         self.assertIsNotNone(m)
         self.assertEqual(m["song_name"], "Old Song")
-        # beatmap_key 按 v2 规则从 folder_name 回填
+        # beatmap_key is backfilled from folder_name by the v2 rule
         self.assertEqual(m["beatmap_key"], "16633")
-        self.assertEqual(m["nps_json"], "{}")   # 旧库迁移保持默认值
-        # replays.analysis_status 已补齐并按 status 回填
+        self.assertEqual(m["nps_json"], "{}")   # a legacy database migration keeps the default value
+        # replays.analysis_status is added and backfilled from status
         r = repo.get_replay("r1")
         self.assertEqual(r["analysis_status"], "analyzed")
-        # 新表可用
+        # the new tables are usable
         repo.upsert_ss_leaderboard({
             "leaderboard_id": 9, "map_hash": "BB" * 20, "difficulty_rank": 9,
             "difficulty_name": "ExpertPlus", "game_mode": "SoloStandard",
@@ -195,7 +201,7 @@ class TestLegacyDatabaseUpgrade(unittest.TestCase):
         self.assertEqual(cached["r80"], 8.75)
         self.assertIsNone(cached["r94"])
         self.assertEqual(cached["r80_direct"], 40)
-        # 幂等：再次打开不出错
+        # idempotent: opening it again raises nothing
         repo2 = Repository(self.db_path)
         self.assertEqual(repo2.get_map("bb" * 20)["beatmap_key"], "16633")
 

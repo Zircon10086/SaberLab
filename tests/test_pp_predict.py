@@ -50,7 +50,7 @@ class TestCurveMultiplier(unittest.TestCase):
     def test_monotonic_nondecreasing(self):
         xs = [i / 1000 for i in range(0, 1001)]
         ys = [curve_multiplier(x) for x in xs]
-        for a, b in zip(ys, ys[1:]):
+        for a, b in zip(ys, ys[1:], strict=False):   # consecutive pairs
             self.assertLessEqual(a, b + 1e-12)
 
 

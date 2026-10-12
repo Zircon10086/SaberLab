@@ -307,6 +307,28 @@ SETTINGS_SCHEMA: list[dict] = [
         "group": "网络",
         "default": 30.0,
     },
+    {
+        "key": "network.download_concurrency",
+        "label": "谱面下载并发数",
+        "type": "integer",
+        "description": "同时补全的谱面数量（同一来源内部仍逐个下载）",
+        "restart_required": False,
+        "required": False,
+        "sensitive": False,
+        "group": "网络",
+        "default": 3,
+    },
+    {
+        "key": "network.download_timeout_seconds",
+        "label": "谱面下载超时（秒）",
+        "type": "float",
+        "description": "单个谱面压缩包的下载超时时间",
+        "restart_required": False,
+        "required": False,
+        "sensitive": False,
+        "group": "网络",
+        "default": 60.0,
+    },
 ]
 
 

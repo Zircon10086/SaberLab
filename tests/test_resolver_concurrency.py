@@ -1,16 +1,20 @@
-"""MapResolver 并发扫描互斥回归测试（v1.4.1 bug 修复）。
+"""MapResolver concurrent-scan mutual-exclusion regression test (v1.4.1 bug fix).
 
-背景：历史页渲染 300 条 replay（无 lazy 封面）→ 86 个孤儿 hash 的封面请求
-并发触发 ensure_map_path → 每个都执行全量 scan（19.5s/轮，先 scan 后更新
-_last_scan 的竞态）→ 多轮并发扫描占满 FastAPI 线程池 + SQLite 写锁，
-所有 API 卡死数分钟。
+Background: the history page rendered 300 replays (no lazy covers) -> 86 cover
+requests for orphan hashes concurrently triggered ensure_map_path -> each one ran
+a full scan (19.5s per round; _last_scan was updated only after the scan, which is
+the race) -> several rounds of concurrent scanning saturated the FastAPI thread
+pool + the SQLite write lock, and every API froze for minutes.
 
-修复语义：
-1. DB 无行的 hash：ensure_map_path 绝不触发全量扫描（封面是高频只读路径）
-2. resolve 并发缺失 hash：任意时刻至多一轮全量扫描，其余请求立即判负
-   （不等待 scan 完成）
-3. 防抖 30s 冷却结束后允许再扫描（新下载谱面仍可被发现）
-4. 有行但路径失效：懒修复语义保留，并发仍只扫一次
+Fixed semantics:
+1. hash with no DB row: ensure_map_path never triggers a full scan (covers are a
+   high-frequency read-only path)
+2. concurrent resolve of a missing hash: at most one full scan at any moment, the
+   remaining requests fail immediately (without waiting for the scan to finish)
+3. once the 30s debounce cooldown has expired a rescan is allowed again (newly
+   downloaded maps can still be discovered)
+4. row exists but its path is invalid: the lazy-repair semantics are kept, and
+   concurrent callers still scan only once
 """
 import pathlib
 import shutil
@@ -27,7 +31,7 @@ from backend.maps.resolver import MapResolver  # noqa: E402
 
 
 class FakeRepo:
-    """最小 fake：get_map 永远无行；upsert_map 记录调用（scan 写库路径）。"""
+    """Minimal fake: get_map never finds a row; upsert_map records calls (the scan's DB write path)."""
 
     def __init__(self):
         self.upsert_count = 0
@@ -45,7 +49,7 @@ class FakeRepo:
 
 
 class RepoWithInvalidPathRow(FakeRepo):
-    """get_map 返回"有行但路径失效"，模拟原懒修复场景。"""
+    """get_map returns "row exists but path is invalid", the original lazy-repair scenario."""
 
     def get_map(self, map_hash):
         return {"map_hash": map_hash, "path": "/nonexistent/path"}
@@ -56,7 +60,7 @@ class TestConcurrentScan(unittest.TestCase):
         self.tmp = pathlib.Path(tempfile.mkdtemp(dir=PROJECT_ROOT / "_tmp"))
         self.repo = FakeRepo()
         self.resolver = MapResolver(str(self.tmp), self.repo, "")
-        # 慢 scan：0.4s 且计数（模拟真实全量扫描 19.5s 的慢路径）
+        # slow scan: 0.4s and counted (stands in for the real 19.5s full-scan path)
         self.scan_calls = 0
         self.scan_lock = threading.Lock()
         real_scan = self.resolver.scan
@@ -73,13 +77,13 @@ class TestConcurrentScan(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_ensure_map_path_no_row_no_scan(self):
-        """DB 无行的 hash：ensure_map_path 绝不触发全量扫描（封面高频路径）。"""
+        """hash with no DB row: ensure_map_path never triggers a full scan (the high-frequency cover path)."""
         r = self.resolver.ensure_map_path("GHOST")
         self.assertIsNone(r)
         self.assertEqual(self.scan_calls, 0)
 
     def test_resolve_concurrent_only_one_scan(self):
-        """并发 resolve 缺失 hash：只触发一次全量扫描，其余立即判负不等待。"""
+        """concurrent resolve of a missing hash: one full scan only, the rest fail immediately without waiting."""
         results, errors = [], []
 
         def worker(h):
@@ -103,15 +107,15 @@ class TestConcurrentScan(unittest.TestCase):
         self.assertTrue(all(r is None for r in results))
 
     def test_rescan_after_cooldown_allowed(self):
-        """防抖 30s 过后（模拟），新的缺失 hash 允许再触发一次扫描。"""
+        """after the 30s debounce has passed (simulated), a new missing hash may trigger another scan."""
         self.resolver.resolve("HASH00000000000000000000000000000000")
         self.assertEqual(self.scan_calls, 1)
-        self.resolver._last_scan = 0.0   # 模拟 30s 冷却结束
+        self.resolver._last_scan = 0.0   # simulate the 30s cooldown having expired
         self.resolver.resolve("HASH11111111111111111111111111111111")
         self.assertEqual(self.scan_calls, 2)
 
     def test_ensure_map_path_row_path_invalid_triggers_once(self):
-        """有行但路径失效：懒修复保留，并发也只扫一次、不等待。"""
+        """row exists but path is invalid: lazy repair is kept; concurrent callers still scan once and do not wait."""
         self.resolver.repo = RepoWithInvalidPathRow()
         results, errors = [], []
 

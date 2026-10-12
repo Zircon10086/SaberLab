@@ -140,6 +140,7 @@
 
       <div class="actions">
         <button id="btn-refresh-all" class="primary" data-i18n="btn.refresh_all">⚡ 一键刷新</button>
+        <button id="btn-fill-maps" data-i18n="btn.fill_maps" data-i18n-title="btn.fill_maps_title">补全丢失谱面</button>
         <button id="btn-refresh-online" data-i18n="btn.refresh_online" data-i18n-title="btn.refresh_online_title">联网重新更新数据</button>
       </div>
 
@@ -244,15 +245,17 @@
                   <svg class="enum-caret" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
                 </button>
               </div>
-              <button type="button" id="maps-dir" class="mini maps-dir" aria-pressed="false">
+              <button type="button" id="maps-dir" class="maps-dir" aria-pressed="false">
                 <svg class="dir-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="M6 11l6-6 6 6"/></svg>
                 <span class="dir-label" data-i18n="maps.dir.asc">正序</span>
               </button>
-              <button id="btn-maps-scan" class="mini" data-i18n="maps.rescan">重新扫描</button>
-              <span id="maps-count" class="maps-count"></span>
+              <button id="btn-maps-scan" data-i18n="maps.rescan">重新扫描</button>
             </div>
           </div>
           <div id="maps-pagination" class="pagination"></div>
+          <!-- empty right column: the same symmetric grid as 总览/历史 keeps the
+               pagination strictly centered (see style.css #tab-maps .surface-title) -->
+          <div class="title-right"></div>
         </div>
         <div id="maps-list" class="replay-list" data-i18n="common.loading">加载中…</div>
       </div>
