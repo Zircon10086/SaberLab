@@ -1,6 +1,6 @@
 {
   "meta.title": "SaberLab · Beat Saber replay analysis on your PC",
-  "meta.description": "SaberLab reads your local BeatLeader replays and measures every cut: swing angles, distance from center, timing, motion, fatigue and energy, with 3D replay and AI coaching. Free and open source for Windows.",
+  "meta.description": "SaberLab reads your local BeatLeader replays and measures every cut: swing angles, distance from center, timing, motion, fatigue and energy. Browse your map library chart by chart, replay any run in 3D, and let an AI coach explain the numbers. Windows, free and open source.",
 
   "nav.skip": "Skip to content",
   "nav.label": "Main",
@@ -105,6 +105,14 @@
   "f.online.desc": "Stars, PP and leaderboards for the maps you play. For ranked ScoreSaber maps, drag a slider to preview the PP at any accuracy.",
   "f.lang.title": "Three languages",
   "f.lang.desc": "简体中文, English and 日本語, switchable in Settings.",
+  "f.maps.title": "Your map library",
+  "f.maps.desc": "Every custom map on your PC in one list — cover, song, artist and mapper, difficulty badges, BPM, length and note density — searchable and sortable.",
+  "f.mapdetail.title": "Chart by chart",
+  "f.mapdetail.desc": "Open a map for its own page: note count, NPS, NJS, note span and file size per difficulty, the density across the song, and everything you have played on that chart.",
+  "f.mappreview.title": "See the chart in 3D",
+  "f.mappreview.desc": "Hand a single chart to the 3D viewer without a replay, to see where the blocks actually are — the whole map is handed over at once, so switching difficulty is instant. Both card views go fullscreen.",
+  "f.autofill.title": "Missing maps come back",
+  "f.autofill.desc": "Replays you kept after deleting a map still open: SaberLab fetches the level again — your deleted custom maps from BeatSaver, the game's own songs from the community archive of its levels. Paid DLC has no public source anywhere and is reported as such.",
 
   "download.title": "Get SaberLab",
   "download.body": "The Windows package includes everything it needs: unzip it and run SaberLab.exe.",

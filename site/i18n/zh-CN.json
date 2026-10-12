@@ -1,6 +1,6 @@
 {
   "meta.title": "SaberLab · 本地 Beat Saber 回放分析",
-  "meta.description": "SaberLab 读取你电脑上的 BeatLeader 回放，测量每一刀：挥刀角度、离中心的距离、时机、动作、疲劳与能量，另有 3D 回放与 AI 教练。Windows 免费开源软件。",
+  "meta.description": "SaberLab 读取你电脑上的 BeatLeader 回放，测量每一刀：挥刀角度、离中心的距离、时机、动作、疲劳与能量。逐个难度浏览你的谱面库、在 3D 里回看任意一局，再由 AI 教练解释这些数字。Windows 免费开源软件。",
 
   "nav.skip": "跳到正文",
   "nav.label": "主导航",
@@ -105,6 +105,14 @@
   "f.online.desc": "你玩过的谱面的星级、PP 与排行榜。ScoreSaber 排位谱面可拖动滑条，预览任意准确率下的 PP。",
   "f.lang.title": "三种语言",
   "f.lang.desc": "简体中文、English 与日本語，可在设置中切换。",
+  "f.maps.title": "你的谱面库",
+  "f.maps.desc": "本地全部自制谱面一处看全：封面、歌名、曲师与谱师、难度徽标、BPM、时长与音符密度，可搜索、可排序。",
+  "f.mapdetail.title": "一个难度一页",
+  "f.mapdetail.desc": "点开一张谱面就是它自己的页面：每个难度的音符数、NPS、NJS、音符跨度与文件大小，整张谱面的密度曲线，以及你在这个难度上的全部游玩记录。",
+  "f.mappreview.title": "直接在 3D 里看谱面",
+  "f.mappreview.desc": "不需要回放记录，把单个难度交给 3D 组件看方块到底在哪——整张谱面一次交给它，切难度不用等。两种卡片都能全屏。",
+  "f.autofill.title": "删掉的谱面自动补回来",
+  "f.autofill.desc": "谱面删了、回放还在，一样打得开：SaberLab 会把这张谱面重新取回——自己删掉的自制谱面从 BeatSaver 取，游戏自带曲目从社区维护的游戏曲目库取。付费 DLC 曲目没有任何公开来源，会如实告诉你。",
 
   "download.title": "获取 SaberLab",
   "download.body": "Windows 安装包已包含运行所需的一切：解压后运行 SaberLab.exe 即可。",

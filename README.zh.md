@@ -38,6 +38,10 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 </a>
 </p>
 
+<p>
+<a href="https://zircon10086.github.io/SaberLab/"><b>项目网站 →</b></a>
+</p>
+
 <!-- 界面预览（真实截图） -->
 
 <p>
@@ -86,7 +90,7 @@ SaberLab 帮你找到分数究竟丢在哪里——全部在本地完成。
 
 | 文件 | 说明 | 大小 |
 | --- | --- | --- |
-| [SaberLab-v2.2.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.2.0/SaberLab-v2.2.0-win64.zip) | **用户版**：内置全部依赖（Python 运行时 + chro 3D 查看器），解压双击即用 | ~45 MB |
+| [SaberLab-v2.3.0-win64.zip](https://github.com/Zircon10086/SaberLab/releases/download/v2.3.0/SaberLab-v2.3.0-win64.zip) | **用户版**：内置全部依赖（Python 运行时 + chro 3D 查看器），解压双击即用 | ~45 MB |
 | [源码（saberlab-src）](https://github.com/Zircon10086/SaberLab) | **开发者版**：仓库源码，按下方「从源码构建」自行安装依赖 | — |
 
 > 更早版本见 [Releases 页面](https://github.com/Zircon10086/SaberLab/releases)。
