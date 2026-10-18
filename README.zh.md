@@ -197,7 +197,7 @@ SaberLab 本体以 **[GPL-3.0-or-later](LICENSE)**  发布。
 
 ## AI 使用声明
 
-本项目在开发过程中使用了 **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** 智能代理进行辅助。
+本项目在开发过程中使用了 **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** 和 Claude Code 进行辅助。
 
 ### AI 负责的部分
 * **代码编写**：利用 DeepSeek Harness，Claude Code 辅助生成基础样板代码、常规功能实现以及局部代码编写。
